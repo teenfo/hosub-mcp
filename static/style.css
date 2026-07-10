@@ -1,0 +1,183 @@
+:root {
+  --bg: #f5f6f8;
+  --card: #ffffff;
+  --card-border: #e3e6ea;
+  --text: #1c2126;
+  --muted: #6b7480;
+  --accent: #3b6cff;
+  --ok: #1a9e57;
+  --warn: #d98a00;
+  --err: #d93a3a;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171b;
+    --card: #1c2025;
+    --card-border: #2b313a;
+    --text: #e6e9ee;
+    --muted: #8b95a1;
+    --accent: #5b86ff;
+    --ok: #35c47f;
+    --warn: #eba62f;
+    --err: #f16b6b;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans KR", sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+header.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--card-border);
+  background: var(--card);
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+header.topbar h1 {
+  font-size: 17px;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+header.topbar .brand { cursor: pointer; user-select: none; }
+header.topbar .meta { color: var(--muted); font-size: 13px; }
+header.topbar a { color: var(--muted); font-size: 13px; text-decoration: none; }
+header.topbar a:hover { color: var(--accent); }
+
+main.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  padding: 20px 24px;
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  padding: 16px 18px;
+  overflow: hidden;
+}
+.card.wide { grid-column: 1 / -1; }
+
+.card h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 0 0 12px;
+  font-weight: 600;
+}
+
+.metric-row { display: flex; gap: 18px; flex-wrap: wrap; }
+.metric { flex: 1; min-width: 90px; }
+.metric .value { font-size: 24px; font-weight: 650; letter-spacing: -0.02em; }
+.metric .label { font-size: 12px; color: var(--muted); }
+
+.bar {
+  height: 8px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--muted) 22%, transparent);
+  overflow: hidden;
+  margin-top: 6px;
+}
+.bar > span { display: block; height: 100%; background: var(--accent); }
+.bar.warn > span { background: var(--warn); }
+.bar.err > span { background: var(--err); }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--card-border); }
+th { color: var(--muted); font-weight: 600; }
+td.mono, .mono { font-family: var(--mono); font-size: 12px; }
+.scroll { overflow-x: auto; }
+
+.badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.badge.err { background: color-mix(in srgb, var(--err) 18%, transparent); color: var(--err); }
+.badge.warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.badge.muted { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+
+.empty { color: var(--muted); font-size: 13px; padding: 8px 0; }
+.placeholder {
+  border: 1px dashed var(--card-border);
+  border-radius: 8px;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* 로그인 */
+.login-wrap {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+.login-box {
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 32px 28px;
+  width: 100%;
+  max-width: 340px;
+}
+.login-box h1 { font-size: 18px; margin: 0 0 4px; }
+.login-box p { color: var(--muted); font-size: 13px; margin: 0 0 20px; }
+.login-box input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+}
+.login-box button {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.login-box .error { color: var(--err); font-size: 13px; margin-top: 10px; display: none; }
+.login-box .error.show { display: block; }
+
+/* 이스터에그 훅: 활성화 시 살짝 흔들림 */
+body.hosub-party header.topbar h1 { animation: wobble 0.6s ease-in-out infinite; }
+@keyframes wobble {
+  0%, 100% { transform: rotate(0deg); }
+  25% { transform: rotate(-3deg); }
+  75% { transform: rotate(3deg); }
+}

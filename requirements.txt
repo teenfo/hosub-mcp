@@ -1,0 +1,6 @@
+mcp>=1.16,<2
+uvicorn>=0.30
+starlette>=0.37
+itsdangerous>=2.1
+PyYAML>=6
+psutil>=5.9

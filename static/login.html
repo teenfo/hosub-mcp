@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hosub 대시보드 로그인</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="login-wrap">
+    <form class="login-box" method="post" action="/login">
+      <h1>hosub 대시보드</h1>
+      <p>서버 모니터링 대시보드에 접속하려면 비밀번호를 입력하세요.</p>
+      <input type="password" name="password" placeholder="비밀번호" autofocus autocomplete="current-password" />
+      <button type="submit">로그인</button>
+      <div class="error" id="err">비밀번호가 올바르지 않습니다.</div>
+    </form>
+  </div>
+  <script src="/static/login.js"></script>
+</body>
+</html>
