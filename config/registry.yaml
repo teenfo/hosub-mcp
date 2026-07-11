@@ -3,38 +3,37 @@
 # 이 파일은 "안전한 기본 경로" 도구들이 다룰 수 있는 대상 목록이다.
 # 변경은 반드시 Git PR 리뷰를 거쳐 반영한다 (권한 변경 이력 감사 목적).
 #
-# 주의: run_command / write_file 같은 서버 전체 제어 도구는 이 레지스트리와
-# 무관하게 임의 명령/경로를 다룰 수 있다. 이 파일은 restart_service /
-# read_service_logs / deploy_service / run_script / run_backup 에만 적용된다.
+# 주의: run_command / write_file / read_file / list_directory 같은 서버 전체
+# 제어 도구는 이 레지스트리와 무관하게 임의 명령/경로를 다룰 수 있다. 이 파일은
+# restart_service / read_service_logs / deploy_service / run_script / run_backup
+# 에만 적용된다.
+#
+# 현재 서버는 기존 서비스를 정리한 초기 상태다. 아래는 비어 있으며(또는 예시 주석),
+# 서비스를 다시 올릴 때마다 해당 항목을 추가한다.
 
-services:
-  bcl-portal:
-    unit: bcl-portal.service
-    description: "BCL Portal 웹 서비스 (FastAPI)"
-    deploy:
-      workdir: /opt/bcl-portal
-      steps:
-        - ["git", "pull", "--ff-only"]
-        - ["docker", "compose", "up", "-d", "--build"]
-      restart_after: false
-      timeout_seconds: 900
-  ollama:
-    unit: ollama.service
-    description: "Ollama LLM 런타임 (qwen2.5:14b 등)"
+services: {}
+  # 예시) 서비스를 올린 뒤 아래 형태로 추가:
+  # bcl-portal:
+  #   unit: bcl-portal.service
+  #   description: "BCL Portal 웹 서비스 (FastAPI)"
+  #   deploy:                      # deploy_service 를 쓰려면 필요 (없으면 배포 거부)
+  #     workdir: /opt/bcl-portal
+  #     steps:                     # argv 리스트만 허용 — 셸 문자열 금지
+  #       - ["git", "pull", "--ff-only"]
+  #       - ["docker", "compose", "up", "-d", "--build"]
+  #     restart_after: false
+  #     timeout_seconds: 900
+  # ollama:
+  #   unit: ollama.service
+  #   description: "Ollama LLM 런타임"
 
-scripts:
-  daily_backup:
-    path: /opt/scripts/backup_db.sh
-    description: "DB 전체 백업"
-    timeout_seconds: 1800
-  cleanup_logs:
-    path: /opt/scripts/cleanup_logs.sh
-    description: "오래된 로그 정리"
-    timeout_seconds: 300
-  ddns_refresh:
-    path: /opt/scripts/cloudflare_ddns.sh
-    description: "Cloudflare DDNS 갱신"
-    timeout_seconds: 120
+scripts: {}
+  # 예시) 화이트리스트 스크립트를 배치한 뒤 아래 형태로 추가:
+  # daily_backup:
+  #   path: /opt/scripts/backup_db.sh
+  #   description: "DB 전체 백업"
+  #   timeout_seconds: 1800
 
-# run_backup 도구가 위임하는 스크립트 이름 (scripts 에 존재해야 함)
-backup_script: daily_backup
+# run_backup 도구가 위임하는 스크립트 이름 (scripts 에 존재해야 함).
+# 백업 스크립트를 등록하기 전까지는 주석 처리해 둔다.
+# backup_script: daily_backup
