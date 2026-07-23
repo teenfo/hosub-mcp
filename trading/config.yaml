@@ -31,6 +31,9 @@ discovery:
   max_symbols: 0                # 0 = 전종목 (테스트 시 소수로 제한)
   auto_watch: true              # 발굴 상위 종목을 감시목록에 자동 편입
   auto_watch_n: 5               # 자동 편입 수 (기존 auto 항목은 교체됨)
+  # ETF·ETN·리츠·채권형 등 비보통주 제외 (이름 기반). 아래 비우면 기본값 사용.
+  # exclude_keywords: [리츠, 스팩, ETN, ETF, 레버리지, 인버스, 선물, 채권, 국채, 금리, 액티브, 커버드콜, 배당, TR, 합성]
+  # exclude_prefixes: [KODEX, TIGER, KOSEF, ARIRANG, HANARO, TIMEFOLIO, KOACT, TREX, PLUS, RISE, ACE, SOL, KBSTAR]
 
 # 전종목 피처 데이터셋 파일 내보내기 (외부 스케줄러/분석기가 소비)
 export:

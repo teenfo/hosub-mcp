@@ -63,6 +63,35 @@ def parse_stock_list(raw: dict) -> list[dict]:
     return out
 
 
+# ETF·ETN·리츠·스팩·채권형 등 '일반 보통주가 아닌' 종목 판별용 기본값.
+# config.yaml discovery.exclude_keywords / suffixes / prefixes 로 덮어쓸 수 있다.
+# 주의: '리츠'는 부분일치로 두면 '메리츠금융지주'가 오탐되므로 접미사로만 본다.
+_DEFAULT_EXCLUDE_KEYWORDS = [
+    "스팩", "ETN", "ETF", "레버리지", "인버스", "선물", "채권", "국채",
+    "금리", "액티브", "커버드콜",
+]
+_DEFAULT_EXCLUDE_SUFFIXES = ["리츠"]
+_DEFAULT_EXCLUDE_PREFIXES = [
+    "KODEX", "TIGER", "KOSEF", "ARIRANG", "HANARO", "TIMEFOLIO", "KOACT",
+    "TREX", "PLUS", "RISE", "ACE", "SOL", "KBSTAR", "히어로즈", "마이다스",
+]
+
+
+def is_excluded(name: str, cfg: dict) -> bool:
+    """ETF/ETN/리츠/채권형 등 발굴 대상에서 뺄 종목이면 True."""
+    n = (name or "").upper().replace(" ", "")
+    for kw in cfg.get("exclude_keywords", _DEFAULT_EXCLUDE_KEYWORDS):
+        if kw.upper() in n:
+            return True
+    for sf in cfg.get("exclude_suffixes", _DEFAULT_EXCLUDE_SUFFIXES):
+        if n.endswith(sf.upper()):
+            return True
+    for pf in cfg.get("exclude_prefixes", _DEFAULT_EXCLUDE_PREFIXES):
+        if n.startswith(pf.upper()):
+            return True
+    return False
+
+
 def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:
     """일봉 → (점수, 사유). 유동성 게이트 미통과·60행 미만이면 (0, [])."""
     f = compute_features(df, cfg)
@@ -134,8 +163,13 @@ class Discovery:
                 f = compute_features(df, cfg)
                 if f is None:
                     continue
-                feature_rows.append({"code": s["code"], "name": s["name"], **f})
-                if f["liquid"] and f["score"] >= cfg.get("min_score", 2):
+                etf = is_excluded(s["name"], cfg)
+                # CSV 에는 전종목 유지하되 etf_etn 플래그를 실어 스케줄러도 걸러낼 수 있게 함
+                feature_rows.append(
+                    {"code": s["code"], "name": s["name"], **f, "etf_etn": int(etf)}
+                )
+                # 발굴 후보(카드·자동편입)에서는 ETF/ETN/리츠/채권형 제외
+                if not etf and f["liquid"] and f["score"] >= cfg.get("min_score", 2):
                     scored.append(
                         {"code": s["code"], "name": s["name"],
                          "close": f["close"], "score": f["score"],
