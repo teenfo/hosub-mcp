@@ -85,12 +85,12 @@ async def refresh() -> int:
     from ..discovery import parse_stock_list  # 지연 임포트 (순환 방지)
     from ..kiwoom.client import client
 
-    try:
-        raw = await client.stock_list("000")  # 000 = 전체(코스피+코스닥)
-    except Exception as e:  # noqa: BLE001
-        log.warning("종목 마스터 갱신 실패: %s", e)
-        return 0
-    entries = parse_stock_list(raw)
+    entries: list[dict] = []
+    for mkt in ("0", "10"):  # 0=코스피, 10=코스닥
+        try:
+            entries += parse_stock_list(await client.stock_list(mkt))
+        except Exception as e:  # noqa: BLE001
+            log.warning("종목 마스터 갱신 실패 (mrkt=%s): %s", mkt, e)
     n = upsert(entries)
     log.info("종목 마스터 갱신: %d 종목", n)
     return n
