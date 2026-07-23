@@ -58,14 +58,28 @@ rules:
     range_wait_until: "10:00" # 첫 1시간 범위 형성 대기
     trail_long_pct: 8.0
     trail_short_pct: 4.0
+  # 반등 페이드 — 딥리서치 검증 결론(하락장 단타의 추세 정렬 방향)을 코드화한 규칙
   bounce_fade:
     enabled: true
-    rsi_hot: 60               # 분봉 RSI 이 값 이상에서 반등 소진 간주
+    rsi_hot: 60               # 반등 과열 하한 (딥리서치: RSI 60~70 도달이 매도 기회)
+    rsi_max: 100              # 반등 과열 상한 (필요 시 70 으로 좁힘)
     lookback: 30              # 저점 갱신 구조 확인용 봉 수
+    candle_confirm: reversal  # reversal=하락장악/유성 확인 / any=단순 음봉
+    atr_stop_mult: 0.5        # 손절 = 반등고점 + 0.5×ATR (스탑 헌팅 회피, 딥리서치 6단계)
+    atr_period: 14
+    require_downtrend: true   # 1단계 추세 게이트: 일봉 하락(역배열/장기선 하회)일 때만
+    require_volume_dry: false # 반등 거래량 소진 조건(옵션)
   breakdown_retest:
     enabled: true
     support_lookback: 60      # 지지선 산출용 봉 수
     retest_tolerance_pct: 0.3
+    atr_stop_mult: 0.5        # 손절 = 지지선 + 0.5×ATR
+    atr_period: 14
+    require_downtrend: true   # 1단계 추세 게이트
+    # 하방 이탈 거래량 확인 — 딥리서치에서 '평균 120% 필터'는 근거 부족으로 기각됨.
+    # 하드코딩하지 않고 선택 사용(기본 OFF). 켜면 vol_confirm_ratio 로 강도 조절.
+    require_volume: false
+    vol_confirm_ratio: 1.2
 
 costs:
   commission_pct: 0.015       # 위탁 수수료(편도)

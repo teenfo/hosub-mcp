@@ -167,6 +167,28 @@ async def api_signals(_=Depends(require_auth)):
     return engine.last_signals
 
 
+@app.get("/api/backtest/{symbol}")
+async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
+    """저장된 봉으로 규칙 백테스트(비용 반영). 딥리서치 원칙 '내 데이터로 검증'.
+    tf=1m 분봉(축적분) 또는 1d 일봉. 분봉 다일치 축적 전에는 표본이 얇다."""
+    from .backtest import runner
+
+    df = store.load_bars(symbol, tf if tf in ("1m", "1d") else "1m", limit=50000)
+    if df.empty:
+        return {"ok": False, "symbol": symbol, "error": "저장된 봉이 없습니다"}
+    days = int(df.index.normalize().nunique())
+    result = runner.run(symbol, df)
+    trades = [
+        {"rule": t.rule, "side": t.side, "entry": round(t.entry, 2),
+         "exit": None if t.exit is None else round(t.exit, 2),
+         "reason": t.exit_reason, "entry_ts": str(t.entry_ts),
+         "pnl_pct": round(t.pnl_pct(settings.COSTS), 3)}
+        for t in result.trades[-100:]
+    ]
+    return {"ok": True, "symbol": symbol, "tf": tf, "days": days,
+            "stats": result.stats(), "trades": trades}
+
+
 _account_cache: dict = {"ts": 0.0, "data": None}
 
 
