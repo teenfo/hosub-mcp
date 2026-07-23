@@ -20,9 +20,10 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import settings
+from . import export, settings
 from .data import store
 from .data.collector import parse_chart_response
+from .features import compute_features
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -58,31 +59,11 @@ def parse_stock_list(raw: dict) -> list[dict]:
 
 
 def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:
-    """일봉 DataFrame(오름차순, 최소 60행) → (점수, 사유 목록). 규칙별 1점."""
-    if len(df) < 60:
+    """일봉 → (점수, 사유). 유동성 게이트 미통과·60행 미만이면 (0, [])."""
+    f = compute_features(df, cfg)
+    if f is None or not f["liquid"]:
         return 0.0, []
-    last = df.iloc[-1]
-    reasons: list[str] = []
-    # 유동성/가격 필터
-    if last.close < cfg.get("min_price", 1_000):
-        return 0.0, []
-    if last.close * last.volume < cfg.get("min_trade_value_krw", 1_000_000_000):
-        return 0.0, []
-    # 1) 거래량 급증
-    avg20 = df["volume"].iloc[-21:-1].mean()
-    if avg20 > 0 and last.volume >= cfg.get("vol_surge_ratio", 3.0) * avg20:
-        reasons.append(f"거래량 20일평균 {last.volume / avg20:.1f}배")
-    # 2) 신고가 근접
-    high60 = df["high"].iloc[-60:].max()
-    if high60 > 0 and last.close >= high60 * cfg.get("near_high_ratio", 0.97):
-        reasons.append(f"60일 고가({high60:,.0f}) 대비 {last.close / high60 * 100:.0f}%")
-    # 3) 정배열 신규 형성 (최근 5일 내)
-    c = df["close"]
-    ma5, ma20, ma60 = c.rolling(5).mean(), c.rolling(20).mean(), c.rolling(60).mean()
-    aligned = (ma5 > ma20) & (ma20 > ma60)
-    if bool(aligned.iloc[-1]) and not bool(aligned.iloc[-6:-1].all()):
-        reasons.append("이평 정배열 신규 형성")
-    return float(len(reasons)), reasons
+    return f["score"], f["reasons"]
 
 
 class Discovery:
@@ -129,7 +110,8 @@ class Discovery:
                 self.progress = "종목 리스트 조회 실패 — ka10099 요청 필드 검증 필요"
                 return 0
 
-            scored: list[dict] = []
+            feature_rows: list[dict] = []   # 전종목 피처 (파일 내보내기용)
+            scored: list[dict] = []         # 발굴 후보 (유동성 게이트 통과 + 점수)
             for i, s in enumerate(symbols):
                 if i % 100 == 0:
                     self.progress = f"수집 중 {i}/{len(symbols)}"
@@ -140,16 +122,25 @@ class Discovery:
                 if df.empty:
                     continue
                 store.upsert_bars(s["code"], "1d", df.tail(80))
-                score, reasons = screen_daily(df, cfg)
-                if score >= cfg.get("min_score", 2):
+                f = compute_features(df, cfg)
+                if f is None:
+                    continue
+                feature_rows.append({"code": s["code"], "name": s["name"], **f})
+                if f["liquid"] and f["score"] >= cfg.get("min_score", 2):
                     scored.append(
                         {"code": s["code"], "name": s["name"],
-                         "close": int(df.iloc[-1].close), "score": score,
-                         "reasons": reasons}
+                         "close": f["close"], "score": f["score"],
+                         "reasons": f["reasons"]}
                     )
             scored.sort(key=lambda x: -x["score"])
             top = scored[: cfg.get("top_n", 20)]
             today = datetime.now(KST).date().isoformat()
+            # 전종목 피처를 파일로 내보내 외부 스케줄러/분석기가 소비하게 한다
+            if settings.CONFIG.get("export", {}).get("enabled", True) and feature_rows:
+                try:
+                    export.write_dataset(today, feature_rows)
+                except Exception:  # noqa: BLE001 - 내보내기 실패는 발굴 자체를 막지 않음
+                    log.exception("데이터셋 내보내기 실패")
             with _conn() as conn:
                 conn.execute("DELETE FROM picks WHERE date=?", (today,))
                 conn.executemany(

@@ -32,6 +32,11 @@ discovery:
   auto_watch: true              # 발굴 상위 종목을 감시목록에 자동 편입
   auto_watch_n: 5               # 자동 편입 수 (기존 auto 항목은 교체됨)
 
+# 전종목 피처 데이터셋 파일 내보내기 (외부 스케줄러/분석기가 소비)
+export:
+  enabled: true
+  keep_days: 30                 # datasets/<날짜>/ 보관 일수
+
 risk:
   risk_per_trade_pct: 0.5     # 1회 손절 시 계좌 대비 최대 손실 %
   daily_loss_limit_pct: 2.0   # 일일 누적 손실 한도 % (도달 시 신규 신호 차단)
