@@ -160,6 +160,58 @@ export default {
       btOut,
     );
 
+    // --- 자동 백테스트 리포트 (분봉 축적분, 평일 장 마감 후 자동) ---
+    const rptOut = el("div", { class: "small" });
+    const rptRun = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "지금 실행");
+    const loadBacktestReport = async () => {
+      let d;
+      try { d = await fetchJSON("/api/trading/backtest/report/latest"); } catch (e) { return; }
+      if (!changed("btreport", d)) return;
+      rptOut.innerHTML = "";
+      if (!d.run_ts) {
+        rptOut.appendChild(el("div", { class: "text-secondary" },
+          "아직 리포트 없음 — 분봉이 최소 3일 이상 쌓이면 평일 장 마감 후 자동 생성됩니다."));
+        return;
+      }
+      const s = d.summary || {};
+      rptOut.append(
+        el("div", { class: "text-secondary mb-1" }, `최근 실행 ${d.run_ts.replace("T", " ")} · 대상 ${s.symbols || 0}종목 · 체결 ${s.trades || 0}건`),
+      );
+      if (s.trades) {
+        rptOut.append(el("div", { class: "mb-2" }, `전체 승률 ${s.win_rate}% · 평균손익 ${s.avg_pnl_pct}% · 규칙별 ` +
+          Object.entries(s.by_rule || {}).map(([k, v]) => `${k} ${v}`).join(" · ")));
+        const tbl = el("table", { class: "table table-sm align-middle mb-0 small" });
+        tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>일수</th><th>체결</th><th>승률</th><th>평균손익%</th><th>PF</th><th>누적%</th><th>MDD%</th></tr>" }));
+        const tb = el("tbody");
+        for (const r of d.symbols) {
+          tb.appendChild(el("tr", {
+            html: `<td>${r.symbol}</td><td>${r.days}</td><td>${r.trades || 0}</td>` +
+              `<td>${r.win_rate ?? "-"}</td><td>${r.avg_pnl_pct ?? "-"}</td><td>${r.profit_factor ?? "-"}</td>` +
+              `<td>${r.total_return_pct ?? "-"}</td><td>${r.max_drawdown_pct ?? "-"}</td>`,
+          }));
+        }
+        tbl.appendChild(tb);
+        rptOut.appendChild(el("div", { class: "table-responsive" }, tbl));
+      } else {
+        rptOut.appendChild(el("div", { class: "text-secondary" }, "체결 신호 없음 (분봉 축적 진행 중 — 표본이 늘어나면 결과가 나타납니다)"));
+      }
+    };
+    rptRun.onclick = async () => {
+      rptRun.disabled = true; rptOut.textContent = "실행 중… (전 종목 백테스트, 수십 초 소요)";
+      try { await postJSON("/api/trading/backtest/report/run"); _memo["btreport"] = undefined; await loadBacktestReport(); }
+      catch (e) { rptOut.textContent = "실패: " + e.message; }
+      finally { rptRun.disabled = false; }
+    };
+    backtestC.body.append(
+      el("hr", { class: "my-3" }),
+      el("div", { class: "d-flex align-items-center gap-2 mb-2" }, [
+        el("span", { class: "fw-semibold small", html: '<i class="bi bi-graph-up-arrow"></i> 자동 백테스트 리포트' }),
+        el("span", { class: "text-secondary small" }, "분봉 축적분 · 평일 장 마감 후 자동"),
+        rptRun,
+      ]),
+      rptOut,
+    );
+
     // --- 분석 보고 리스트 + 공용 모달 ---
     const rBody = el("div");
     reportC.body.append(
@@ -736,10 +788,10 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
     ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); }, 30_000));
-    ctx.addTimer(setInterval(loadReport, 300_000));
+    ctx.addTimer(setInterval(() => { loadReport(); loadBacktestReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
 };
