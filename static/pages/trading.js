@@ -852,11 +852,52 @@ export default {
         el("span", { class: "text-secondary small" },
           d.date ? `기준일 ${d.date} · ${d.progress || ""}` : "아직 분석 결과 없음 (평일 17:30 자동 실행)"),
       ]));
+      // --- 시장 국면(breadth) + 상대강도 ---
+      const mk = d.market || {};
+      if (mk.regime) {
+        const tone = mk.regime === "강세" ? "danger" : mk.regime === "약세" ? "primary" : "secondary";
+        discoveryC.body.appendChild(el("div", { class: "mb-2" }, [
+          el("span", { class: "small text-secondary me-1" }, "시장 국면:"),
+          badge(mk.regime, tone),
+          el("span", { class: "small text-secondary ms-2" },
+            `60이평 상회 ${mk.breadth_ma60}% · 20이평 ${mk.breadth_ma20}% · 중앙 20일수익률 ${mk.median_ret20}% (${mk.analyzed}종목)`),
+        ]));
+      }
       if (d.dataset) {
         discoveryC.body.appendChild(el("div", { class: "text-secondary small mb-2" },
           `📄 데이터셋: ${d.dataset.symbol_count}종목 피처 → ${d.dataset.features_file} (스케줄러 분석용)`));
       }
+      // --- 하락(숏) 후보 — 약세장 반등 페이드용 ---
+      if ((mk.bearish_top || []).length) {
+        discoveryC.body.appendChild(el("div", { class: "small fw-bold text-primary mt-1" },
+          `📉 하락(숏) 후보 ${mk.bearish_count}종목 — 역배열·저점근접·60이평 하회 (반등 페이드용)`));
+        const bt = el("table", { class: "table table-sm align-middle mb-2 small" });
+        bt.appendChild(el("thead", { html: "<tr><th>종목</th><th>종가</th><th>하락점수</th><th>상대강도</th><th></th></tr>" }));
+        const btb = el("tbody");
+        for (const p of mk.bearish_top.slice(0, 8)) {
+          const link = el("a", { href: "#", class: "text-decoration-none" }, `${p.name} (${p.code})`);
+          link.onclick = (e) => { e.preventDefault(); openStockChart(p.code, p.name); };
+          const addCell = watch[p.code] ? badge("감시중", "success") : (() => {
+            const a = el("button", { class: "btn btn-sm btn-outline-primary py-0" }, "감시 추가");
+            a.onclick = async () => {
+              a.disabled = true;
+              try { await postJSON("/api/trading/watchlist", { code: p.code, name: p.name }); a.textContent = "추가됨"; a.classList.replace("btn-outline-primary", "btn-success"); loadWatch(); loadStatus(); }
+              catch (e) { alert("실패: " + e.message); a.disabled = false; }
+            };
+            return a;
+          })();
+          btb.appendChild(el("tr", {}, [
+            el("td", {}, link), el("td", {}, fmt(p.close)),
+            el("td", {}, String(p.bearish_score)),
+            el("td", { class: p.rs_20 < 0 ? "text-primary" : "text-secondary" }, `${p.rs_20}%p`),
+            el("td", {}, addCell),
+          ]));
+        }
+        bt.appendChild(btb);
+        discoveryC.body.appendChild(el("div", { class: "table-responsive" }, bt));
+      }
       if (!(d.picks || []).length) return;
+      discoveryC.body.appendChild(el("div", { class: "small fw-bold text-danger mt-1" }, "📈 상승(롱) 발굴"));
       const tbl = el("table", { class: "table table-sm align-middle mb-0" });
       tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>종가</th><th>점수</th><th>발굴 사유</th><th></th></tr>" }));
       const tb = el("tbody");

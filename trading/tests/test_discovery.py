@@ -125,3 +125,39 @@ def test_is_excluded_reit_suffix_not_substring():
     assert discovery.is_excluded("롯데리츠", cfg)          # 접미사 리츠 → 제외
     assert not discovery.is_excluded("메리츠금융지주", cfg)  # 중간 '리츠' → 유지
     assert not discovery.is_excluded("메리츠증권", cfg)
+
+
+def test_compute_features_extended_keys():
+    import numpy as np
+    from app.features import compute_features
+    closes = list(np.linspace(9000, 10000, 69)) + [10500]
+    volumes = [200_000] * 69 + [1_000_000]
+    f = compute_features(_daily(closes, volumes), CFG)
+    for k in ("atr_pct", "disparity20", "range20_pct", "up_streak",
+              "above_ma20", "above_ma60", "bearish_align", "near_low60_pct",
+              "vcp", "ret_120d"):
+        assert k in f, k
+    assert f["above_ma60"] == 1 and f["bearish_align"] == 0   # 상승 추세
+
+
+def test_compute_market_regime_and_rs():
+    # 3종목: 두 개 강세(60이평 상회), 하나 역배열 약세
+    rows = [
+        {"code": "1", "name": "강1", "liquid": 1, "etf_etn": 0, "ret_20d": 10,
+         "above_ma60": 1, "above_ma20": 1, "close": 100, "ma60": 90,
+         "bearish_align": 0, "near_low60_pct": 130},
+        {"code": "2", "name": "강2", "liquid": 1, "etf_etn": 0, "ret_20d": 5,
+         "above_ma60": 1, "above_ma20": 1, "close": 100, "ma60": 95,
+         "bearish_align": 0, "near_low60_pct": 120},
+        {"code": "3", "name": "약1", "liquid": 1, "etf_etn": 0, "ret_20d": -8,
+         "above_ma60": 0, "above_ma20": 0, "close": 80, "ma60": 100,
+         "bearish_align": 1, "near_low60_pct": 102},
+    ]
+    m = discovery.compute_market(rows, {"bearish_min_score": 2})
+    assert m["breadth_ma60"] == round(200 / 3, 1)     # 3중 2개 상회
+    assert m["regime"] in ("강세", "중립", "약세")
+    # RS = 개별 ret - 중앙값(5)
+    assert rows[0]["rs_20"] == 5.0 and rows[2]["rs_20"] == -13.0
+    # 약세 종목은 bearish_score 3 (역배열+60이평하회+저점근접)
+    assert rows[2]["bearish_score"] == 3
+    assert m["bearish_count"] == 1 and m["bearish_top"][0]["code"] == "3"

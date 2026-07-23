@@ -30,15 +30,29 @@ COLUMN_DOC = {
     "ma_aligned": "정배열(5>20>60) 여부(1/0)",
     "ma_aligned_new": "정배열 최근5일내 신규형성(1/0)",
     "ret_5d": "5일 수익률(%)", "ret_20d": "20일 수익률(%)", "ret_60d": "60일 수익률(%)",
-    "rsi14": "RSI(14)", "liquid": "가격·거래대금 게이트 통과(1/0)",
+    "ret_120d": "120일 수익률(%)",
+    "rs_20": "시장(전종목 중앙값) 대비 20일 상대강도(%p) — 양수면 시장 대비 강세",
+    "rsi14": "RSI(14)",
+    "atr_pct": "ATR(14)/종가(%) — 변동성 국면",
+    "disparity20": "20일 이격도(종가/20이평 ×100)",
+    "disparity60": "60일 이격도(종가/60이평 ×100)",
+    "range20_pct": "20일 변동폭%((고-저)/종가) — 작을수록 베이스 수렴",
+    "up_streak": "연속 봉(+n 양봉 / -n 음봉)",
+    "above_ma20": "20이평 상회(1/0)", "above_ma60": "60이평 상회(1/0)",
+    "bearish_align": "역배열(5<20<60) 여부(1/0) — 하락 추세",
+    "near_low60_pct": "종가/60일최저가(%) — 낮을수록 저점 근접",
+    "vcp": "거래량 마름→터짐(VCP형) 여부(1/0)",
+    "bearish_score": "하락(숏) 후보 점수(0~3) — 역배열·저점근접·60이평 하회",
+    "liquid": "가격·거래대금 게이트 통과(1/0)",
     "score": "발굴 3규칙 충족 수(0~3)",
     "etf_etn": "ETF·ETN·리츠·채권형 등 비보통주(1/0) — 1이면 분석 대상에서 제외 권장",
 }
 _ORDER = list(COLUMN_DOC.keys())
 
 
-def write_dataset(date: str, rows: list[dict]) -> dict:
-    """피처 행 목록 → <date>/features.csv + latest.json. 반환: 매니페스트."""
+def write_dataset(date: str, rows: list[dict], market: dict | None = None) -> dict:
+    """피처 행 목록 → <date>/features.csv + latest.json. 반환: 매니페스트.
+    market: 시장 국면(breadth)·상대강도·하락 후보 요약(매니페스트에 실림)."""
     DATASET_DIR.mkdir(parents=True, exist_ok=True)
     day_dir = DATASET_DIR / date
     day_dir.mkdir(exist_ok=True)
@@ -55,6 +69,7 @@ def write_dataset(date: str, rows: list[dict]) -> dict:
         "generated_at": datetime.now(UTC).isoformat(),
         "features_file": str(features_path),
         "symbol_count": int(len(df)),
+        "market": market or {},
         "columns": COLUMN_DOC,
         "bars_db": str(Path(settings.DATA_DIR) / "market.db"),
         "bars_query_example": (

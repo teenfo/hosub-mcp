@@ -6,7 +6,7 @@
 import numpy as np
 import pandas as pd
 
-from .signals.indicators import rsi
+from .signals.indicators import atr, rsi
 
 
 def _r(v: float, n: int = 2) -> float:
@@ -44,6 +44,31 @@ def compute_features(df: pd.DataFrame, cfg: dict | None = None) -> dict | None:
     vol_ratio = close_ret(v.iloc[-1], avg20)
     rsi14 = float(rsi(c, 14).iloc[-1])
 
+    # --- 확장 피처 ---
+    atr14 = float(atr(df, 14).iloc[-1])
+    atr_pct = atr14 / close * 100 if close else 0.0          # 변동성 국면(가격 대비 ATR%)
+    disparity20 = close / ma20 * 100 if ma20 else 0.0        # 20일 이격도
+    disparity60 = close / ma60 * 100 if ma60 else 0.0        # 60일 이격도
+    range20 = float(df["high"].iloc[-20:].max() - df["low"].iloc[-20:].min())
+    range20_pct = range20 / close * 100 if close else 0.0    # 20일 변동폭%(작을수록 베이스 수렴)
+    bearish_align = ma5 < ma20 < ma60                        # 역배열(하락 추세)
+    near_low60_pct = close / low60 * 100 if low60 else 0.0   # 종가/60일최저가(하락·저점 근접)
+    ret_120d = close_ret_pct(close, c, 120)
+    # 연속봉: +n 양봉 / -n 음봉 (오늘 기준 연속)
+    up_streak = 0
+    for d in reversed(c.diff().tolist()):
+        if d is None or not np.isfinite(d) or d == 0:
+            break
+        if d > 0 and up_streak >= 0:
+            up_streak += 1
+        elif d < 0 and up_streak <= 0:
+            up_streak -= 1
+        else:
+            break
+    # VCP형: 최근 5일 거래량이 20일평균의 70% 미만으로 말랐다가 오늘 2배↑ 터짐
+    vol5 = float(v.iloc[-6:-1].mean())
+    vcp = int(avg20 > 0 and vol5 < 0.7 * avg20 and v.iloc[-1] >= 2 * avg20)
+
     # 발굴 3규칙 (사유 텍스트는 대시보드용)
     reasons: list[str] = []
     if avg20 > 0 and v.iloc[-1] >= cfg.get("vol_surge_ratio", 3.0) * avg20:
@@ -72,7 +97,18 @@ def compute_features(df: pd.DataFrame, cfg: dict | None = None) -> dict | None:
         "ret_5d": _r(close_ret_pct(close, c, 5), 1),
         "ret_20d": _r(close_ret_pct(close, c, 20), 1),
         "ret_60d": _r(close_ret_pct(close, c, 60), 1),
+        "ret_120d": _r(ret_120d, 1),
         "rsi14": _r(rsi14, 1),
+        "atr_pct": _r(atr_pct, 2),
+        "disparity20": _r(disparity20, 1),
+        "disparity60": _r(disparity60, 1),
+        "range20_pct": _r(range20_pct, 1),
+        "up_streak": int(up_streak),
+        "above_ma20": int(close > ma20),
+        "above_ma60": int(close > ma60),
+        "bearish_align": int(bool(bearish_align)),
+        "near_low60_pct": _r(near_low60_pct, 1),
+        "vcp": int(vcp),
         "liquid": int(liquid),
         "score": float(len(reasons)),
         "reasons": reasons,
