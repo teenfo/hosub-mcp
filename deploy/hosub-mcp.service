@@ -1,0 +1,21 @@
+# /etc/systemd/system/hosub-mcp.service
+# 설치: docs/SETUP.md 참고
+[Unit]
+Description=Hosub MCP Server (server control + monitoring dashboard)
+After=network.target
+
+[Service]
+Type=simple
+User=hosub
+Group=hosub
+WorkingDirectory=/opt/hosub-mcp
+EnvironmentFile=/opt/hosub-mcp/.env
+ExecStart=/opt/hosub-mcp/.venv/bin/uvicorn src.asgi:app --host 127.0.0.1 --port 8700
+Restart=on-failure
+RestartSec=3
+
+# 주의: 이 서버는 run_command / restart_service 등에서 sudo 를 사용하므로
+# NoNewPrivileges=true 를 설정하면 안 된다 (sudo 가 막힘).
+
+[Install]
+WantedBy=multi-user.target

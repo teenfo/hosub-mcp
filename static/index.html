@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>hosub 서버 대시보드</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">🖥️ hosub 서버 대시보드</h1>
+    <div style="display:flex; align-items:center; gap:16px;">
+      <span class="meta" id="clock"></span>
+      <a href="/logout">로그아웃</a>
+    </div>
+  </header>
+  <main class="grid" id="grid"></main>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

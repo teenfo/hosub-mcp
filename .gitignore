@@ -1,0 +1,26 @@
+# 환경변수 / 시크릿 (절대 커밋 금지)
+.env
+*.pem
+*_token*
+config/secrets.yaml
+
+# 런타임 데이터 (감사 DB 등)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 에디터/OS
+.DS_Store
+.idea/
+.vscode/
