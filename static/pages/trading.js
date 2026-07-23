@@ -82,8 +82,19 @@ export default {
     const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    const reportC = card("야간 분석 리포트", null, { wide: true, icon: "bi-journal-text" });
-    row.append(status.col, watchC.col, pending.col, scannerC.col, discoveryC.col, reportC.col, chart.col, signals.col);
+    const reportC = card("야간 분석 리포트", null, { icon: "bi-journal-text" });
+    // 레이아웃: 상단(상태|감시목록) → 중단(왼쪽: 승인/스캐너/발굴 스택, 오른쪽: 분석 리포트 세로 구역) → 하단(차트/신호)
+    const leftStack = el("div", { class: "col-12 col-xl-6 d-flex flex-column gap-3" });
+    for (const c of [pending, scannerC, discoveryC]) {
+      const cardEl = c.col.querySelector(".card");
+      cardEl.classList.remove("h-100");
+      leftStack.appendChild(cardEl);
+    }
+    const rightStack = el("div", { class: "col-12 col-xl-6" });
+    const reportCard = reportC.col.querySelector(".card");
+    reportCard.classList.add("h-100");
+    rightStack.appendChild(reportCard);
+    row.append(status.col, watchC.col, leftStack, rightStack, chart.col, signals.col);
 
     // --- 야간 분석 리포트: 스케줄러가 쓴 브리핑을 트레이딩 페이지에서 바로 표시 ---
     const rSel = el("select", { class: "form-select form-select-sm w-auto d-none" });

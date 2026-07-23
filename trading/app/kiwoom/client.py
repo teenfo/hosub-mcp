@@ -6,6 +6,8 @@ TR ID / 경로는 공개 자료 기준 초안이다. 공식 문서(openapi.kiwoo
 """
 import asyncio
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -77,6 +79,9 @@ class KiwoomClient:
         )
 
     async def daily_chart(self, symbol: str, base_date: str = "") -> dict:
+        """일봉차트. base_dt 는 필수 (빈 값이면 1511 입력값 오류) — 기본 오늘(KST)."""
+        if not base_date:
+            base_date = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%d")
         return await self._call(
             PATH_CHART,
             TR_DAILY_CHART,
