@@ -25,13 +25,8 @@
     </div>
     <div class="offcanvas-body flex-column p-0">
       <div class="sidebar-brand d-none d-lg-flex">🖥️ <span>hosub</span></div>
-      <ul class="nav nav-pills flex-column mb-auto px-2" id="sidebar-nav">
-        <li class="nav-item"><a class="nav-link active" href="#panel-system"><i class="bi bi-speedometer2"></i> 대시보드</a></li>
-        <li class="nav-item"><a class="nav-link" href="#panel-services"><i class="bi bi-hdd-stack"></i> 서비스</a></li>
-        <li class="nav-item"><a class="nav-link" href="#panel-jobs"><i class="bi bi-list-task"></i> 잡</a></li>
-        <li class="nav-item"><a class="nav-link" href="#panel-audit"><i class="bi bi-shield-check"></i> 감사 로그</a></li>
-        <li class="nav-item"><a class="nav-link" href="#panel-home"><i class="bi bi-house"></i> 홈</a></li>
-      </ul>
+      <!-- 사이드바 네비는 app.js 가 PAGES 로부터 생성 (페이지 추가 = 파일 1개 + 등록 1줄) -->
+      <ul class="nav nav-pills flex-column mb-auto px-2" id="sidebar-nav"></ul>
       <div class="px-3 py-2 small text-secondary border-top border-secondary-subtle mt-2">
         hosub MCP 대시보드 · 조회 전용
       </div>
@@ -45,7 +40,7 @@
               data-bs-toggle="offcanvas" data-bs-target="#sidebar" aria-label="메뉴">
         <i class="bi bi-list"></i>
       </button>
-      <span class="navbar-brand mb-0 h5 brand-toggle">🖥️ hosub 서버 대시보드</span>
+      <span class="navbar-brand mb-0 h5 brand-toggle" id="page-title">🖥️ hosub 서버 대시보드</span>
       <div class="ms-auto d-flex align-items-center gap-2">
         <span class="text-secondary small d-none d-sm-inline" id="clock"></span>
         <button class="btn btn-outline-secondary btn-sm" id="theme-toggle" title="테마 전환">
@@ -56,7 +51,7 @@
     </nav>
 
     <main class="container-fluid py-3">
-      <div class="row g-3" id="grid"></div>
+      <div id="content"></div>
     </main>
   </div>
 
