@@ -241,6 +241,20 @@ def _agg(rows: list[sqlite3.Row]) -> dict:
     }
 
 
+def realized_today(equity: float) -> dict:
+    """당일(KST) 청산된 포지션의 실현손익 합계 → {krw, pct, trades}.
+    일일 목표·손실 가드의 기준값이 된다(실제 청산 기록이 소스)."""
+    today = datetime.now(KST).date().isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT pnl_krw FROM positions WHERE status='closed' "
+            "AND substr(closed,1,10)=?", (today,)
+        ).fetchall()
+    krw = sum((r["pnl_krw"] or 0) for r in rows)
+    pct = (krw / equity * 100) if equity else 0.0
+    return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows)}
+
+
 def stats() -> dict:
     """청산 완료 포지션 집계: 전체 + 규칙별. 실현손익·기대값·슬리피지."""
     with _conn() as conn:

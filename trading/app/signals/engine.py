@@ -24,6 +24,18 @@ class SignalEngine:
         self._fired: set[tuple[str, str, str]] = set()  # (day, symbol, rule)
         self.last_run: str = ""
         self.last_signals: list[dict] = []
+        self.guard: dict = {}          # 일일 목표·손실 가드 상태 (대시보드 노출)
+
+    def day_guard_status(self) -> dict:
+        """당일 실현손익 + 목표/한도 대비 신규 진입 중단 여부."""
+        from ..trade import ledger
+
+        today = ledger.realized_today(self.equity)
+        target = float(settings.RISK.get("daily_target_pct", 0) or 0)
+        loss = float(settings.RISK.get("daily_loss_limit_pct", 0) or 0)
+        halted, why = risk.day_guard(today["pct"], target, loss)
+        return {**today, "daily_target_pct": target, "daily_loss_limit_pct": loss,
+                "equity": self.equity, "halted": halted, "reason": why}
 
     def _today_df(self, symbol: str):
         df = store.load_bars(symbol, "1m", limit=800)
@@ -71,6 +83,13 @@ class SignalEngine:
     async def run_once(self) -> list[dict]:
         found: list[dict] = []
         day = datetime.now(KST).date().isoformat()
+        # 일일 목표·손실 가드: 목표 도달(이익 확정) 또는 손실 한도 도달 시 신규 진입 중단
+        self.guard = self.day_guard_status()
+        if self.guard["halted"]:
+            self.last_run = datetime.now(KST).isoformat(timespec="seconds")
+            log.info("일일 가드 작동: %s (오늘 %+.2f%%)",
+                     self.guard["reason"], self.guard["pct"])
+            return found
         for symbol, name in settings.WATCHLIST.items():
             await collector.backfill_minutes(symbol)
             df, prev_close = self._today_df(symbol)

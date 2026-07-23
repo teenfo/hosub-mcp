@@ -115,3 +115,41 @@ RISK: dict = CONFIG.get("risk", {})
 RULES: dict = CONFIG.get("rules", {})
 COSTS: dict = CONFIG.get("costs", {})
 INVERSE_ETF: str = str(CONFIG.get("inverse_etf", ""))
+
+# 런타임에 UI 로 바꾸는 리스크 목표는 DATA_DIR 에 영속화(재시작·재배포 후에도 유지).
+RISK_FILE = DATA_DIR / "risk.json"
+
+
+def _load_risk_overrides() -> None:
+    import json
+    if RISK_FILE.exists():
+        try:
+            RISK.update(json.loads(RISK_FILE.read_text()))
+        except (OSError, ValueError):
+            pass
+
+
+def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
+              risk_per_trade_pct=None) -> None:
+    """일일 목표·손실한도·거래당 리스크를 갱신하고 risk.json 에 영속화."""
+    import json
+    ov: dict = {}
+    if RISK_FILE.exists():
+        try:
+            ov = json.loads(RISK_FILE.read_text())
+        except (OSError, ValueError):
+            ov = {}
+    for key, val in (("daily_target_pct", daily_target_pct),
+                     ("daily_loss_limit_pct", daily_loss_limit_pct),
+                     ("risk_per_trade_pct", risk_per_trade_pct)):
+        if val is None:
+            continue
+        f = float(val)
+        if not 0 <= f <= 50:
+            raise ValueError(f"{key} 는 0~50% 범위여야 합니다")
+        ov[key] = f
+        RISK[key] = f
+    RISK_FILE.write_text(json.dumps(ov, ensure_ascii=False))
+
+
+_load_risk_overrides()

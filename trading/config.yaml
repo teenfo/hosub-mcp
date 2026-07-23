@@ -62,7 +62,8 @@ backtest:
 
 risk:
   risk_per_trade_pct: 0.5     # 1회 손절 시 계좌 대비 최대 손실 %
-  daily_loss_limit_pct: 2.0   # 일일 누적 손실 한도 % (도달 시 신규 신호 차단)
+  daily_target_pct: 1.0       # 일일 목표 % (도달 시 이익 확정·신규 진입 중단) — UI에서 변경
+  daily_loss_limit_pct: 2.0   # 일일 누적 손실 한도 % (도달 시 신규 진입 중단) — UI에서 변경
   max_positions: 3
   signal_ttl_min: 10          # 승인 대기 신호 만료(분)
 

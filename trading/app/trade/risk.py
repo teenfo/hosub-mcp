@@ -3,6 +3,19 @@ import math
 from dataclasses import dataclass
 
 
+def day_guard(realized_pct: float, target_pct: float,
+              loss_limit_pct: float) -> tuple[bool, str]:
+    """당일 실현손익률(%)로 신규 진입 허용 여부 판단.
+    - 손실 한도 도달 → 손실 차단(우선)
+    - 목표 도달 → 이익 확정 마감
+    반환: (중단 여부, 사유). 목표/한도가 0 이하면 해당 조건 미적용."""
+    if loss_limit_pct and realized_pct <= -abs(loss_limit_pct):
+        return True, f"일일 손실 한도(-{loss_limit_pct:g}%) 도달 — 신규 진입 중단"
+    if target_pct and realized_pct >= target_pct:
+        return True, f"일일 목표(+{target_pct:g}%) 도달 — 이익 확정, 신규 진입 중단"
+    return False, ""
+
+
 def position_size(equity: float, risk_pct: float, entry: float, stop: float) -> int:
     """손절까지 가면 계좌의 risk_pct% 만 잃도록 수량 계산."""
     dist = abs(entry - stop)

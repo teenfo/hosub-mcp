@@ -117,3 +117,13 @@ def test_stats_aggregates_by_rule(tmp_path, monkeypatch):
     assert st["overall"]["trades"] == 2
     assert st["open_count"] == 0
     assert "orb" in st["by_rule"] and "gap" in st["by_rule"]
+
+
+def test_realized_today_sums_closed(tmp_path, monkeypatch):
+    _fresh(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG", {})
+    ledger.open_position(_order("d1"), fill=10_000)
+    ledger.open_position(_order("d2"), fill=10_000)
+    ledger.monitor(lambda s: 10_500)          # 둘 다 목표 청산(이익)
+    r = ledger.realized_today(equity=1_000_000)
+    assert r["trades"] == 2 and r["krw"] > 0 and r["pct"] > 0
