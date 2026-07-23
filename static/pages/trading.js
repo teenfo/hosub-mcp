@@ -76,13 +76,20 @@ export default {
 
     const status = card("트레이딩 상태", null, { icon: "bi-activity" });
     const watchC = card("감시목록 관리", null, { icon: "bi-eye" });
-    const apiCfg = card("키움 API 설정", null, { icon: "bi-key" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
     const scannerC = card("급등 스캐너", null, { wide: true, icon: "bi-rocket-takeoff" });
     const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    row.append(status.col, watchC.col, apiCfg.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
+    row.append(status.col, watchC.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
+
+    // 상태 카드 헤더에 설정(기어) 버튼 추가 → 클릭 시 API 설정 모달 표시
+    const statusHeader = status.col.querySelector(".card-header");
+    statusHeader.classList.add("d-flex", "justify-content-between", "align-items-center");
+    const gearBtn = el("button", {
+      class: "btn btn-sm btn-link p-0 text-secondary", title: "키움 API 설정",
+    }, el("i", { class: "bi bi-gear-fill" }));
+    statusHeader.appendChild(gearBtn);
 
     // --- 감시목록 관리: 직접 추가 + 영속 목록 + 제거 ---
     const SOURCE_BADGE = { seed: ["기본", "secondary"], manual: ["수동", "primary"], auto: ["발굴", "warning"] };
@@ -144,13 +151,34 @@ export default {
     const cfgMsg = el("div", { class: "small mt-2" });
     const field = (label, input) =>
       el("div", { class: "mb-2" }, [el("label", { class: "form-label small mb-1" }, label), input]);
-    apiCfg.body.append(
+
+    // API 설정 모달 (기어 버튼으로 연다)
+    const modalBody = el("div", { class: "modal-body" }, [
       field("환경", envSel),
       field("앱키 (App Key)", appKeyIn),
       field("시크릿 키 (Secret Key)", secretIn),
       field("계좌번호", accountIn),
-      saveBtn, cfgMsg,
+      cfgMsg,
+    ]);
+    const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
+      el("div", { class: "modal-dialog modal-dialog-centered" },
+        el("div", { class: "modal-content" }, [
+          el("div", { class: "modal-header" }, [
+            el("h5", { class: "modal-title", html: '<i class="bi bi-key"></i> 키움 API 설정' }),
+            el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
+          ]),
+          modalBody,
+          el("div", { class: "modal-footer" }, [
+            el("button", { class: "btn btn-sm btn-secondary", type: "button", "data-bs-dismiss": "modal" }, "닫기"),
+            saveBtn,
+          ]),
+        ]),
+      ),
     );
+    container.appendChild(modalEl);
+    saveBtn.className = "btn btn-sm btn-primary";  // 모달 푸터용 (mt-2 제거)
+    const settingsModal = new bootstrap.Modal(modalEl);
+    gearBtn.onclick = () => { loadSettings(); settingsModal.show(); };
 
     const loadSettings = async () => {
       try {
