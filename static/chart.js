@@ -54,6 +54,15 @@ function niceStep(range, ticks) {
 export function createProChart(host, opts = {}) {
   const UP = opts.up || "#d64545";
   const DOWN = opts.down || "#3a6fd8";
+  const AXIS = opts.axis === "time" ? "time" : "date";   // 하단 축: 시각/날짜
+  const DEF_COUNT = opts.defaultCount || 120;            // 초기 표시 봉 수
+  // 축/범례 시간 포맷
+  const axisLabel = (t) => AXIS === "time"
+    ? new Date(t * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" })
+    : new Date(t * 1000).toLocaleDateString("ko-KR", { year: "2-digit", month: "2-digit", day: "2-digit" });
+  const legendTime = (t) => AXIS === "time"
+    ? new Date(t * 1000).toLocaleString("ko-KR", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+    : new Date(t * 1000).toLocaleDateString("ko-KR", { year: "2-digit", month: "2-digit", day: "2-digit" });
   const canvas = document.createElement("canvas");
   canvas.style.cssText = "width:100%;display:block;cursor:crosshair;touch-action:none";
   host.appendChild(canvas);
@@ -85,10 +94,28 @@ export function createProChart(host, opts = {}) {
   function setData(data) {
     bars = Array.isArray(data) ? data.slice() : [];
     computeIndicators();
-    const def = Math.min(bars.length, 120);
+    const def = Math.min(bars.length, DEF_COUNT);
     i1 = bars.length;
     i0 = Math.max(0, i1 - def);
     cursor = null;
+    schedule();
+  }
+
+  function update(data) {
+    // 실시간 갱신: 사용자가 맞춘 확대/이동은 유지하되, 최신 봉을 보고 있었으면 따라간다.
+    const prevLen = bars.length;
+    if (!prevLen) return setData(data);
+    const following = i1 >= prevLen;
+    const count = Math.max(1, i1 - i0);
+    bars = Array.isArray(data) ? data.slice() : [];
+    computeIndicators();
+    if (following) {
+      i1 = bars.length;
+      i0 = Math.max(0, i1 - count);
+    } else {
+      i1 = Math.min(i1, bars.length);
+      i0 = Math.max(0, Math.min(i0, i1 - 1));
+    }
     schedule();
   }
 
@@ -218,15 +245,14 @@ export function createProChart(host, opts = {}) {
     g.strokeStyle = grid; g.beginPath(); g.moveTo(LPAD, volTop - 4); g.lineTo(LPAD + plotW, volTop - 4); g.stroke();
     g.fillStyle = axis; g.fillText("거래량 " + fmt(vmax), LPAD + plotW + 6, volTop + 8);
 
-    // --- 날짜 축 ---
-    const dstr = (t) => new Date(t * 1000).toLocaleDateString("ko-KR", { year: "2-digit", month: "2-digit", day: "2-digit" });
+    // --- 하단 축 (시각/날짜) ---
     g.fillStyle = axis;
     const labels = Math.min(6, count);
     for (let j = 0; j < labels; j++) {
       const idx = i0 + Math.round((j / Math.max(1, labels - 1)) * (count - 1));
       const b = bars[idx]; if (!b) continue;
       const x = Math.max(LPAD + 2, Math.min(LPAD + plotW - 44, xOf(idx) - 22));
-      g.fillText(dstr(b.time), x, H - 6);
+      g.fillText(axisLabel(b.time), x, H - 6);
     }
 
     // --- 십자선 + 툴팁 ---
@@ -257,20 +283,18 @@ export function createProChart(host, opts = {}) {
     const chg = prev ? (b.close - prev.close) / prev.close * 100 : 0;
     const col = b.close >= (prev ? prev.close : b.open) ? UP : DOWN;
     const lines = [
-      [dstr(b.time), text],
+      [legendTime(b.time), text],
       [`시 ${fmt(b.open)}  고 ${fmt(b.high)}`, text],
       [`저 ${fmt(b.low)}  종 ${fmt(b.close)}`, text],
       [`${chg >= 0 ? "▲" : "▼"} ${fmt2(Math.abs(chg))}%  거래량 ${fmt(b.volume)}`, col],
     ];
     for (const d of MA_DEFS) { const v = ma[d.p][idx]; if (v != null) lines.push([`MA${d.p} ${fmt(v)}`, d.color]); }
     g.font = "11px sans-serif";
-    const wBox = 168, hBox = 14 * lines.length + 8;
+    const wBox = 176, hBox = 14 * lines.length + 8;
     g.globalAlpha = 0.85; g.fillStyle = bg; g.fillRect(6, 6, wBox, hBox); g.globalAlpha = 1;
     g.strokeStyle = "rgba(128,128,128,.35)"; g.strokeRect(6, 6, wBox, hBox);
     lines.forEach((ln, k) => { g.fillStyle = ln[1]; g.fillText(ln[0], 14, 22 + k * 14); });
-    function dstr(t) { return new Date(t * 1000).toLocaleDateString("ko-KR", { year: "2-digit", month: "2-digit", day: "2-digit" }); }
   }
-  function dstr(t) { return new Date(t * 1000).toLocaleDateString("ko-KR", { year: "2-digit", month: "2-digit", day: "2-digit" }); }
 
   // --- 인터랙션 ---
   const onMove = (e) => {
@@ -331,7 +355,7 @@ export function createProChart(host, opts = {}) {
     host.removeChild(canvas);
   }
 
-  return { setData, setVisibleCount, setIndicator, redraw: schedule, destroy, MA_DEFS };
+  return { setData, update, setVisibleCount, setIndicator, redraw: schedule, destroy, MA_DEFS };
 }
 
 export { MA_DEFS };
