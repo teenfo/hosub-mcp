@@ -201,17 +201,34 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://mcp.example.com/mcp
 `.env` 의 `HOSUB_ALLOWED_HOSTS=mcp.example.com` 을 채우고 `sudo systemctl restart hosub-mcp`
 하면 DNS 리바인딩 보호까지 켜진다.
 
-#### 7.2 Claude Custom Connector
+#### 7.2 Claude Custom Connector (OAuth 2.1)
 
+claude.ai 커넥터 UI에는 Bearer 헤더 입력란이 없어, **표준 OAuth 2.1 흐름**으로
+연결한다. 서버가 필요한 엔드포인트(`.well-known/*`, `/register`, `/authorize`,
+`/token`)를 제공하며, 승인 게이트는 **대시보드 비밀번호**다.
+
+**먼저 `.env` 에 공개 URL 을 설정**해야 OAuth 메타데이터가 올바른 주소로 발급된다:
+
+```bash
+sudo -u hosub sed -i 's#^HOSUB_PUBLIC_URL=.*#HOSUB_PUBLIC_URL=https://mcp.example.com#' /opt/hosub-mcp/.env
+sudo systemctl restart hosub-mcp
+# 메타데이터 확인 (issuer 가 공개 URL 이어야 함)
+curl -s https://mcp.example.com/.well-known/oauth-authorization-server | python3 -m json.tool
+```
+
+연결:
 1. Claude.ai → Settings → Connectors → **Add custom connector**
-2. **URL**: `https://mcp.example.com/mcp`
-3. **Advanced → Request Headers**: `Authorization: Bearer <HOSUB_MCP_TOKEN 값>`
-   - 토큰 확인: `sudo -u hosub grep HOSUB_MCP_TOKEN /opt/hosub-mcp/.env`
+2. **URL**: `https://mcp.example.com/mcp` (헤더 입력 불필요)
+3. **연결(Connect)** 클릭 → 브라우저 창에서 **대시보드 비밀번호** 입력 → 승인
 4. 대화창 **+ → Connectors** 에서 활성화
 5. Low 도구부터 테스트: "hosub 시스템 상태 알려줘" → `get_system_status`
 
-> 커넥터 UI가 커스텀 헤더를 지원하지 않는 요금제면, Cloudflare Access **서비스 토큰**을
-> 터널 엣지에서 강제하라. 토큰을 URL 쿼리에 넣지 말 것.
+> **동작 순서**: 커넥터가 `POST /mcp` → 401(`WWW-Authenticate`) 을 받고 `.well-known`
+> 메타데이터를 조회 → `/register` 로 동적 등록 → `/authorize` 승인 페이지(비밀번호) →
+> `/token` 으로 PKCE 코드 교환 → 발급된 액세스 토큰으로 접속한다.
+>
+> 정적 `HOSUB_MCP_TOKEN` 은 curl 테스트·비상용으로 병행 유지된다:
+> `curl -H "Authorization: Bearer <토큰>" ...`
 
 #### 7.3 대시보드 접속
 
@@ -403,21 +420,25 @@ sudo systemctl restart caddy
 journalctl -u caddy -n 40 --no-pager
 ```
 
-### B.4 확인
+### B.4 확인 + 공개 URL·Host 설정
 
 ```bash
-# 외부 도달 + 인증 (401 이면 정상: TLS OK + Bearer 요구)
+# 외부 도달 + 인증 (401 이면 정상: TLS OK + 인증 요구)
 curl -s -o /dev/null -w "%{http_code}\n" -X POST https://hosub.duckdns.org/mcp
 
-# .env 에 Host 검증 켜기
+# .env 에 공개 URL(OAuth 메타데이터용) + Host 검증 설정
+sudo -u hosub sed -i 's#^HOSUB_PUBLIC_URL=.*#HOSUB_PUBLIC_URL=https://hosub.duckdns.org#' /opt/hosub-mcp/.env
 sudo -u hosub sed -i 's/^HOSUB_ALLOWED_HOSTS=.*/HOSUB_ALLOWED_HOSTS=hosub.duckdns.org/' /opt/hosub-mcp/.env
 sudo systemctl restart hosub-mcp
+
+# OAuth 메타데이터 확인 (issuer 가 https://hosub.duckdns.org 이어야 함)
+curl -s https://hosub.duckdns.org/.well-known/oauth-authorization-server | python3 -m json.tool
 ```
 
 ### B.5 커넥터 등록 / 대시보드
 
-- 커넥터 URL: `https://hosub.duckdns.org/mcp` + `Authorization: Bearer <토큰>`
-  (7-A 의 7.2 절차 동일)
+- 커넥터 URL: `https://hosub.duckdns.org/mcp` (헤더 입력 불필요, OAuth 로 연결)
+  → **연결** 클릭 → 브라우저에서 **대시보드 비밀번호** 입력 → 승인. 절차는 7.2 와 동일.
 - 대시보드: `https://hosub.duckdns.org/`
 
 ### B.6 유의 (직접 노출이라 중요)

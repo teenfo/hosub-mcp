@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 
 from .audit import AuditLog
+from .oauth import OAuthStore
 from .registry import Registry
 from .runner import SubprocessRunner
 from .server import build_app
@@ -40,9 +41,13 @@ def create_app():
         else None
     )
 
+    oauth_db = os.environ.get("HOSUB_OAUTH_DB", "data/oauth.db")
+    public_url = os.environ.get("HOSUB_PUBLIC_URL", "").strip() or None
+
     registry = Registry.load(registry_path, strict=strict)
     audit = AuditLog(db_path)
     runner = SubprocessRunner()
+    oauth_store = OAuthStore(oauth_db)
 
     return build_app(
         registry=registry,
@@ -52,6 +57,8 @@ def create_app():
         dash_password=dash_password,
         session_secret=session_secret,
         allowed_hosts=allowed_hosts,
+        oauth_store=oauth_store,
+        public_url=public_url,
     )
 
 
