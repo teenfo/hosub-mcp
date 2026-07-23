@@ -35,6 +35,39 @@ class SignalEngine:
         prev_close = float(prev["close"].iloc[-1]) if not prev.empty else None
         return today_df, prev_close
 
+    def _daily_downtrend(self, symbol: str) -> bool | None:
+        """일봉 추세가 하락인가 — 딥리서치 1단계 게이트용.
+        장기선(120/60일) 하회 또는 이평 역배열(5<20<60)이면 하락으로 본다.
+        일봉이 부족하면 None(판단 보류 → 게이트 통과)."""
+        d = store.load_bars(symbol, "1d", limit=250)
+        if len(d) < 60:
+            return None
+        c = d["close"]
+        ma5, ma20, ma60 = (c.rolling(n).mean().iloc[-1] for n in (5, 20, 60))
+        ma_long = c.rolling(120).mean().iloc[-1] if len(d) >= 120 else ma60
+        price = float(c.iloc[-1])
+        below_long = ma_long == ma_long and price < ma_long  # NaN 아님 확인
+        aligned_down = ma5 < ma20 < ma60
+        return bool(below_long or aligned_down)
+
+    def _rules_for(self, symbol: str) -> dict:
+        """추세 게이트가 켜진 하락 규칙에 일봉 추세 플래그를 주입한 규칙 설정."""
+        rules_cfg = settings.RULES
+        needs = any(
+            rules_cfg.get(k, {}).get("require_downtrend")
+            for k in ("bounce_fade", "breakdown_retest")
+        )
+        if not needs:
+            return rules_cfg
+        dt = self._daily_downtrend(symbol)
+        if dt is None:
+            return rules_cfg  # 판단 보류 → 원본대로(게이트 통과)
+        merged = dict(rules_cfg)
+        for k in ("bounce_fade", "breakdown_retest"):
+            if k in merged:
+                merged[k] = {**merged[k], "_daily_downtrend": dt}
+        return merged
+
     async def run_once(self) -> list[dict]:
         found: list[dict] = []
         day = datetime.now(KST).date().isoformat()
@@ -43,7 +76,7 @@ class SignalEngine:
             df, prev_close = self._today_df(symbol)
             if df.empty:
                 continue
-            for sig in rules.evaluate_all(df, settings.RULES, prev_close):
+            for sig in rules.evaluate_all(df, self._rules_for(symbol), prev_close):
                 key = (day, symbol, sig.rule)
                 if key in self._fired:
                     continue

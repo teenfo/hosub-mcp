@@ -98,11 +98,13 @@ export default {
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
     const reportC = card("분석 보고 리스트", null, { icon: "bi-journal-text" });
+    const backtestC = card("규칙 백테스트 (내 데이터 검증)", null, { icon: "bi-clipboard-data" });
     // 각 카드를 독립 그리드 아이템으로 등록(id·기본 폭). 편집 모드에서 자유 배치·크기조절.
     const CARDS = [
       ["status", status, 6], ["watch", watchC, 6],
       ["pending", pending, 6], ["report", reportC, 6],
       ["scanner", scannerC, 12], ["discovery", discoveryC, 12],
+      ["backtest", backtestC, 12],
       ["chart", chart, 12], ["signals", signals, 12],
     ];
     CARDS.forEach(([id, c, w], i) => {
@@ -114,6 +116,49 @@ export default {
     });
     // 저장된 배치·크기 복원 + '레이아웃 편집' 툴바 (브라우저별 localStorage)
     makeLayoutEditable(row, { key: "trading" });
+
+    // --- 규칙 백테스트 (비용 반영, 내 데이터 검증) ---
+    const btInput = el("input", { class: "form-control form-control-sm", placeholder: "종목코드 6자리", style: "max-width:150px" });
+    const btTf = el("select", { class: "form-select form-select-sm", style: "max-width:110px" },
+      [el("option", { value: "1m" }, "분봉"), el("option", { value: "1d" }, "일봉")]);
+    const btRun = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "실행");
+    const btOut = el("div", { class: "small mt-2" });
+    const runBacktest = async () => {
+      const code = btInput.value.trim();
+      if (!/^\d{6}$/.test(code)) { btOut.innerHTML = ""; btOut.appendChild(el("div", { class: "text-danger" }, "6자리 종목코드를 입력하세요")); return; }
+      btOut.textContent = "실행 중…";
+      try {
+        const r = await fetchJSON(`/api/trading/backtest/${code}?tf=${btTf.value}`);
+        btOut.innerHTML = "";
+        if (!r.ok) { btOut.appendChild(el("div", { class: "text-secondary" }, r.error || "결과 없음")); return; }
+        const s = r.stats || {};
+        if (!s.trades) {
+          btOut.appendChild(el("div", { class: "text-secondary" },
+            `${r.days}일치 ${btTf.value === "1m" ? "분봉" : "일봉"} · 체결 신호 없음 (분봉은 장중 축적될수록 표본이 늘어납니다)`));
+          return;
+        }
+        const stat = (k, v) => el("div", { class: "col-6 col-md-3" },
+          el("div", { class: "border rounded p-2" }, [el("div", { class: "text-secondary" }, k), el("div", { class: "fw-semibold" }, v)]));
+        btOut.append(
+          el("div", { class: "text-secondary mb-1" }, `${r.days}일치 · 총 ${s.trades}건`),
+          el("div", { class: "row g-2" }, [
+            stat("승률", s.win_rate + "%"), stat("평균손익", s.avg_pnl_pct + "%"),
+            stat("손익비(PF)", s.profit_factor), stat("누적수익", s.total_return_pct + "%"),
+            stat("최대낙폭", s.max_drawdown_pct + "%"),
+          ]),
+          el("div", { class: "text-secondary small mt-2" }, "규칙별 평균손익%: " +
+            Object.entries(s.by_rule || {}).map(([k, v]) => `${k} ${v}`).join(" · ")),
+        );
+      } catch (e) { btOut.innerHTML = ""; btOut.appendChild(el("div", { class: "text-danger" }, "실패: " + e.message)); }
+    };
+    btRun.onclick = runBacktest;
+    btInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runBacktest(); });
+    backtestC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-clipboard-data"></i> 저장된 봉으로 규칙을 <b>비용(수수료·세금·슬리피지) 반영</b> 백테스트. 딥리서치 원칙 “진입기법보다 청산 설계·비용, 내 데이터로 검증”을 반영.' })),
+      el("div", { class: "d-flex gap-2 flex-wrap align-items-center" }, [btInput, btTf, btRun]),
+      btOut,
+    );
 
     // --- 분석 보고 리스트 + 공용 모달 ---
     const rBody = el("div");

@@ -94,6 +94,50 @@ def test_bounce_fade_none_on_uptrend():
     assert rules.bounce_fade(df, {"rsi_hot": 60, "lookback": 30}) is None
 
 
+def test_bearish_reversal_engulfing():
+    # 직전 양봉(100→101)을 덮는 음봉(101.2→99.8) → 하락장악형
+    df = _bars([("09:00", 100, 101.1, 99.9, 101.0), ("09:01", 101.2, 101.3, 99.7, 99.8)])
+    assert rules._bearish_reversal(df)
+
+
+def test_bearish_reversal_shooting_star():
+    # 긴 윗꼬리 + 짧은 아랫꼬리 + 작은 몸통 하단 → 유성형
+    df = _bars([("09:00", 100, 100.2, 99.8, 100.0), ("09:01", 100.0, 102.0, 99.9, 100.1)])
+    assert rules._bearish_reversal(df)
+
+
+def test_bearish_reversal_rejects_plain_up_candle():
+    df = _bars([("09:00", 100, 100.5, 99.8, 100.2), ("09:01", 100.2, 101.5, 100.1, 101.4)])
+    assert not rules._bearish_reversal(df)
+
+
+def test_downtrend_gate_blocks_when_flag_false():
+    # require_downtrend + 엔진이 상승 추세(_daily_downtrend=False) 주입 → 진입 차단
+    cfg = {"support_lookback": 30, "retest_tolerance_pct": 0.3,
+           "require_downtrend": True, "_daily_downtrend": False}
+    base = _range_bars(50)
+    recent = _bars([("09:5%d" % m, 100, 100.2, 98.9, 99.0 + m * 0.1) for m in range(10)])
+    df = pd.concat([base, recent])
+    assert rules.breakdown_retest(df, cfg) is None
+    # 게이트 없으면(기본) 평가는 정상 진행 — 신호 유무는 구조에 따름
+    cfg2 = {"support_lookback": 30, "retest_tolerance_pct": 0.3}
+    rules.breakdown_retest(df, cfg2)  # 예외 없이 실행되면 통과
+
+
+def test_breakdown_retest_atr_stop_above_support():
+    cfg = {"support_lookback": 30, "retest_tolerance_pct": 0.3, "atr_stop_mult": 0.5}
+    base = _range_bars(50)
+    recent = _bars([
+        ("09:50", 100, 100.1, 98.9, 99.0), ("09:51", 99, 99.3, 98.8, 99.1),
+        ("09:52", 99.1, 99.6, 99.0, 99.5), ("09:53", 99.5, 99.9, 99.4, 99.8),
+        ("09:54", 99.8, 100.0, 99.6, 99.9), ("09:55", 99.9, 100.1, 99.7, 100.0),
+        ("09:56", 100.0, 100.2, 99.8, 100.05), ("09:57", 100.05, 100.15, 99.9, 100.0),
+        ("09:58", 100.0, 100.1, 99.85, 99.95), ("09:59", 100.1, 100.2, 99.8, 99.9),
+    ])
+    sig = rules.breakdown_retest(pd.concat([base, recent]), cfg)
+    assert sig is not None and sig.stop > 100.0   # 지지선 위 ATR 여유 반영
+
+
 def test_every_signal_has_exit():
     """Exit 우선 원칙: 모든 신호는 stop/target 을 가진다."""
     df = pd.concat([_range_bars(15), _bars([("09:15", 100, 100.5, 98.9, 99.0)])])
