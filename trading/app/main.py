@@ -17,6 +17,7 @@ from .kiwoom.auth import token_manager
 from .kiwoom.ws import RealtimeFeed
 from .signals.engine import SignalEngine
 from .signals.scanner import Scanner
+from .backtest.report import BacktestReporter
 from .trade import orders
 
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,7 @@ aggregator = BarAggregator()
 feed = RealtimeFeed(aggregator.on_tick)
 scanner = Scanner()
 discovery = Discovery()
+reporter = BacktestReporter()
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
 
 
@@ -56,6 +58,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_feed_starter()),
         asyncio.create_task(scanner.loop()),
         asyncio.create_task(discovery.loop()),
+        asyncio.create_task(reporter.loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
@@ -187,6 +190,26 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
     ]
     return {"ok": True, "symbol": symbol, "tf": tf, "days": days,
             "stats": result.stats(), "trades": trades}
+
+
+@app.get("/api/backtest/report/latest")
+async def api_backtest_report(_=Depends(require_auth)):
+    """분봉 축적분 주기 백테스트 최신 리포트(전체 요약 + 종목별)."""
+    return reporter.latest()
+
+
+@app.get("/api/backtest/report/history")
+async def api_backtest_history(_=Depends(require_auth)):
+    """실행별 전체 요약 추이(승률·손익비 변화 관찰용)."""
+    return {"runs": reporter.history()}
+
+
+@app.post("/api/backtest/report/run")
+async def api_backtest_report_run(_=Depends(require_auth)):
+    """백테스트 리포트 수동 실행(조회성 — 주문 없음)."""
+    if reporter.running:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    return await asyncio.to_thread(reporter.run_once)
 
 
 _account_cache: dict = {"ts": 0.0, "data": None}
