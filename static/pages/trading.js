@@ -725,6 +725,9 @@ export default {
         }
         if (keep && watch[keep]) symbolSel.value = keep;
         loadChart();
+        // 감시목록이 바뀌면 발굴·스캐너의 '감시중' 표시를 즉시 반영(강제 재렌더)
+        _memo["discovery"] = undefined; _memo["scanner"] = undefined;
+        loadDiscovery(); loadScanner();
       }
     };
 
@@ -740,6 +743,7 @@ export default {
         `등락률 +${cfg.min_change_pct ?? 3}% ↑ · 거래대금 상위 교차 · ` +
         (sc.last_scan ? `마지막 스캔 ${sc.last_scan.slice(11, 19)}` : "장중에만 스캔")));
       const watchBtn = (r) => {
+        if (watch[r.code]) return badge("감시중", "success");  // 이미 등록 → 버튼 숨김
         const add = el("button", { class: "btn btn-sm btn-outline-primary" }, "감시 추가");
         add.onclick = async () => {
           add.disabled = true;
@@ -821,16 +825,22 @@ export default {
       tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>종가</th><th>점수</th><th>발굴 사유</th><th></th></tr>" }));
       const tb = el("tbody");
       for (const p of d.picks) {
-        const add = el("button", { class: "btn btn-sm btn-outline-primary" }, "감시 추가");
-        add.onclick = async () => {
-          add.disabled = true;
-          try {
-            await postJSON("/api/trading/watchlist", { code: p.code, name: p.name });
-            add.textContent = "추가됨";
-            add.classList.replace("btn-outline-primary", "btn-success");
-            loadWatch(); loadStatus();   // 감시목록 카드·차트 드롭다운 즉시 갱신
-          } catch (e) { alert("실패: " + e.message); add.disabled = false; }
-        };
+        let addCell;
+        if (watch[p.code]) {
+          addCell = badge("감시중", "success");   // 이미 등록 → 감시 추가 버튼 숨김
+        } else {
+          const add = el("button", { class: "btn btn-sm btn-outline-primary" }, "감시 추가");
+          add.onclick = async () => {
+            add.disabled = true;
+            try {
+              await postJSON("/api/trading/watchlist", { code: p.code, name: p.name });
+              add.textContent = "추가됨";
+              add.classList.replace("btn-outline-primary", "btn-success");
+              loadWatch(); loadStatus();   // 감시목록 카드·차트 드롭다운 즉시 갱신
+            } catch (e) { alert("실패: " + e.message); add.disabled = false; }
+          };
+          addCell = add;
+        }
         const nameLink = el("a", { href: "#", class: "text-decoration-none" },
           `${p.name} (${p.code})`);
         nameLink.onclick = (e) => { e.preventDefault(); openStockChart(p.code, p.name); };
@@ -839,7 +849,7 @@ export default {
           el("td", {}, fmt(p.close)),
           el("td", {}, String(p.score)),
           el("td", { class: "small text-secondary" }, (p.reasons || []).join(" · ")),
-          el("td", {}, add),
+          el("td", {}, addCell),
         ]));
       }
       tbl.appendChild(tb);
