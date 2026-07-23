@@ -15,7 +15,7 @@
 | #5 | 대시보드 Bootstrap 5 admin 테마 리디자인 |
 | #6 | GitHub Actions push 배포 제거 (pull 방식으로 일원화) |
 | #7 | 대시보드 멀티 페이지 + 데일리 브리핑·날씨·Docker |
-| #8 | 데일리 브리핑 날짜별 디렉터리(html/morning-brif) |
+| #8 | 데일리 브리핑 날짜별 디렉터리(html/morning-brief) |
 
 현재 상태: MCP 서버 + OAuth + DuckDNS/Caddy TLS + 커넥터 연결 + Bootstrap 멀티 페이지
 대시보드까지 동작 확인됨(커넥터로 `get_system_status` 실서버 응답 확인).
@@ -37,7 +37,7 @@ systemctl is-active hosub-mcp
 ```bash
 sudo -u hosub vi /opt/hosub-mcp/.env
 ```
-- `HOSUB_BRIEFING_DIR=html/morning-brif`   # 데일리 브리핑 디렉터리(기본값)
+- `HOSUB_BRIEFING_DIR=html/morning-brief`   # 데일리 브리핑 디렉터리(기본값)
 - `HOSUB_WEATHER_LATLON=37.5665,126.9780`  # 날씨 위치(기본 서울) — 원하는 도시로 변경
 - `HOSUB_WEATHER_LABEL=서울`               # 날씨 표시 라벨
 - (기존) `HOSUB_PUBLIC_URL=https://<서브도메인>.duckdns.org` — OAuth 메타데이터용, 필수
@@ -45,10 +45,10 @@ sudo -u hosub vi /opt/hosub-mcp/.env
 변경 후: `sudo systemctl restart hosub-mcp`
 
 ### 3.2 데일리 브리핑 폴더 (자동 생성됨)
-`html/morning-brif/` 는 Claude 가 `write_file` 로 `<날짜>.html` 을 쓰면 자동 생성된다.
+`html/morning-brief/` 는 Claude 가 `write_file` 로 `<날짜>.html` 을 쓰면 자동 생성된다.
 (`.gitignore` 에 포함되어 `git pull` 과 충돌하지 않음.) 수동 생성도 가능:
 ```bash
-sudo -u hosub mkdir -p /opt/hosub-mcp/html/morning-brif
+sudo -u hosub mkdir -p /opt/hosub-mcp/html/morning-brief
 ```
 
 ### 3.3 Docker 페이지 권한 (Docker 를 쓸 경우)
@@ -68,7 +68,7 @@ sudo systemctl restart hosub-mcp    # 그룹 반영
 Claude(커넥터/Cowork/Routine)가 매일 아래처럼 브리핑을 쓴다:
 ```
 write_file(
-  path="/opt/hosub-mcp/html/morning-brif/2026-07-23.html",
+  path="/opt/hosub-mcp/html/morning-brief/2026-07-23.html",
   content="<h2>...</h2> ... (HTML)",
   confirm=true
 )
