@@ -54,7 +54,7 @@ function applyHeight(col, px) {
 }
 
 export function makeLayoutEditable(row, { key, toolbar }) {
-  const cols = () => [...row.querySelectorAll(".col[data-card-id]")];
+  const cols = () => [...row.querySelectorAll("[data-card-id]")];
   const defaults = new Map(               // 초기화용 기본 폭(현재 클래스 기준)
     cols().map((col) => {
       const m = col.className.match(/\bcol-xl-(\d+)\b/);
@@ -144,7 +144,8 @@ export function makeLayoutEditable(row, { key, toolbar }) {
   // --- 드래그 재배치 (HTML5 DnD) ---
   let dragEl = null;
   const onDragStart = (e) => {
-    const col = e.target.closest(".col[data-card-id]");
+    if (e.target.closest(".layout-handle")) { e.preventDefault(); return; }  // 핸들은 리사이즈용
+    const col = e.target.closest("[data-card-id]");
     if (!col) return;
     dragEl = col;
     col.classList.add("layout-dragging");
@@ -159,7 +160,7 @@ export function makeLayoutEditable(row, { key, toolbar }) {
   const onDragOver = (e) => {
     if (!dragEl) return;
     e.preventDefault();
-    const target = e.target.closest?.(".col[data-card-id]");
+    const target = e.target.closest?.("[data-card-id]");
     if (!target || target === dragEl) return;
     const box = target.getBoundingClientRect();
     const after = e.clientX > box.left + box.width / 2;
