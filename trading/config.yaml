@@ -29,6 +29,8 @@ discovery:
   min_score: 2                  # 3규칙 중 최소 충족 수
   top_n: 20
   max_symbols: 0                # 0 = 전종목 (테스트 시 소수로 제한)
+  auto_watch: true              # 발굴 상위 종목을 감시목록에 자동 편입
+  auto_watch_n: 5               # 자동 편입 수 (기존 auto 항목은 교체됨)
 
 risk:
   risk_per_trade_pct: 0.5     # 1회 손절 시 계좌 대비 최대 손실 %

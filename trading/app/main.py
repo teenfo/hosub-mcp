@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
-from .data import store
+from .data import store, watchlist
 from .discovery import Discovery
 from .data.collector import BarAggregator
 from .kiwoom.auth import token_manager
@@ -41,8 +41,14 @@ TEMPLATE = (Path(__file__).parent.parent / "templates" / "dashboard.html").read_
 )
 
 
+async def _resubscribe() -> None:
+    await feed.update(list(settings.WATCHLIST.keys()))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    watchlist.init()               # DB 기준으로 감시목록 복원 (최초엔 config 시드)
+    watchlist.notifier = _resubscribe
     # 루프는 항상 띄운다 — 키가 없으면 매 주기 스킵하고, 설정 화면에서
     # 키가 입력되는 즉시 다음 주기부터 동작한다.
     tasks = [
@@ -209,17 +215,30 @@ async def api_discovery_run(_=Depends(require_auth)):
     return {"ok": True, "message": "백그라운드 실행 시작 — 진행 상황은 /api/discovery"}
 
 
+@app.get("/api/watchlist")
+async def api_watchlist(_=Depends(require_auth)):
+    return {"entries": watchlist.entries()}
+
+
 @app.post("/api/watchlist")
 async def api_watchlist_add(payload: dict, _=Depends(require_auth)):
-    """스캐너에서 고른 종목을 감시목록에 편입 (런타임 — 재시작 시 config.yaml 기준으로 복원)."""
+    """종목을 감시목록에 편입 (SQLite 영속 — 재시작에도 유지)."""
     code = str(payload.get("code", "")).strip()
     name = str(payload.get("name", "")).strip() or code
     if not (code.isdigit() and len(code) == 6):
         return JSONResponse({"ok": False, "error": "종목코드는 6자리 숫자"}, 400)
-    settings.WATCHLIST[code] = name
-    await feed.update(list(settings.WATCHLIST.keys()))
+    watchlist.add(code, name, source="manual")
+    await watchlist.notify()
     log.info("감시목록 편입: %s(%s) — 총 %d 종목", name, code, len(settings.WATCHLIST))
     return {"ok": True, "watchlist": settings.WATCHLIST}
+
+
+@app.post("/api/watchlist/remove")
+async def api_watchlist_remove(payload: dict, _=Depends(require_auth)):
+    code = str(payload.get("code", "")).strip()
+    ok = watchlist.remove(code)
+    await watchlist.notify()
+    return {"ok": ok, "watchlist": settings.WATCHLIST}
 
 
 @app.get("/api/settings")
