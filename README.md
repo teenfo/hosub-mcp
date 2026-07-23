@@ -114,6 +114,40 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 - **Cloudflare Tunnel** — Cloudflare 관리 도메인이 있을 때. 포트 개방 불필요.
 - **DuckDNS + Caddy** (도메인 구매 불필요) — 무료 DuckDNS 서브도메인 + 포트포워딩(80/443) + `deploy/Caddyfile` 자동 TLS. iptime DDNS(`*.iptime.org`)는 CAA 정책으로 인증서 발급이 막혀 있어 DuckDNS를 쓴다. → `docs/SETUP.md` 부록 B.
 
+## 브랜치 구조 / 협업 규칙
+
+이 저장소는 클라우드 세션(개발)·로컬 세션(서버 실행)·자동 배포가 얽혀 있어, 브랜치
+용도를 접두어로 구분한다. 접두어 뒤 이름은 작업 헤딩에서 딴다.
+
+| 브랜치 | 용도 | 머지 여부 |
+|---|---|---|
+| `main` | **배포 대상.** 서버의 `hosub-mcp-update.timer` 가 5분마다 pull → 자동 반영 | — |
+| `feature/<이름>` | 실제 기능 구현 | PR → main 머지 |
+| `fix/<이름>` | 버그·설정 수정 | PR → main 머지 |
+| `dev-request/<이름>` | **개발(코드) 요청서** — 다른 Claude Code 세션에 넘길 작업 명세(문서만) | 보통 미머지(핸드오프) |
+| `local-request/<이름>` | **로컬 서버 실행/기록 문서** — LAN 안 로컬 세션이 서버에 수행할 런북·작업 내역 | 보통 미머지(핸드오프) |
+
+**요청서(`*-request/`) 규칙**
+- 접두어는 영문(`dev-request` / `local-request`), 이름은 헤딩 기반.
+- 요청 문서는 `docs/requests/` 아래에 둔다(예: `docs/requests/dashboard-bootstrap5-admin.md`).
+- 요청서 브랜치는 코드 없이 문서만 담아 핸드오프한다. 실제 구현은 받는 세션이
+  `feature/` 브랜치로 진행 후 PR.
+
+**워크플로우 예시**
+```
+클라우드 세션: dev-request/foo (요청서 작성)  ──넘김──▶  로컬/다른 세션
+                                                        └─ feature/foo 구현 → PR → main
+main 머지 ──5분──▶ 서버 자동 배포(pull)
+로컬 서버 실행 절차·내역: local-request/<이름> (docs/requests, docs/work-log 등)
+```
+
+- 최초 배포 런북: `docs/requests/local-server-deployment.md`
+- 배포 반영 체크리스트/작업 내역: `docs/work-log.md`
+
+> 브랜치 삭제는 환경에 따라 막힐 수 있다. 머지 끝난 `feature/*`·`fix/*` 와 핸드오프가
+> 끝난 `*-request/*` 브랜치는 로컬 PC(`git push origin --delete <브랜치>`)나 GitHub
+> Branches 페이지에서 정리한다.
+
 ## 보안 노트
 
 - 이 서버는 대화로 **서버 전체를 제어**한다. Bearer 토큰 유출 = 서버 root 완전 장악.
