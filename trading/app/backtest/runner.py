@@ -59,9 +59,10 @@ class Result:
             "trades": len(closed),
             "win_rate": round(len(wins) / len(closed) * 100, 1),
             "avg_pnl_pct": round(sum(pnls) / len(pnls), 3),
+            # 손실이 없으면 손익비는 수학적으로 무한 → JSON 직렬화 불가하므로 None(∞ 표시용)
             "profit_factor": round(
                 sum(wins) / abs(sum(losses)), 2
-            ) if losses and sum(losses) != 0 else float("inf"),
+            ) if losses and sum(losses) != 0 else None,
             "total_return_pct": round((equity - 1) * 100, 2),
             "max_drawdown_pct": round(mdd * 100, 2),
             "by_rule": {

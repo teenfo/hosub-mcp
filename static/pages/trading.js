@@ -98,7 +98,7 @@ export default {
           el("div", { class: "text-secondary mb-1" }, `${r.name ? r.name + " (" + r.symbol + ")" : r.symbol} · ${r.days}일치 · 총 ${s.trades}건`),
           el("div", { class: "row g-2" }, [
             stat("승률", s.win_rate + "%"), stat("평균손익", s.avg_pnl_pct + "%"),
-            stat("손익비(PF)", s.profit_factor), stat("누적수익", s.total_return_pct + "%"),
+            stat("손익비(PF)", s.profit_factor == null ? "∞" : s.profit_factor), stat("누적수익", s.total_return_pct + "%"),
             stat("최대낙폭", s.max_drawdown_pct + "%"),
           ]),
           el("div", { class: "text-secondary small mt-2" }, "규칙별 평균손익%: " +
@@ -141,7 +141,7 @@ export default {
         for (const r of d.symbols) {
           tb.appendChild(el("tr", {
             html: `<td>${r.name ? r.name + " (" + r.symbol + ")" : r.symbol}</td><td>${r.days}</td><td>${r.trades || 0}</td>` +
-              `<td>${r.win_rate ?? "-"}</td><td>${r.avg_pnl_pct ?? "-"}</td><td>${r.profit_factor ?? "-"}</td>` +
+              `<td>${r.win_rate ?? "-"}</td><td>${r.avg_pnl_pct ?? "-"}</td><td>${r.trades ? (r.profit_factor == null ? "∞" : r.profit_factor) : "-"}</td>` +
               `<td>${r.total_return_pct ?? "-"}</td><td>${r.max_drawdown_pct ?? "-"}</td>`,
           }));
         }
@@ -200,7 +200,7 @@ export default {
         perfBody.appendChild(el("div", { class: "row g-2 mb-3" }, [
           stat("청산", o.trades + "건"), stat("승률", o.win_rate + "%"),
           stat("건당 기대값", pct(o.expectancy_pct)), stat("실현손익", won(o.total_pnl_krw), tone),
-          stat("손익비(PF)", o.profit_factor), stat("평균 슬리피지", o.avg_slippage_pct + "%"),
+          stat("손익비(PF)", o.profit_factor == null ? "∞" : o.profit_factor), stat("평균 슬리피지", o.avg_slippage_pct + "%"),
         ]));
         const byRule = d.stats.by_rule || {};
         if (Object.keys(byRule).length) {
