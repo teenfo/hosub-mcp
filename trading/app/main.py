@@ -129,6 +129,35 @@ async def api_signals(_=Depends(require_auth)):
     return engine.last_signals
 
 
+_account_cache: dict = {"ts": 0.0, "data": None}
+
+
+@app.get("/api/account")
+async def api_account(_=Depends(require_auth)):
+    """계좌 평가잔고 요약. 레이트리밋 보호를 위해 30초 캐시."""
+    import time
+
+    from .kiwoom.account import parse_balance
+    from .kiwoom.client import client
+
+    now = time.monotonic()
+    if _account_cache["data"] and now - _account_cache["ts"] < 30:
+        return _account_cache["data"]
+    if not settings.KIWOOM_APP_KEY:
+        return {"ok": False, "error": "API 키 미설정"}
+    try:
+        data = parse_balance(await client.balance())
+    except Exception as e:  # noqa: BLE001 - 조회 실패는 화면에 표시
+        data = {"ok": False, "error": str(e)}
+    if data.get("ok"):
+        # 포지션 사이징 기준 자산을 실제 예탁자산으로 동기화
+        equity = data.get("deposit_est") or data.get("total_eval") or 0
+        if equity > 0:
+            engine.equity = engine.state.equity = float(equity)
+        _account_cache.update(ts=now, data=data)
+    return data
+
+
 @app.get("/api/settings")
 async def api_settings(_=Depends(require_auth)):
     return settings.masked()

@@ -40,7 +40,9 @@
     <div id="chart"></div>
   </section>
   <section>
-    <h2>승인 대기 주문</h2>
+    <h2>계좌</h2>
+    <div id="acctBox" class="muted">불러오는 중…</div>
+    <h2 style="margin-top:16px">승인 대기 주문</h2>
     <table id="pendingTbl"><thead><tr>
       <th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량</th><th></th>
     </tr></thead><tbody></tbody></table>
@@ -117,6 +119,24 @@ async function act(id, verb) {
   refreshOrders();
 }
 window.act = act;
+async function refreshAccount() {
+  try {
+    const a = await j('/api/account');
+    const box = $('acctBox');
+    if (!a.ok) { box.textContent = '계좌 조회 불가: ' + (a.error || ''); return; }
+    const tone = a.total_pl >= 0 ? '#ff8484' : '#7ea7ff';
+    box.innerHTML = `
+      <div>계좌: ${a.account_name || '—'} | 추정예탁자산 <b>${fmt(a.deposit_est)}</b>원</div>
+      <div>평가 ${fmt(a.total_eval)}원 (매입 ${fmt(a.total_buy)}) ·
+        <span style="color:${tone}">손익 ${fmt(a.total_pl)}원 (${a.total_pl_rt.toFixed(2)}%)</span></div>
+      ${a.holdings.length ? `<table style="margin-top:6px"><thead><tr>
+        <th>종목</th><th>수량</th><th>평단</th><th>현재가</th><th>손익</th></tr></thead><tbody>${
+        a.holdings.map(h => `<tr><td>${h.name || h.code}</td><td>${fmt(h.qty)}</td>
+          <td>${fmt(h.avg_price)}</td><td>${fmt(h.cur_price)}</td>
+          <td style="color:${h.pl_amt >= 0 ? '#ff8484' : '#7ea7ff'}">${fmt(h.pl_amt)} (${h.pl_rt.toFixed(1)}%)</td></tr>`).join('')
+      }</tbody></table>` : '<div class="muted">보유 종목 없음</div>'}`;
+  } catch (e) { $('acctBox').textContent = '계좌 조회 실패: ' + e.message; }
+}
 async function refreshSettings() {
   const s = await j('/api/settings');
   $('cfgEnv').value = s.env;
@@ -143,7 +163,8 @@ $('cfgSave').onclick = async () => {
 refreshStatus().then(refreshChart);
 refreshOrders();
 refreshSettings();
-setInterval(() => { refreshStatus(); refreshOrders(); }, 10000);
+refreshAccount();
+setInterval(() => { refreshStatus(); refreshOrders(); refreshAccount(); }, 10000);
 setInterval(refreshChart, 60000);
 </script>
 </body>

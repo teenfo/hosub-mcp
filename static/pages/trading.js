@@ -172,6 +172,46 @@ export default {
           : null,
       ]);
       status.body.appendChild(list);
+      // --- 계좌 내역 ---
+      try {
+        const a = await fetchJSON("/api/trading/account");
+        status.body.appendChild(el("hr", { class: "my-2" }));
+        if (!a.ok) {
+          status.body.appendChild(
+            el("div", { class: "text-secondary small" }, "계좌 조회 불가: " + (a.error || ""))
+          );
+        } else {
+          const plTone = a.total_pl >= 0 ? "text-danger" : "text-primary"; // 한국식: 수익 빨강
+          status.body.appendChild(
+            el("ul", { class: "list-unstyled small mb-1" }, [
+              el("li", {}, `계좌: ${a.account_name || "—"}`),
+              el("li", {}, `추정예탁자산: ${fmt(a.deposit_est)} 원`),
+              el("li", {}, `총평가금액: ${fmt(a.total_eval)} 원 (매입 ${fmt(a.total_buy)})`),
+              el("li", { class: plTone },
+                `평가손익: ${fmt(a.total_pl)} 원 (${a.total_pl_rt.toFixed(2)}%)`),
+            ])
+          );
+          if (a.holdings.length) {
+            const tbl = el("table", { class: "table table-sm small mb-0" });
+            tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>수량</th><th>평단</th><th>현재가</th><th>손익</th></tr>" }));
+            const tb = el("tbody");
+            for (const h of a.holdings) {
+              tb.appendChild(el("tr", {}, [
+                el("td", {}, h.name || h.code),
+                el("td", {}, fmt(h.qty)),
+                el("td", {}, fmt(h.avg_price)),
+                el("td", {}, fmt(h.cur_price)),
+                el("td", { class: h.pl_amt >= 0 ? "text-danger" : "text-primary" },
+                  `${fmt(h.pl_amt)} (${h.pl_rt.toFixed(1)}%)`),
+              ]));
+            }
+            tbl.appendChild(tb);
+            status.body.appendChild(el("div", { class: "table-responsive" }, tbl));
+          } else {
+            status.body.appendChild(el("div", { class: "text-secondary small" }, "보유 종목 없음"));
+          }
+        }
+      } catch (e) { /* 계좌 조회 실패는 치명적이지 않음 */ }
       if (!Object.keys(watch).length && s.watchlist) {
         watch = s.watchlist;
         symbolSel.innerHTML = "";
