@@ -117,9 +117,9 @@ class KiwoomClient:
             },
         )
 
-    async def stock_list(self, market: str = "0") -> dict:
-        """종목정보 리스트 (ka10099). market: 0 코스피 / 10 코스닥.
-        요청 필드는 공개 문서에 상세가 없어 실호출 검증 필요."""
+    async def stock_list(self, market: str = "000") -> dict:
+        """종목정보 리스트 (ka10099). market: 000 전체 / 001 코스피 / 101 코스닥.
+        응답 배열 키 stk_infr, 필드 stk_cd/stk_nm."""
         return await self._call(PATH_STOCK_INFO, TR_STOCK_LIST, {"mrkt_tp": market})
 
     async def balance(self) -> dict:

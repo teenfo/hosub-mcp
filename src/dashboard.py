@@ -68,7 +68,8 @@ _TRADING_GET_RE = re.compile(
     r"^(status|signals|orders|settings|account|scanner|discovery|watchlist|bars/\d{6})$"
 )
 _TRADING_POST_RE = re.compile(
-    r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove)?|discovery/run)$"
+    r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove)?"
+    r"|discovery/run|symbols/refresh)$"
 )
 
 

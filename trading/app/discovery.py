@@ -98,11 +98,14 @@ class Discovery:
         cfg = settings.CONFIG.get("discovery", {})
         try:
             symbols: list[dict] = []
-            for market in ("0", "10"):  # 코스피, 코스닥
-                try:
-                    symbols += parse_stock_list(await client.stock_list(market))
-                except Exception as e:  # noqa: BLE001
-                    log.warning("종목 리스트 조회 실패 (market=%s): %s", market, e)
+            try:
+                symbols = parse_stock_list(await client.stock_list("000"))  # 000=전체
+            except Exception as e:  # noqa: BLE001
+                log.warning("종목 리스트 조회 실패: %s", e)
+            if symbols:  # 종목 마스터(코드↔명)도 함께 갱신
+                from .data import symbols as symbol_master
+
+                symbol_master.upsert(symbols)
             limit = cfg.get("max_symbols", 0)
             if limit:
                 symbols = symbols[:limit]

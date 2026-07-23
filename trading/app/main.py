@@ -224,15 +224,50 @@ async def api_watchlist(_=Depends(require_auth)):
 
 @app.post("/api/watchlist")
 async def api_watchlist_add(payload: dict, _=Depends(require_auth)):
-    """종목을 감시목록에 편입 (SQLite 영속 — 재시작에도 유지)."""
+    """종목을 감시목록에 편입. 코드(6자리) 또는 종목명으로 추가 가능.
+    종목명이 여러 종목과 매칭되면 candidates 를 돌려주고 추가하지 않는다."""
+    from .data import symbols
+
     code = str(payload.get("code", "")).strip()
-    name = str(payload.get("name", "")).strip() or code
-    if not (code.isdigit() and len(code) == 6):
-        return JSONResponse({"ok": False, "error": "종목코드는 6자리 숫자"}, 400)
-    watchlist.add(code, name, source="manual")
-    await watchlist.notify()
-    log.info("감시목록 편입: %s(%s) — 총 %d 종목", name, code, len(settings.WATCHLIST))
-    return {"ok": True, "watchlist": settings.WATCHLIST}
+    query = str(payload.get("query", "")).strip() or str(payload.get("name", "")).strip()
+
+    async def _add(c: str, n: str):
+        watchlist.add(c, n or symbols.name_of(c) or c, source="manual")
+        await watchlist.notify()
+        log.info("감시목록 편입: %s(%s) — 총 %d 종목", n, c, len(settings.WATCHLIST))
+        return {"ok": True, "added": {"code": c, "name": n}, "watchlist": settings.WATCHLIST}
+
+    # 6자리 코드 직접 추가
+    if code.isdigit() and len(code) == 6:
+        return await _add(code, str(payload.get("name", "")).strip())
+    if query.isdigit() and len(query) == 6:
+        return await _add(query, symbols.name_of(query) or query)
+    if not query:
+        return JSONResponse({"ok": False, "error": "종목명 또는 코드를 입력하세요"}, 400)
+
+    # 종목명 → 코드 해석 (마스터 비어 있으면 지연 갱신)
+    cands = symbols.resolve(query)
+    if not cands and symbols.count() == 0:
+        await symbols.refresh()
+        cands = symbols.resolve(query)
+    if not cands:
+        return JSONResponse(
+            {"ok": False, "error": f"'{query}' 종목을 찾을 수 없습니다. "
+             "코드(6자리)로 직접 추가해 보세요."}, 404
+        )
+    if len(cands) == 1:
+        return await _add(cands[0]["code"], cands[0]["name"])
+    return {"ok": False, "candidates": cands[:20]}  # 여러 개 → 사용자 선택
+
+
+@app.post("/api/symbols/refresh")
+async def api_symbols_refresh(_=Depends(require_auth)):
+    from .data import symbols
+
+    if not settings.KIWOOM_APP_KEY:
+        return JSONResponse({"ok": False, "error": "API 키 미설정"}, 400)
+    n = await symbols.refresh()
+    return {"ok": n > 0, "count": symbols.count()}
 
 
 @app.post("/api/watchlist/remove")
