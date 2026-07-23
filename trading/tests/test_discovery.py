@@ -44,13 +44,27 @@ def test_screen_needs_60_bars():
     assert discovery.screen_daily(df, CFG) == (0.0, [])
 
 
-def test_parse_stock_list_generic():
+def test_parse_stock_list_real_format():
+    # 실제 ka10099 응답: 배열 키 'list', 필드 code/name
     raw = {"return_code": 0, "list": [
-        {"stk_cd": "A005930", "stk_nm": "삼성전자"},
-        {"stk_cd": "BAD", "stk_nm": "이상한코드"},   # 6자리 숫자 아님 → 제외
+        {"code": "000020", "name": "동화약품", "lastPrice": "00004910"},
+        {"code": "900110", "name": "딥커머스"},
+        {"code": "BAD", "name": "이상한코드"},   # 6자리 숫자 아님 → 제외
     ]}
     out = discovery.parse_stock_list(raw)
-    assert out == [{"code": "005930", "name": "삼성전자"}]
+    assert out == [{"code": "000020", "name": "동화약품"},
+                   {"code": "900110", "name": "딥커머스"}]
+
+
+def test_parse_stock_list_legacy_format():
+    # 문서상 형식(stk_cd/stk_nm)도 하위호환 수용
+    raw = {"return_code": 0, "stk_infr": [{"stk_cd": "A005930", "stk_nm": "삼성전자"}]}
+    assert discovery.parse_stock_list(raw) == [{"code": "005930", "name": "삼성전자"}]
+
+
+def test_parse_stock_list_null_list():
+    # mrkt_tp 잘못된 값 → list=null → 빈 결과 (예외 없이)
+    assert discovery.parse_stock_list({"return_code": 0, "list": None}) == []
 
 
 # --- 급등 조짐(presurge) 필터 ---
