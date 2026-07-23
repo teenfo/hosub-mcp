@@ -98,7 +98,11 @@ export default {
 
     // --- 분석 보고 리스트 + 공용 모달 ---
     const rBody = el("div");
-    reportC.body.append(rBody);
+    reportC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-robot"></i> AI가 전종목 데이터를 분석해 독립 선별 · 기술적 소견 + 최신 뉴스 포함' })),
+      rBody,
+    );
 
     // 리포트 표시 모달 (리스트/야간발굴 링크 공용) — API 설정 모달과 변수 충돌 방지 위해 report* 접두
     const reportModalTitle = el("h5", { class: "modal-title" });
@@ -491,6 +495,8 @@ export default {
         d = await fetchJSON("/api/trading/discovery");
       } catch (e) { return; }
       discoveryC.body.innerHTML = "";
+      discoveryC.body.appendChild(el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-gear"></i> 고정 3규칙(거래량·신고가·정배열) 기계 선별 · ETF/ETN/리츠 제외 · 참고용' })));
       const runBtn = el("button", { class: "btn btn-sm btn-outline-secondary mb-2" },
         d.running ? "실행 중… " + (d.progress || "") : "지금 분석 실행");
       runBtn.disabled = !!d.running;

@@ -94,3 +94,34 @@ def test_parse_surge_fields():
     items = scanner.parse_surge(SURGE_RAW)
     assert items[0]["surge_pct"] == 450.0
     assert items[0]["price"] == 5_000
+
+
+def test_is_excluded_etf_etn_reit():
+    cfg = {}
+    # 실제 발굴에 섞였던 잡주
+    assert discovery.is_excluded("PLUS 단기채권액티브", cfg)
+    assert discovery.is_excluded("RISE 단기채권알파액티브", cfg)
+    assert discovery.is_excluded("코람코더원리츠", cfg)
+    assert discovery.is_excluded("키움 CD금리투자 ETN", cfg)
+    assert discovery.is_excluded("KODEX 200", cfg)
+    assert discovery.is_excluded("TIGER 미국나스닥100", cfg)
+
+
+def test_is_excluded_keeps_common_stocks():
+    cfg = {}
+    for name in ["가비아", "지엔씨에너지", "SK이터닉스", "다날", "한울반도체",
+                 "삼성전자", "메리츠금융지주", "GS"]:
+        assert not discovery.is_excluded(name, cfg), name
+
+
+def test_is_excluded_custom_keywords():
+    cfg = {"exclude_keywords": ["테스트제외"], "exclude_suffixes": [], "exclude_prefixes": []}
+    assert discovery.is_excluded("무언가 테스트제외 종목", cfg)
+    assert not discovery.is_excluded("코람코더원리츠", cfg)  # 커스텀 목록엔 리츠 없음
+
+
+def test_is_excluded_reit_suffix_not_substring():
+    cfg = {}
+    assert discovery.is_excluded("롯데리츠", cfg)          # 접미사 리츠 → 제외
+    assert not discovery.is_excluded("메리츠금융지주", cfg)  # 중간 '리츠' → 유지
+    assert not discovery.is_excluded("메리츠증권", cfg)
