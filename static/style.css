@@ -141,22 +141,22 @@ body.hosub-party .navbar-brand {
 .card-fixed-h > .card-body {
   overflow-y: auto;
 }
-.layout-editing .col[data-card-id] > .card {
+.layout-editing [data-card-id] > .card {
   outline: 2px dashed var(--bs-primary);
   outline-offset: -2px;
 }
-.layout-editing .col[data-card-id] {
+.layout-editing [data-card-id] {
   cursor: grab;
 }
-.layout-editing .col[data-card-id] .card-header {
+.layout-editing [data-card-id] .card-header {
   cursor: grab;
 }
-.col[data-card-id].layout-dragging {
+[data-card-id].layout-dragging {
   opacity: 0.45;
 }
 /* 편집 중에는 카드 본문 클릭을 막아 드래그 중 버튼 오작동(예: 주문 승인)을 방지.
    크기조절 핸들은 .card 직속이라 영향받지 않는다. */
-.layout-editing .col[data-card-id] .card-body {
+.layout-editing [data-card-id] .card-body {
   pointer-events: none;
   user-select: none;
 }
@@ -199,6 +199,6 @@ body.hosub-party .navbar-brand {
   cursor: nwse-resize;
 }
 /* .card 는 position:relative 여야 핸들이 카드 기준으로 붙는다 */
-.col[data-card-id] > .card {
+[data-card-id] > .card {
   position: relative;
 }
