@@ -76,23 +76,31 @@ export default {
 
     const status = card("트레이딩 상태", null, { icon: "bi-activity" });
     const watchC = card("감시목록 관리", null, { icon: "bi-eye" });
-    const apiCfg = card("키움 API 설정", null, { icon: "bi-key" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
     const scannerC = card("급등 스캐너", null, { wide: true, icon: "bi-rocket-takeoff" });
     const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    row.append(status.col, watchC.col, apiCfg.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
+    row.append(status.col, watchC.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
 
-    // --- 감시목록 관리: 직접 추가 + 영속 목록 + 제거 ---
+    // 상태 카드 헤더에 설정(기어) 버튼 추가 → 클릭 시 API 설정 모달 표시
+    const statusHeader = status.col.querySelector(".card-header");
+    statusHeader.classList.add("d-flex", "justify-content-between", "align-items-center");
+    const gearBtn = el("button", {
+      class: "btn btn-sm btn-link p-0 text-secondary", title: "키움 API 설정",
+    }, el("i", { class: "bi bi-gear-fill" }));
+    statusHeader.appendChild(gearBtn);
+
+    // --- 감시목록 관리: 종목명/코드로 추가 + 영속 목록 + 제거 ---
     const SOURCE_BADGE = { seed: ["기본", "secondary"], manual: ["수동", "primary"], auto: ["발굴", "warning"] };
-    const wCode = el("input", { class: "form-control form-control-sm", placeholder: "종목코드 6자리", maxlength: "6" });
-    const wName = el("input", { class: "form-control form-control-sm", placeholder: "종목명 (선택)" });
+    const wQuery = el("input", { class: "form-control form-control-sm",
+      placeholder: "종목명 또는 코드 (예: 삼성전자 / 005930)" });
     const wAdd = el("button", { class: "btn btn-sm btn-primary" }, "추가");
-    const wMsg = el("div", { class: "small text-danger mt-1" });
+    const wMsg = el("div", { class: "small mt-1" });
+    const wCands = el("div", { class: "d-flex flex-wrap gap-1 mt-1" });  // 후보 선택 칩
     const wTblWrap = el("div", { class: "table-responsive mt-2" });
     watchC.body.append(
-      el("div", { class: "d-flex gap-1" }, [wCode, wName, wAdd]), wMsg, wTblWrap,
+      el("div", { class: "d-flex gap-1" }, [wQuery, wAdd]), wMsg, wCands, wTblWrap,
     );
     const loadWatch = async () => {
       let w;
@@ -119,18 +127,41 @@ export default {
       tbl.appendChild(tb);
       wTblWrap.appendChild(tbl);
     };
-    wAdd.onclick = async () => {
+    const addByQuery = async (payload, msgOnMulti) => {
       wMsg.textContent = "";
-      const code = wCode.value.trim();
-      if (!/^\d{6}$/.test(code)) { wMsg.textContent = "종목코드는 숫자 6자리입니다"; return; }
+      wMsg.className = "small mt-1";
+      wCands.innerHTML = "";
       wAdd.disabled = true;
       try {
-        await postJSON("/api/trading/watchlist", { code, name: wName.value.trim() });
-        wCode.value = wName.value = "";
+        const r = await postJSON("/api/trading/watchlist", payload);
+        if (r.candidates) {
+          // 여러 종목 매칭 → 선택 칩 표시
+          wMsg.className = "small mt-1 text-secondary";
+          wMsg.textContent = msgOnMulti || `여러 종목이 검색됨 — 선택하세요 (${r.candidates.length})`;
+          for (const c of r.candidates) {
+            const chip = el("button", { class: "btn btn-sm btn-outline-primary py-0" },
+              `${c.name} (${c.code})`);
+            chip.onclick = () => addByQuery({ code: c.code, name: c.name });
+            wCands.appendChild(chip);
+          }
+          return;
+        }
+        // 성공
+        wQuery.value = "";
         loadWatch(); loadStatus();
-      } catch (e) { wMsg.textContent = "추가 실패: " + e.message; }
-      finally { wAdd.disabled = false; }
+      } catch (e) {
+        wMsg.className = "small mt-1 text-danger";
+        wMsg.textContent = "추가 실패: " + e.message;
+      } finally {
+        wAdd.disabled = false;
+      }
     };
+    wAdd.onclick = () => {
+      const q = wQuery.value.trim();
+      if (!q) { wMsg.className = "small mt-1 text-danger"; wMsg.textContent = "종목명 또는 코드를 입력하세요"; return; }
+      addByQuery({ query: q });
+    };
+    wQuery.onkeydown = (e) => { if (e.key === "Enter") wAdd.onclick(); };
 
     // --- 키움 API 설정 폼 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
     const envSel = el("select", { class: "form-select form-select-sm" }, [
@@ -144,13 +175,34 @@ export default {
     const cfgMsg = el("div", { class: "small mt-2" });
     const field = (label, input) =>
       el("div", { class: "mb-2" }, [el("label", { class: "form-label small mb-1" }, label), input]);
-    apiCfg.body.append(
+
+    // API 설정 모달 (기어 버튼으로 연다)
+    const modalBody = el("div", { class: "modal-body" }, [
       field("환경", envSel),
       field("앱키 (App Key)", appKeyIn),
       field("시크릿 키 (Secret Key)", secretIn),
       field("계좌번호", accountIn),
-      saveBtn, cfgMsg,
+      cfgMsg,
+    ]);
+    const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
+      el("div", { class: "modal-dialog modal-dialog-centered" },
+        el("div", { class: "modal-content" }, [
+          el("div", { class: "modal-header" }, [
+            el("h5", { class: "modal-title", html: '<i class="bi bi-key"></i> 키움 API 설정' }),
+            el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
+          ]),
+          modalBody,
+          el("div", { class: "modal-footer" }, [
+            el("button", { class: "btn btn-sm btn-secondary", type: "button", "data-bs-dismiss": "modal" }, "닫기"),
+            saveBtn,
+          ]),
+        ]),
+      ),
     );
+    container.appendChild(modalEl);
+    saveBtn.className = "btn btn-sm btn-primary";  // 모달 푸터용 (mt-2 제거)
+    const settingsModal = new bootstrap.Modal(modalEl);
+    gearBtn.onclick = () => { loadSettings(); settingsModal.show(); };
 
     const loadSettings = async () => {
       try {
