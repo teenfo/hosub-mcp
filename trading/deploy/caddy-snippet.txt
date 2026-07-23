@@ -1,0 +1,7 @@
+# Caddyfile 에 추가 (기존 hosub-mcp 대시보드와 같은 방식)
+# 외부 노출 시 반드시 HTTPS + 강한 DASH_PASSWORD. 실전 계좌 전환 후에는
+# Cloudflare Access 등 추가 인증 계층을 강력 권장.
+
+trading.example.com {
+    reverse_proxy 127.0.0.1:8600
+}
