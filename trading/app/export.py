@@ -55,8 +55,14 @@ def write_dataset(date: str, rows: list[dict]) -> dict:
         "features_file": str(features_path),
         "symbol_count": int(len(df)),
         "columns": COLUMN_DOC,
+        "bars_db": str(Path(settings.DATA_DIR) / "market.db"),
+        "bars_query_example": (
+            "sqlite3 -header -csv <bars_db> \"SELECT ts,open,high,low,close,volume "
+            "FROM bars WHERE symbol='005930' AND tf='1d' ORDER BY ts DESC LIMIT 80\""
+        ),
         "note": "전종목 피처 스냅샷. liquid=1 로 필터 후 분석 권장. "
-        "발굴 3규칙(score)은 참고용이며, 분석기가 자유롭게 재랭킹할 수 있다.",
+        "발굴 3규칙(score)은 참고용이며, 분석기가 자유롭게 재랭킹할 수 있다. "
+        "선별 종목의 원본 일봉(OHLCV)은 bars_db 에서 bars_query_example 로 조회.",
     }
     (DATASET_DIR / "latest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"

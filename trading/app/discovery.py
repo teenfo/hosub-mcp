@@ -171,7 +171,7 @@ class Discovery:
             self.running = False
 
     async def loop(self) -> None:
-        """평일 17:30 KST 에 1회 실행."""
+        """평일 17:30 KST 에 1회 실행. 재시작해도 오늘 결과가 DB 에 있으면 건너뛴다."""
         done_for: str = ""
         while True:
             try:
@@ -184,6 +184,9 @@ class Discovery:
                     and done_for != today
                     and settings.CONFIG.get("discovery", {}).get("enabled", True)
                 ):
+                    if self.latest().get("date") == today:
+                        done_for = today  # 이미 오늘 실행됨 (재시작 후 중복 방지)
+                        continue
                     await self.run_once()
                     done_for = today
             except Exception:  # noqa: BLE001
