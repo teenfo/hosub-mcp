@@ -45,6 +45,9 @@ export:
 execution:
   enabled: true
   rt_type: "00"                 # 주문체결 실시간 타입(계좌 스코프)
+  # 자동 청산 — 키움 REST 는 스톱주문이 없어 서버가 감시 후 직접 발주한다.
+  auto_exit: true               # false 면 청산 자동화 끔(장부 기록만)
+  stop_mode: auto               # auto=손절 즉시 시장가 매도(B) / approve=손절도 승인(A). 목표는 항상 승인.
   # fids:                       # 기본값 사용. 검증 후 필요 시 덮어쓰기.
   #   ord_no: "9203"            # 주문번호
   #   symbol: "9001"            # 종목코드

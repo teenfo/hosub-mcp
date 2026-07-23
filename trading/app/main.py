@@ -73,24 +73,43 @@ def _price_of(symbol: str) -> float | None:
 
 
 async def _ledger_loop() -> None:
-    """오픈 포지션 손절/목표 감시(장중 30초) + 장 마감 미청산분 정리(1회)."""
-    from .trade import ledger
+    """오픈 포지션 청산 감시(장중 30초) + 장 마감 미청산분 정리(1회).
+
+    키움 REST 는 스톱주문이 없어 서버가 감시 후 직접 발주한다.
+    - 손절 도달: stop_mode=auto 면 즉시 시장가 매도(계좌 보호), approve 면 승인 대기
+    - 목표 도달: 승인 대기(청산 매도) — 사용자가 확인 후 발주
+    - 장 마감: 미청산분 시장가 정리
+    execution.auto_exit=false 면 전체 비활성(장부 기록만)."""
+    from .trade import ledger, orders
 
     eod_done = ""
     while True:
         try:
+            cfg = settings.CONFIG.get("execution", {})
             now = datetime.now(KST)
             hhmm = now.strftime("%H:%M")
-            if now.weekday() < 5:
+            if cfg.get("auto_exit", True) and now.weekday() < 5:
+                stop_mode = cfg.get("stop_mode", "auto")   # auto(B) / approve(A)
                 if "09:00" <= hhmm <= "15:30":
-                    await asyncio.to_thread(ledger.monitor, _price_of)
+                    for ex in await asyncio.to_thread(ledger.due_exits, _price_of):
+                        if ex["reason"] == "stop" and stop_mode == "auto":
+                            r = await orders.execute_exit(ex, "stop", ex["exit_px"])
+                            log.info("손절 자동청산 %s: %s", ex["symbol"], r.get("status"))
+                        else:  # 목표 도달, 또는 손절 승인모드(A)
+                            await asyncio.to_thread(orders.propose_exit, ex,
+                                                    ex["reason"], ex["exit_px"])
+                            log.info("청산 승인 대기 %s (%s)", ex["symbol"], ex["reason"])
                 elif hhmm > "15:30" and eod_done != now.date().isoformat():
-                    n = await asyncio.to_thread(ledger.force_close_eod, _price_of)
+                    n = 0
+                    for pos in await asyncio.to_thread(ledger.positions, "open", 200):
+                        px = _price_of(pos["symbol"]) or pos["entry"]
+                        r = await orders.execute_exit(pos, "eod", px)
+                        n += 1 if r.get("ok") else 0
                     eod_done = now.date().isoformat()
                     if n:
-                        log.info("장 마감 미청산 %d건 종가 정리", n)
+                        log.info("장 마감 미청산 %d건 시장가 정리", n)
         except Exception:  # noqa: BLE001
-            log.exception("실거래 성과 감시 오류")
+            log.exception("청산 감시 오류")
         await asyncio.sleep(30)
 
 
