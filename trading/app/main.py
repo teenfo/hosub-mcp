@@ -11,6 +11,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
 from .data import store
+from .discovery import Discovery
 from .data.collector import BarAggregator
 from .kiwoom.auth import token_manager
 from .kiwoom.ws import RealtimeFeed
@@ -25,6 +26,7 @@ engine = SignalEngine()
 aggregator = BarAggregator()
 feed = RealtimeFeed(aggregator.on_tick)
 scanner = Scanner()
+discovery = Discovery()
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
 
 
@@ -47,6 +49,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(engine.loop()),
         asyncio.create_task(_feed_starter()),
         asyncio.create_task(scanner.loop()),
+        asyncio.create_task(discovery.loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
@@ -186,7 +189,24 @@ async def api_account(_=Depends(require_auth)):
 @app.get("/api/scanner")
 async def api_scanner(_=Depends(require_auth)):
     return {"last_scan": scanner.last_scan, "results": scanner.results,
+            "presurge": scanner.presurge,
             "config": settings.CONFIG.get("scanner", {})}
+
+
+@app.get("/api/discovery")
+async def api_discovery(_=Depends(require_auth)):
+    return discovery.latest()
+
+
+@app.post("/api/discovery/run")
+async def api_discovery_run(_=Depends(require_auth)):
+    """야간 배치 수동 실행 (조회성 — 주문 없음). 전종목 수집이라 수 분 소요."""
+    if discovery.running:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    if not settings.KIWOOM_APP_KEY:
+        return JSONResponse({"ok": False, "error": "API 키 미설정"}, 400)
+    asyncio.create_task(discovery.run_once())
+    return {"ok": True, "message": "백그라운드 실행 시작 — 진행 상황은 /api/discovery"}
 
 
 @app.post("/api/watchlist")

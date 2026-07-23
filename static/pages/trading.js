@@ -78,9 +78,10 @@ export default {
     const apiCfg = card("키움 API 설정", null, { icon: "bi-key" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
     const scannerC = card("급등 스캐너 (하락장 주도주)", null, { wide: true, icon: "bi-rocket-takeoff" });
+    const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    row.append(status.col, apiCfg.col, pending.col, scannerC.col, chart.col, signals.col);
+    row.append(status.col, apiCfg.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
 
     // --- 키움 API 설정 폼 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
     const envSel = el("select", { class: "form-select form-select-sm" }, [
@@ -235,14 +236,7 @@ export default {
       scannerC.body.appendChild(el("div", { class: "text-secondary small mb-2" },
         `등락률 +${cfg.min_change_pct ?? 3}% ↑ · 거래대금 상위 교차 · ` +
         (sc.last_scan ? `마지막 스캔 ${sc.last_scan.slice(11, 19)}` : "장중에만 스캔")));
-      if (!sc.results.length) {
-        scannerC.body.appendChild(el("div", { class: "text-secondary small" }, "조건에 맞는 급등 종목 없음"));
-        return;
-      }
-      const tbl = el("table", { class: "table table-sm align-middle mb-0" });
-      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>현재가</th><th>등락률</th><th>거래대금</th><th></th></tr>" }));
-      const tb = el("tbody");
-      for (const r of sc.results) {
+      const watchBtn = (r) => {
         const add = el("button", { class: "btn btn-sm btn-outline-primary" }, "감시 추가");
         add.onclick = async () => {
           add.disabled = true;
@@ -252,16 +246,89 @@ export default {
             loadStatus();
           } catch (e) { alert("실패: " + e.message); add.disabled = false; }
         };
+        return add;
+      };
+      // --- 급등 조짐 (거래량 선행) ---
+      if ((sc.presurge || []).length) {
+        scannerC.body.appendChild(el("div", { class: "small fw-bold text-warning" }, "⚡ 급등 조짐 — 거래량 급증, 가격은 아직"));
+        const ptbl = el("table", { class: "table table-sm align-middle mb-2" });
+        ptbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>현재가</th><th>등락률</th><th>거래량 급증률</th><th></th></tr>" }));
+        const ptb = el("tbody");
+        for (const r of sc.presurge) {
+          ptb.appendChild(el("tr", {}, [
+            el("td", {}, `${r.name} (${r.code})`),
+            el("td", {}, fmt(r.price)),
+            el("td", {}, `${r.change_pct >= 0 ? "+" : ""}${r.change_pct.toFixed(1)}%`),
+            el("td", { class: "text-warning" }, `+${fmt(r.surge_pct)}%`),
+            el("td", {}, watchBtn(r)),
+          ]));
+        }
+        ptbl.appendChild(ptb);
+        scannerC.body.appendChild(el("div", { class: "table-responsive" }, ptbl));
+      }
+      if (!sc.results.length) {
+        scannerC.body.appendChild(el("div", { class: "text-secondary small" }, "조건에 맞는 급등 종목 없음"));
+        return;
+      }
+      const tbl = el("table", { class: "table table-sm align-middle mb-0" });
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>현재가</th><th>등락률</th><th>거래대금</th><th></th></tr>" }));
+      const tb = el("tbody");
+      for (const r of sc.results) {
         tb.appendChild(el("tr", {}, [
           el("td", {}, `${r.name} (${r.code})`),
           el("td", {}, fmt(r.price)),
           el("td", { class: "text-danger" }, `+${r.change_pct.toFixed(1)}%`),
           el("td", {}, fmt(r.trade_value)),
-          el("td", {}, add),
+          el("td", {}, watchBtn(r)),
         ]));
       }
       tbl.appendChild(tb);
       scannerC.body.appendChild(el("div", { class: "table-responsive" }, tbl));
+    };
+
+    const loadDiscovery = async () => {
+      let d;
+      try {
+        d = await fetchJSON("/api/trading/discovery");
+      } catch (e) { return; }
+      discoveryC.body.innerHTML = "";
+      const runBtn = el("button", { class: "btn btn-sm btn-outline-secondary mb-2" },
+        d.running ? "실행 중… " + (d.progress || "") : "지금 분석 실행");
+      runBtn.disabled = !!d.running;
+      runBtn.onclick = async () => {
+        if (!confirm("전종목 일봉 수집·분석을 시작할까요? (약 10~15분, 주문 없음)")) return;
+        try { await postJSON("/api/trading/discovery/run"); } catch (e) { alert(e.message); }
+        loadDiscovery();
+      };
+      discoveryC.body.appendChild(el("div", { class: "d-flex gap-2 align-items-center" }, [
+        runBtn,
+        el("span", { class: "text-secondary small" },
+          d.date ? `기준일 ${d.date} · ${d.progress || ""}` : "아직 분석 결과 없음 (평일 17:30 자동 실행)"),
+      ]));
+      if (!(d.picks || []).length) return;
+      const tbl = el("table", { class: "table table-sm align-middle mb-0" });
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>종가</th><th>점수</th><th>발굴 사유</th><th></th></tr>" }));
+      const tb = el("tbody");
+      for (const p of d.picks) {
+        const add = el("button", { class: "btn btn-sm btn-outline-primary" }, "감시 추가");
+        add.onclick = async () => {
+          add.disabled = true;
+          try {
+            await postJSON("/api/trading/watchlist", { code: p.code, name: p.name });
+            add.textContent = "추가됨";
+            loadStatus();
+          } catch (e) { alert("실패: " + e.message); add.disabled = false; }
+        };
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, `${p.name} (${p.code})`),
+          el("td", {}, fmt(p.close)),
+          el("td", {}, String(p.score)),
+          el("td", { class: "small text-secondary" }, (p.reasons || []).join(" · ")),
+          el("td", {}, add),
+        ]));
+      }
+      tbl.appendChild(tb);
+      discoveryC.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
     const loadOrders = async () => {
@@ -330,8 +397,9 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
+    ctx.addTimer(setInterval(loadDiscovery, 30_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
 };
