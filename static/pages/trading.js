@@ -78,6 +78,16 @@ export default {
     const row = el("div", { class: "row g-3" });
     container.appendChild(row);
 
+    // 변경 감지: 폴링 데이터가 실제로 바뀔 때만 DOM 을 다시 그린다.
+    // (차트는 자체 캔버스라 무관 — 이걸로 나머지 카드의 주기적 깜빡임을 없앤다)
+    const _memo = {};
+    const changed = (key, data) => {
+      const s = JSON.stringify(data);
+      if (_memo[key] === s) return false;
+      _memo[key] = s;
+      return true;
+    };
+
     const status = card("트레이딩 상태", null, { icon: "bi-activity" });
     const watchC = card("감시목록 관리", null, { icon: "bi-eye" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
@@ -197,6 +207,7 @@ export default {
     const loadReport = async () => {
       let d;
       try { d = await fetchJSON("/api/night-report"); } catch (e) { return; }
+      if (!changed("report", d)) return;
       rBody.innerHTML = "";
       if (!d.exists || !(d.dates && d.dates.length)) {
         setDiscReportLink(null);
@@ -241,6 +252,7 @@ export default {
     const loadWatch = async () => {
       let w;
       try { w = await fetchJSON("/api/trading/watchlist"); } catch (e) { return; }
+      if (!changed("watch", w)) return;
       wTblWrap.innerHTML = "";
       const tbl = el("table", { class: "table table-sm align-middle mb-0 small" });
       tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>출처</th><th></th></tr>" }));
@@ -392,13 +404,19 @@ export default {
       try {
         s = await fetchJSON("/api/trading/status");
       } catch (e) {
-        status.body.innerHTML = "";
-        status.body.appendChild(
-          el("div", { class: "text-danger small" },
-            "trading 서비스에 연결할 수 없습니다. systemctl status trading 확인.")
-        );
+        if (changed("status", "__err__")) {
+          status.body.innerHTML = "";
+          status.body.appendChild(
+            el("div", { class: "text-danger small" },
+              "trading 서비스에 연결할 수 없습니다. systemctl status trading 확인.")
+          );
+        }
         return;
       }
+      let a = null;
+      try { a = await fetchJSON("/api/trading/account"); } catch (e) { a = null; }
+      // 상태+계좌가 직전과 동일하면 다시 그리지 않는다 (깜빡임 제거)
+      if (!changed("status", [s, a])) return;
       status.body.innerHTML = "";
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
       const list = el("ul", { class: "list-unstyled small mb-0" }, [
@@ -412,8 +430,7 @@ export default {
       ]);
       status.body.appendChild(list);
       // --- 계좌 내역 ---
-      try {
-        const a = await fetchJSON("/api/trading/account");
+      if (a) {
         status.body.appendChild(el("hr", { class: "my-2" }));
         if (!a.ok) {
           status.body.appendChild(
@@ -450,7 +467,7 @@ export default {
             status.body.appendChild(el("div", { class: "text-secondary small" }, "보유 종목 없음"));
           }
         }
-      } catch (e) { /* 계좌 조회 실패는 치명적이지 않음 */ }
+      }
       if (s.watchlist && JSON.stringify(s.watchlist) !== JSON.stringify(watch)) {
         const keep = symbolSel.value;
         watch = s.watchlist;
@@ -468,6 +485,7 @@ export default {
       try {
         sc = await fetchJSON("/api/trading/scanner");
       } catch (e) { return; }
+      if (!changed("scanner", sc)) return;
       scannerC.body.innerHTML = "";
       const cfg = sc.config || {};
       scannerC.body.appendChild(el("div", { class: "text-secondary small mb-2" },
@@ -528,6 +546,7 @@ export default {
       try {
         d = await fetchJSON("/api/trading/discovery");
       } catch (e) { return; }
+      if (!changed("discovery", d)) return;
       discoveryC.body.innerHTML = "";
       discoveryC.body.appendChild(el("div", { class: "small text-secondary mb-2" },
         el("span", { html: '<i class="bi bi-gear"></i> 고정 3규칙(거래량·신고가·정배열) 기계 선별 · ETF/ETN/리츠 제외 · 참고용' })));
@@ -582,6 +601,7 @@ export default {
       try {
         orders = await fetchJSON("/api/trading/orders?status=pending");
       } catch (e) { return; }
+      if (!changed("orders", orders)) return;
       pending.body.innerHTML = "";
       if (!orders.length) {
         pending.body.appendChild(el("div", { class: "text-secondary small" }, "대기 중인 주문 없음"));
@@ -623,6 +643,7 @@ export default {
       try {
         sigs = await fetchJSON("/api/trading/signals");
       } catch (e) { return; }
+      if (!changed("signals", sigs)) return;
       signals.body.innerHTML = "";
       if (!sigs.length) {
         signals.body.appendChild(el("div", { class: "text-secondary small" }, "오늘 신호 없음"));
