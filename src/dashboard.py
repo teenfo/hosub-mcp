@@ -1,15 +1,22 @@
-"""조회 전용 모니터링 대시보드.
+"""조회 전용 모니터링 대시보드 (멀티 페이지).
 
 MCP 서버와 같은 프로세스에 라우트로 마운트되어 sysinfo/service_ops/jobs/audit
 모듈을 재사용한다. 브라우저 접근은 별도 비밀번호 로그인(세션 쿠키)으로 보호되며,
 이는 MCP Bearer 토큰과 완전히 분리된 인증 경계다.
+
+기본 대시보드 외에 데일리 브리핑·Docker·날씨 등 개인 기능 페이지를 제공한다.
+새 기능 데이터는 여기 /api/* 로 추가하고 static/pages/ 에 페이지를 붙인다.
 """
 
 from __future__ import annotations
 
 import hmac
+import json
+import os
 from pathlib import Path
 
+import httpx
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import (
     FileResponse,
     JSONResponse,
@@ -24,6 +31,12 @@ from .context import AppContext
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 _SESSION_KEY = "dash_auth"
+
+# 데일리 브리핑 파일 경로 (Claude 가 MCP write_file 로 여기에 쓴다)
+BRIEFING_PATH = os.environ.get("HOSUB_BRIEFING_PATH", "data/briefing.md")
+# 날씨 위치 (기본 서울). "위도,경도" 형식으로 HOSUB_WEATHER_LATLON 설정 가능.
+_WEATHER_LATLON = os.environ.get("HOSUB_WEATHER_LATLON", "37.5665,126.9780")
+WEATHER_LABEL = os.environ.get("HOSUB_WEATHER_LABEL", "서울")
 
 
 def _is_authed(request) -> bool:
@@ -60,39 +73,112 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         return RedirectResponse("/login", status_code=302)
 
     async def favicon(request):
-        # 브라우저 자동 요청. 매칭 라우트가 없으면 MCP 마운트로 흘러가 401 이 되므로
-        # 여기서 흡수한다.
         return Response(status_code=204)
 
     async def api_status(request):
-        denied = _require_auth_json(request)
-        if denied:
-            return denied
+        if (d := _require_auth_json(request)):
+            return d
         return JSONResponse(sysinfo.collect_status())
 
     async def api_services(request):
-        denied = _require_auth_json(request)
-        if denied:
-            return denied
+        if (d := _require_auth_json(request)):
+            return d
         return JSONResponse({"services": service_ops.query_all(ctx.runner, ctx.registry)})
 
     async def api_jobs(request):
-        denied = _require_auth_json(request)
-        if denied:
-            return denied
+        if (d := _require_auth_json(request)):
+            return d
         limit = _int_param(request, "limit", 10)
         return JSONResponse({"jobs": [j.to_dict() for j in ctx.jobs.list(limit)]})
 
     async def api_audit(request):
-        denied = _require_auth_json(request)
-        if denied:
-            return denied
+        if (d := _require_auth_json(request)):
+            return d
         limit = _int_param(request, "limit", 50)
         return JSONResponse({"audit": ctx.audit.recent(limit)})
 
+    async def api_briefing(request):
+        if (d := _require_auth_json(request)):
+            return d
+        p = Path(BRIEFING_PATH)
+        if not p.is_file():
+            return JSONResponse(
+                {
+                    "exists": False,
+                    "content": "",
+                    "updated_at": None,
+                    "hint": f"Claude 가 write_file 로 {BRIEFING_PATH} 에 브리핑을 쓰면 여기에 표시됩니다.",
+                }
+            )
+        try:
+            content = p.read_text(encoding="utf-8")[:100_000]
+            mtime = p.stat().st_mtime
+        except OSError as exc:
+            return JSONResponse({"exists": False, "content": "", "error": str(exc)})
+        from datetime import datetime, timezone
+
+        return JSONResponse(
+            {
+                "exists": True,
+                "content": content,
+                "updated_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+
+    async def api_docker(request):
+        if (d := _require_auth_json(request)):
+            return d
+        # docker ps 를 러너로 실행 (블로킹이므로 스레드풀)
+        fmt = (
+            '{"id":"{{.ID}}","name":"{{.Names}}","image":"{{.Image}}",'
+            '"status":"{{.Status}}","state":"{{.State}}","ports":"{{.Ports}}"}'
+        )
+        res = await run_in_threadpool(
+            ctx.runner.run,
+            ["docker", "ps", "-a", "--no-trunc", "--format", fmt],
+            timeout=15,
+        )
+        if not res.ok:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "containers": [],
+                    "error": (res.stderr or res.stdout or "docker 실행 실패").strip(),
+                }
+            )
+        containers = []
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                containers.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return JSONResponse({"ok": True, "containers": containers})
+
+    async def api_weather(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            lat, lon = _WEATHER_LATLON.split(",")
+            url = (
+                "https://api.open-meteo.com/v1/forecast"
+                f"?latitude={lat.strip()}&longitude={lon.strip()}"
+                "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m,apparent_temperature"
+                "&daily=temperature_2m_max,temperature_2m_min,weather_code"
+                "&timezone=auto&forecast_days=4"
+            )
+            async with httpx.AsyncClient(timeout=8) as client:
+                r = await client.get(url)
+                r.raise_for_status()
+                data = r.json()
+        except Exception as exc:  # 네트워크/파싱 실패 시 graceful
+            return JSONResponse({"ok": False, "label": WEATHER_LABEL, "error": str(exc)})
+        return JSONResponse({"ok": True, "label": WEATHER_LABEL, "data": data})
+
     async def static_file(request):
         # 로그인 페이지 자산(스타일·vendor 라이브러리)은 인증 전에도 필요하므로 공개.
-        # 그 외 자산(app.js, panels/*)은 로그인 후 로드되므로 세션 필요.
         name = request.path_params["path"]
         public = name in _PUBLIC_ASSETS or name.startswith("vendor/")
         if not _is_authed(request) and not public:
@@ -112,6 +198,9 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/services", api_services),
         Route("/api/jobs", api_jobs),
         Route("/api/audit", api_audit),
+        Route("/api/briefing", api_briefing),
+        Route("/api/docker", api_docker),
+        Route("/api/weather", api_weather),
         Route("/static/{path:path}", static_file),
     ]
 
