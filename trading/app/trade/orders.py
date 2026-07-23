@@ -147,11 +147,16 @@ async def approve_and_send(order_id: str) -> dict:
         )
         _audit(conn, order_id, status, detail)
     if status == "sent":
-        # 실거래 성과 로그에 오픈 포지션 기록 (체결가는 최신가 근사)
+        # 실거래 성과 로그에 오픈 포지션 기록. 키움 주문번호(ord_no)를 함께 저장해
+        # 두면 실시간 체결 수신 시 진입가를 실측으로 갱신한다(체결가 근사 → 실측).
         from . import ledger
 
+        ord_no = ""
+        if isinstance(result, dict):
+            ord_no = str(result.get("ord_no") or result.get("odno")
+                         or result.get("order_no") or "").strip()
         try:
-            ledger.open_position(order)
+            ledger.open_position(order, ord_no=ord_no or None)
         except Exception:  # noqa: BLE001 - 로그 실패가 발주를 되돌리지 않는다
             pass
     return {"ok": status == "sent", "status": status, "result": result}

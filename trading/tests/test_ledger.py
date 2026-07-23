@@ -61,6 +61,52 @@ def test_force_close_eod(tmp_path, monkeypatch):
     assert p["exit_reason"] == "eod"
 
 
+def test_parse_execution_default_fids(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "CONFIG", {})
+    vals = {"9203": "0001234", "9001": "A005930", "913": "체결",
+            "910": "10050", "911": "10", "908": "093015"}
+    f = ledger.parse_execution(vals)
+    assert f == {"ord_no": "0001234", "symbol": "005930", "state": "체결",
+                 "price": 10050.0, "qty": 10, "ts": "093015"}
+
+
+def test_record_fill_updates_long_entry_precisely(tmp_path, monkeypatch):
+    _fresh(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG", {})
+    ledger.open_position(_order("o1"), fill=10_000, ord_no="0001234")  # 근사 진입 10,000
+    # 실측 체결가 10,080 수신 → 진입가·슬리피지 정밀 갱신, 체결확인 플래그
+    upd = ledger.record_fill({"ord_no": "0001234", "symbol": "005930",
+                              "price": 10_080, "qty": 10, "state": "체결"})
+    assert upd is True
+    (p,) = ledger.positions(status="open")
+    assert p["entry"] == 10_080 and p["fill_confirmed"] == 1
+    assert round(p["slippage_pct"], 2) == 0.8
+    assert len(ledger.fills()) == 1
+
+
+def test_record_fill_short_audit_only(tmp_path, monkeypatch):
+    _fresh(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG", {})
+    # 숏은 인버스 ETF(114800)로 집행 — 신호 종목(005930)과 다르므로 진입가 미갱신
+    order = _order("o2", side="short")
+    order["exec_symbol"] = "114800"
+    ledger.open_position(order, fill=10_000, ord_no="0009999")
+    upd = ledger.record_fill({"ord_no": "0009999", "symbol": "114800",
+                              "price": 8_500, "qty": 12, "state": "체결"})
+    assert upd is False                       # 진입가 갱신 안 함(감사 기록만)
+    (p,) = ledger.positions(status="open")
+    assert p["entry"] == 10_000 and p["fill_confirmed"] == 0
+    assert ledger.fills()[0]["matched"] == 1  # 주문번호는 매칭됨
+
+
+def test_record_fill_unmatched_ordno_is_safe(tmp_path, monkeypatch):
+    _fresh(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "CONFIG", {})
+    assert ledger.record_fill({"ord_no": "zzz", "symbol": "005930",
+                               "price": 100, "qty": 1}) is False
+    assert ledger.fills()[0]["matched"] == 0  # 미매칭이어도 예외 없이 감사 기록
+
+
 def test_stats_aggregates_by_rule(tmp_path, monkeypatch):
     _fresh(tmp_path, monkeypatch)
     ledger.open_position(_order("w", rule="orb"), fill=10_000)

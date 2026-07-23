@@ -16,11 +16,13 @@ from .auth import token_manager
 log = logging.getLogger(__name__)
 
 TickHandler = Callable[[str, float, int, str], Awaitable[None]]
+FillHandler = Callable[[dict], Awaitable[None]]
 
 
 class RealtimeFeed:
-    def __init__(self, on_tick: TickHandler) -> None:
+    def __init__(self, on_tick: TickHandler, on_fill: FillHandler | None = None) -> None:
         self.on_tick = on_tick
+        self.on_fill = on_fill        # 주문체결 실시간(type 00) 콜백 — 실측 체결가 기록
         self._symbols: set[str] = set()
         self._task: asyncio.Task | None = None
         self._ws = None
@@ -61,20 +63,20 @@ class RealtimeFeed:
         finally:
             self._ws = None
 
+    def _exec_type(self) -> str | None:
+        cfg = settings.CONFIG.get("execution", {})
+        if self.on_fill is None or not cfg.get("enabled", True):
+            return None
+        return str(cfg.get("rt_type", "00"))  # 00=주문체결(계좌 스코프)
+
     async def _session(self, ws, token: str) -> None:
         await ws.send(json.dumps({"trnm": "LOGIN", "token": token}))
-        await ws.send(
-            json.dumps(
-                {
-                    "trnm": "REG",
-                    "grp_no": "1",
-                    "refresh": "1",
-                    "data": [
-                        {"item": sorted(self._symbols), "type": ["0B"]}  # 0B=주식체결
-                    ],
-                }
-            )
-        )
+        data = [{"item": sorted(self._symbols), "type": ["0B"]}]  # 0B=주식체결
+        exec_type = self._exec_type()
+        if exec_type:
+            data.append({"item": [""], "type": [exec_type]})     # 주문체결(계좌)
+        await ws.send(json.dumps(
+            {"trnm": "REG", "grp_no": "1", "refresh": "1", "data": data}))
         async for raw in ws:
             msg = json.loads(raw)
             if msg.get("trnm") == "PING":
@@ -83,7 +85,11 @@ class RealtimeFeed:
             if msg.get("trnm") != "REAL":
                 continue
             for item in msg.get("data", []):
+                rtype = str(item.get("type") or item.get("name") or "")
                 values = item.get("values", {})
+                if exec_type and rtype == exec_type:
+                    await self._handle_fill(values)
+                    continue
                 symbol = item.get("item", "")
                 try:
                     price = abs(float(values.get("10", 0)))   # 현재가
@@ -93,3 +99,17 @@ class RealtimeFeed:
                     continue
                 if symbol and price:
                     await self.on_tick(symbol, price, volume, ts)
+
+    async def _handle_fill(self, values: dict) -> None:
+        """주문체결 실시간 수신 → 파싱해 on_fill 로 전달. FID 검증용으로 raw 도 로깅."""
+        from ..trade import ledger
+
+        try:
+            fill = ledger.parse_execution(values)
+        except Exception:  # noqa: BLE001
+            log.warning("주문체결 파싱 실패 raw=%s", values)
+            return
+        log.info("주문체결 수신 ord_no=%s %s %s×%s (raw=%s)", fill.get("ord_no"),
+                 fill.get("symbol"), fill.get("price"), fill.get("qty"), values)
+        if self.on_fill and (fill.get("price") or fill.get("ord_no")):
+            await self.on_fill(fill)

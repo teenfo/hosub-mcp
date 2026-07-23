@@ -40,6 +40,19 @@ export:
   enabled: true
   keep_days: 30                 # datasets/<날짜>/ 보관 일수
 
+# 주문체결 실시간 수신 (실측 체결가로 진입가 정밀화). FID 코드는 계정/환경마다
+# 다를 수 있어 라이브 체결 로그(주문체결 수신 INFO)로 검증 후 아래 fids 를 조정한다.
+execution:
+  enabled: true
+  rt_type: "00"                 # 주문체결 실시간 타입(계좌 스코프)
+  # fids:                       # 기본값 사용. 검증 후 필요 시 덮어쓰기.
+  #   ord_no: "9203"            # 주문번호
+  #   symbol: "9001"            # 종목코드
+  #   state:  "913"             # 주문상태(접수/체결)
+  #   price:  "910"             # 체결가
+  #   qty:    "911"             # 체결량
+  #   ts:     "908"             # 체결시간
+
 # 분봉 축적분 주기 백테스트 리포트 (평일 장 마감 후 1회, 결과 스냅샷 보관)
 backtest:
   report_enabled: true

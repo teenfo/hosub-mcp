@@ -170,7 +170,7 @@ export default {
     const perfBody = el("div");
     perfC.body.append(
       el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-cash-coin"></i> 승인·발주된 신호의 <b>진입가·청산가·실현손익·슬리피지</b>를 추적. 손절/목표 터치는 장중 30초 감시, 미청산분은 장 마감에 종가 정리. 딥리서치의 "실력 지속성은 실재" 검증용.' })),
+        el("span", { html: '<i class="bi bi-cash-coin"></i> 승인·발주된 신호의 <b>진입가·청산가·실현손익·슬리피지</b>를 추적. 진입가는 주문체결 실시간 수신 시 <b>실측</b>으로 갱신(미수신분은 <b>근사</b>). 손절/목표 터치는 장중 30초 감시, 미청산분은 장 마감에 종가 정리. 딥리서치의 "실력 지속성은 실재" 검증용.' })),
       perfBody,
     );
     const closePosition = async (id) => {
@@ -212,12 +212,15 @@ export default {
       perfBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, `보유(추적 중) ${opens.length}건`));
       if (opens.length) {
         const t = el("table", { class: "table table-sm align-middle mb-3 small" });
-        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입</th><th>손절</th><th>목표</th><th></th></tr>" }));
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입</th><th>체결</th><th>손절</th><th>목표</th><th></th></tr>" }));
         const tb = el("tbody");
         for (const p of opens) {
+          const fc = p.fill_confirmed
+            ? '<span class="badge text-bg-success">실측</span>'
+            : '<span class="badge text-bg-secondary">근사</span>';
           const tr = el("tr", {
             html: `<td>${p.name || p.symbol}</td><td>${p.rule}</td>` +
-              `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)}</td>` +
+              `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)}</td><td>${fc}</td>` +
               `<td>${fmt(p.stop)}</td><td>${fmt(p.target)}</td>`,
           });
           const td = el("td");
@@ -235,13 +238,15 @@ export default {
       if (closed.length) {
         perfBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, "최근 청산"));
         const t = el("table", { class: "table table-sm align-middle mb-0 small" });
-        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입→청산</th><th>사유</th><th>손익%</th><th>손익</th></tr>" }));
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입→청산</th><th>체결</th><th>사유</th><th>손익%</th><th>손익</th></tr>" }));
         const tb = el("tbody");
         for (const p of closed) {
           const cls = p.pnl_pct >= 0 ? "text-danger" : "text-primary";
+          const fc = p.fill_confirmed ? "실측" : "근사";
           tb.appendChild(el("tr", {
             html: `<td>${p.name || p.symbol}</td><td>${p.rule}</td>` +
               `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)} → ${fmt(p.exit)}</td>` +
+              `<td class="text-secondary">${fc}</td>` +
               `<td>${p.exit_reason}</td><td class="${cls}">${pct(p.pnl_pct)}</td>` +
               `<td class="${cls}">${won(p.pnl_krw)}</td>`,
           }));
