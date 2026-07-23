@@ -54,6 +54,7 @@ export default {
     ]));
     const tbl = el("table", { class: "table table-sm table-hover align-middle mb-0" },
       [thead, el("tbody", {}, rows)]);
-    body.appendChild(el("div", { class: "table-responsive" }, tbl));
+    // 높이 고정 + 세로 스크롤 (헤더는 sticky)
+    body.appendChild(el("div", { class: "table-responsive audit-scroll" }, tbl));
   },
 };

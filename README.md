@@ -108,8 +108,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 더하고 페이지에서 `fetchJSON("/api/<기능>")` 로 읽는다. 외부 API 는 브라우저가 아니라
 **서버측에서** 호출해 자체완결(외부 요청 0)을 유지한다(날씨 페이지가 그 예).
 
-`static/panels/home.js` 는 "홈" 컨텐츠 placeholder, 이스터에그 훅(코나미 → 파티 모드)은
-`static/app.js` 하단에 있다.
+이스터에그 훅(코나미 → 파티 모드)은 `static/app.js` 하단에 있다.
 
 ## 배포
 
