@@ -88,16 +88,28 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 `run_command` / `write_file` 은 레지스트리와 무관하게 임의 대상을 다루므로, 방어는
 `confirm` 게이트와 감사 로그에 의존한다.
 
-## 대시보드 확장 (패널 추가)
+## 대시보드 확장 (페이지 / 패널 추가)
 
-대시보드는 패널 단위로 구성된다. 새 패널 추가:
+대시보드는 사이드바로 전환하는 **멀티 페이지** 구조다. 현재 페이지: 대시보드(시스템/
+서비스/잡/감사/홈)·데일리 브리핑·날씨·Docker.
 
-1. `static/panels/<이름>.js` 에 `export default { id, title, refreshMs, render(bodyEl) }`
-2. `static/panels/index.js` 의 `PANELS` 배열에 `import` 한 줄 추가
+**새 페이지 추가** (사이드바·라우팅 자동 생성):
 
-`static/panels/home.js` 가 "홈" 컨텐츠 자리(placeholder)이며, 이스터에그 훅은
-`static/app.js` 하단(코나미 코드 → 파티 모드)에 있다. 서버 변경 없이 프론트엔드만으로
-날씨·미디어·메모 등 홈 위젯을 붙일 수 있다.
+1. `static/pages/<이름>.js` 에 `export default { id, title, icon, render(container, ctx) }`
+   - 주기 갱신은 `ctx.addTimer(setInterval(...))` 로 등록(페이지 이동 시 자동 정리)
+2. `static/pages/index.js` 의 `PAGES` 배열에 `import` 한 줄 추가
+
+**페이지 안에 카드(패널) 추가**: 기본 "대시보드" 페이지는 `static/panels/*` 를
+`mountPanels` 로 렌더한다. 새 패널은 `static/panels/<이름>.js`
+(`{ id, title, icon, wide?, refreshMs, render(bodyEl) }`) + `static/pages/dashboard.js`
+의 목록에 추가. 공용 헬퍼는 `static/app.js` 의 `el`/`fetchJSON`/`bar`/`badge`/`card`.
+
+**서버 데이터가 필요하면** `src/dashboard.py` 에 `/api/<기능>` 엔드포인트(세션 인증)를
+더하고 페이지에서 `fetchJSON("/api/<기능>")` 로 읽는다. 외부 API 는 브라우저가 아니라
+**서버측에서** 호출해 자체완결(외부 요청 0)을 유지한다(날씨 페이지가 그 예).
+
+`static/panels/home.js` 는 "홈" 컨텐츠 placeholder, 이스터에그 훅(코나미 → 파티 모드)은
+`static/app.js` 하단에 있다.
 
 ## 배포
 
