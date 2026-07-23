@@ -173,8 +173,9 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 >
 > 노출 방법 두 가지 — 상황에 맞게 택1:
 > - **7-A. Cloudflare Tunnel** — Cloudflare 관리 도메인이 있을 때. 포트 개방 불필요.
-> - **부록 B. iptime DDNS + Caddy** — **도메인 구매 없이** 무료 DDNS(`kch83.iptime.org`)로
->   노출. 포트포워딩 + Caddy 자동 TLS. → 이 문서 맨 아래 부록 B 참고.
+> - **부록 B. DuckDNS + Caddy** — **도메인 구매 없이** 무료 DuckDNS 서브도메인으로
+>   노출. 포트포워딩 + Caddy 자동 TLS. (iptime DDNS 는 CAA 로 인증서 발급 불가 →
+>   DuckDNS 사용) → 이 문서 맨 아래 부록 B 참고.
 
 ### 7-A. Cloudflare Tunnel
 
@@ -330,12 +331,51 @@ sudo systemctl daemon-reload
 
 ---
 
-## 부록 B. iptime DDNS + Caddy 노출 (도메인 구매 불필요)
+## 부록 B. DuckDNS + Caddy 노출 (도메인 구매 불필요)
 
-Cloudflare 관리 도메인 없이, **무료 iptime DDNS(`kch83.iptime.org`)** 로 앱 커넥터용
-HTTPS 를 만든다. Caddy 가 Let's Encrypt/ZeroSSL 인증서를 자동 발급·갱신한다.
+Cloudflare 관리 도메인 없이, **무료 DuckDNS 서브도메인**으로 앱 커넥터용 HTTPS 를
+만든다. Caddy 가 Let's Encrypt/ZeroSSL 인증서를 자동 발급·갱신한다.
 
-### B.1 iptime 공유기 포트포워딩
+> ### ⚠️ iptime DDNS(`*.iptime.org`) 는 인증서 발급이 불가능하다
+> iptime 이 도메인 전체에 **CAA 레코드(`CAA 0 issue ";"`)** 를 걸어 **모든 CA 의 인증서
+> 발급을 차단**한다(사용자가 못 바꿈). 그래서 `kch83.iptime.org` 로는 Let's Encrypt/
+> ZeroSSL 어느 쪽도 발급되지 않고, 자체서명 인증서는 Claude 커넥터가 거부한다.
+> DDNS(이름→IP) 자체는 정상이지만 **HTTPS 를 못 씌운다.** → 해결: 같은 집 IP를
+> 가리키는 **DuckDNS 서브도메인**을 추가로 등록한다(iptime DDNS 는 그대로 둬도 됨).
+>
+> ```
+> kch83.iptime.org  ─┐
+>                     ├─→ 집 공인 IP → 공유기 → 서버(192.168.0.3)
+> hosub.duckdns.org ─┘        (DuckDNS 는 CAA 제약 없음 → 인증서 발급 가능 ✅)
+> ```
+
+### B.1 DuckDNS 서브도메인 등록
+
+1. <https://www.duckdns.org> 접속 → Google/GitHub 등으로 로그인
+2. 서브도메인 하나 생성 (예: `hosub` → `hosub.duckdns.org`)
+3. 페이지 상단의 **token** 값 확인 (비밀값)
+
+`.env` 에 등록 (토큰은 서버에서 직접 입력, 커밋 금지):
+
+```bash
+sudo -u hosub sed -i 's/^DUCKDNS_DOMAIN=.*/DUCKDNS_DOMAIN=hosub/' /opt/hosub-mcp/.env
+sudo -u hosub vi /opt/hosub-mcp/.env      # DUCKDNS_TOKEN=<본인 토큰> 입력
+```
+
+IP 자동 갱신 타이머 설치·기동:
+
+```bash
+sudo install -m 644 /opt/hosub-mcp/deploy/duckdns-update.service /etc/systemd/system/
+sudo install -m 644 /opt/hosub-mcp/deploy/duckdns-update.timer /etc/systemd/system/
+sudo chmod +x /opt/hosub-mcp/deploy/duckdns-update.sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now duckdns-update.timer
+# 즉시 1회 갱신 + 확인 (OK 나오면 성공)
+sudo -u hosub bash -c 'set -a; . /opt/hosub-mcp/.env; set +a; /opt/hosub-mcp/deploy/duckdns-update.sh'
+getent hosts hosub.duckdns.org      # 집 공인 IP로 해석되는지
+```
+
+### B.2 iptime 공유기 포트포워딩
 
 iptime 관리자(`192.168.0.1`) → 고급설정 → NAT/라우터 → 포트포워드 설정:
 
@@ -344,10 +384,7 @@ iptime 관리자(`192.168.0.1`) → 고급설정 → NAT/라우터 → 포트포
 | 80 | 192.168.0.3 | 80 | 인증서 발급(HTTP-01 챌린지) |
 | 443 | 192.168.0.3 | 443 | HTTPS 서비스 |
 
-> DDNS(`kch83.iptime.org`)가 집 공인 IP를 가리키는지 확인: iptime 관리자 → 특수기능 →
-> DDNS 설정에서 "정상 등록" 상태여야 한다.
-
-### B.2 Caddy 설치 + 설정
+### B.3 Caddy 설치 + 설정
 
 ```bash
 # Caddy 설치 (공식 저장소)
@@ -356,37 +393,38 @@ curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --d
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
 sudo apt update && sudo apt install -y caddy
 
-# 설정 배치 (호스트명이 다르면 파일 안의 kch83.iptime.org 를 수정)
+# 설정 배치 (Caddyfile 안의 hosub.duckdns.org 를 본인 서브도메인으로 교체)
 sudo mkdir -p /var/log/caddy
 sudo cp /opt/hosub-mcp/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo sed -i 's/hosub\.duckdns\.org/<본인서브도메인>.duckdns.org/' /etc/caddy/Caddyfile   # 필요 시
 sudo systemctl restart caddy
 
 # 인증서 발급 로그 확인 (certificate obtained 나오면 성공)
 journalctl -u caddy -n 40 --no-pager
 ```
 
-### B.3 확인
+### B.4 확인
 
 ```bash
 # 외부 도달 + 인증 (401 이면 정상: TLS OK + Bearer 요구)
-curl -s -o /dev/null -w "%{http_code}\n" -X POST https://kch83.iptime.org/mcp
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://hosub.duckdns.org/mcp
 
 # .env 에 Host 검증 켜기
-sudo -u hosub sed -i 's/^HOSUB_ALLOWED_HOSTS=.*/HOSUB_ALLOWED_HOSTS=kch83.iptime.org/' /opt/hosub-mcp/.env
+sudo -u hosub sed -i 's/^HOSUB_ALLOWED_HOSTS=.*/HOSUB_ALLOWED_HOSTS=hosub.duckdns.org/' /opt/hosub-mcp/.env
 sudo systemctl restart hosub-mcp
 ```
 
-### B.4 커넥터 등록 / 대시보드
+### B.5 커넥터 등록 / 대시보드
 
-- 커넥터 URL: `https://kch83.iptime.org/mcp` + `Authorization: Bearer <토큰>`
+- 커넥터 URL: `https://hosub.duckdns.org/mcp` + `Authorization: Bearer <토큰>`
   (7-A 의 7.2 절차 동일)
-- 대시보드: `https://kch83.iptime.org/`
+- 대시보드: `https://hosub.duckdns.org/`
 
-### B.5 유의 (직접 노출이라 중요)
+### B.6 유의 (직접 노출이라 중요)
 
 - 포트포워딩은 서버를 **인터넷에 직접 노출**한다. 이 서버는 `run_command` 로 root 까지
   되므로, **Bearer 토큰을 강하게 유지**하고 유출에 각별히 주의한다.
-- Let's Encrypt 는 등록 도메인당 주간 발급 한도가 있다. `iptime.org` 공유 특성상
-  드물게 레이트리밋에 걸릴 수 있는데, Caddy 는 ZeroSSL 로 자동 폴백하므로 대개 해결된다.
+- `DUCKDNS_TOKEN` 은 비밀값이다. `.env`(권한 600) 에만 두고 절대 커밋하지 않는다.
+- Caddy 는 인증서 발급 시 Let's Encrypt → 실패하면 ZeroSSL 로 자동 폴백한다.
 - 필요하면 Caddyfile 의 `@blocked` 예시로 특정 IP만 허용하도록 조일 수 있다.
 - 방화벽(ufw)을 쓰면 80/443 을 열어야 한다: `sudo ufw allow 80,443/tcp`.

@@ -1,0 +1,13 @@
+# /etc/systemd/system/duckdns-update.timer
+# 부팅 1분 후부터 5분 간격으로 DuckDNS IP를 갱신한다.
+# 활성화: sudo systemctl enable --now duckdns-update.timer
+[Unit]
+Description=Run DuckDNS IP update periodically
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

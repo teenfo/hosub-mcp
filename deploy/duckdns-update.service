@@ -1,0 +1,12 @@
+# /etc/systemd/system/duckdns-update.service
+# duckdns-update.timer 가 호출하는 oneshot. 집 공인 IP를 DuckDNS 에 갱신.
+[Unit]
+Description=DuckDNS IP update for hosub-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hosub
+EnvironmentFile=/opt/hosub-mcp/.env
+ExecStart=/opt/hosub-mcp/deploy/duckdns-update.sh

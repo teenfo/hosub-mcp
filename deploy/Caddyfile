@@ -1,20 +1,23 @@
 # hosub-mcp 리버스 프록시 (Caddy)
 #
-# iptime DDNS(도메인 구매 불필요) + 자동 TLS로 MCP 서버를 HTTPS 노출한다.
-# Caddy가 Let's Encrypt/ZeroSSL에서 인증서를 자동 발급·갱신하고, 내부의
-# 평문 uvicorn(127.0.0.1:8700)으로 프록시한다.
+# 공인 HTTPS 노출 + 자동 TLS. Caddy 가 Let's Encrypt/ZeroSSL 에서 인증서를
+# 자동 발급·갱신하고, 내부의 평문 uvicorn(127.0.0.1:8700)으로 프록시한다.
 #
-# 설치: docs/SETUP.md "부록 B. iptime DDNS + Caddy" 참고
+# ⚠️ iptime DDNS(*.iptime.org) 는 사용할 수 없다.
+#    iptime 이 도메인 전체에 CAA 레코드(CAA 0 issue ";")를 걸어 모든 CA 의
+#    인증서 발급을 차단하기 때문이다(사용자가 못 바꿈). 대신 같은 집 IP를
+#    가리키는 DuckDNS 서브도메인을 쓴다. → docs/SETUP.md 부록 B 참고.
+#
+# 설치:
 #   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   # 아래 hosub.duckdns.org 를 본인 DuckDNS 서브도메인으로 교체
 #   sudo systemctl restart caddy
 #
 # 전제:
 #   - iptime 공유기에서 외부 80, 443 → 192.168.0.3(서버)로 포트포워딩
-#   - kch83.iptime.org 가 집 공인 IP를 가리킴(DDNS)
-#
-# 아래 호스트명을 본인 DDNS 주소로 바꾼다.
+#   - hosub.duckdns.org 가 집 공인 IP를 가리킴 (duckdns-update.timer 로 자동 갱신)
 
-kch83.iptime.org {
+hosub.duckdns.org {
 	# 내부 MCP 서버(+대시보드)로 프록시. /mcp, /, /api, /static 모두 통과.
 	reverse_proxy 127.0.0.1:8700
 

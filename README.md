@@ -110,7 +110,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 
 집 LAN 안에서만 쓰면 노출 불필요(`http://192.168.0.3:8700/`). claude.ai·모바일 앱·Cowork 커넥터로 쓰려면 공인 HTTPS 가 필요하며, 방법 두 가지:
 - **Cloudflare Tunnel** — Cloudflare 관리 도메인이 있을 때. 포트 개방 불필요.
-- **iptime DDNS + Caddy** (도메인 구매 불필요) — 무료 DDNS(`kch83.iptime.org`) + 포트포워딩(80/443) + `deploy/Caddyfile` 자동 TLS. → `docs/SETUP.md` 부록 B.
+- **DuckDNS + Caddy** (도메인 구매 불필요) — 무료 DuckDNS 서브도메인 + 포트포워딩(80/443) + `deploy/Caddyfile` 자동 TLS. iptime DDNS(`*.iptime.org`)는 CAA 정책으로 인증서 발급이 막혀 있어 DuckDNS를 쓴다. → `docs/SETUP.md` 부록 B.
 
 ## 보안 노트
 
