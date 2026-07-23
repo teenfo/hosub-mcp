@@ -100,11 +100,60 @@ def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:
     return f["score"], f["reasons"]
 
 
+def _median(xs: list[float]) -> float:
+    s = sorted(xs)
+    n = len(s)
+    if not n:
+        return 0.0
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def compute_market(rows: list[dict], cfg: dict) -> dict:
+    """전종목 피처 → 시장 국면(breadth)·상대강도(RS)·하락 후보. rows 를 제자리 보강.
+
+    각 행에 rs_20(시장 대비 상대강도), bearish_score(0~3) 를 채우고,
+    시장 폭(60이평 상회 비율)으로 강세/중립/약세 국면을 판정한다.
+    딥리서치의 '추세 게이트가 전제' 를 발굴 단계에 반영."""
+    base = [r for r in rows if r.get("liquid") and not r.get("etf_etn")]
+    med20 = _median([r.get("ret_20d", 0) for r in base]) if base else 0.0
+    for r in rows:
+        r["rs_20"] = round(r.get("ret_20d", 0) - med20, 1)
+        bs = 0
+        if r.get("bearish_align"):
+            bs += 1
+        if r.get("close") and r.get("ma60") and r["close"] < r["ma60"]:
+            bs += 1
+        if r.get("near_low60_pct", 999) <= 105:      # 60일 저점 5% 이내
+            bs += 1
+        r["bearish_score"] = bs
+    n = len(base) or 1
+    breadth60 = round(100 * sum(r.get("above_ma60", 0) for r in base) / n, 1)
+    breadth20 = round(100 * sum(r.get("above_ma20", 0) for r in base) / n, 1)
+    rcfg = cfg.get("regime", {})
+    bull_th = rcfg.get("bull_breadth", 60)
+    bear_th = rcfg.get("bear_breadth", 40)
+    regime = "강세" if breadth60 >= bull_th else ("약세" if breadth60 <= bear_th else "중립")
+    # 하락(숏) 후보 상위
+    bmin = cfg.get("bearish_min_score", 2)
+    bear = [r for r in base if r.get("bearish_score", 0) >= bmin]
+    bear.sort(key=lambda r: (-r["bearish_score"], r.get("rs_20", 0)))
+    bear_top = [{"code": r["code"], "name": r["name"], "close": r["close"],
+                 "bearish_score": r["bearish_score"], "rs_20": r["rs_20"],
+                 "near_low60_pct": r.get("near_low60_pct")}
+                for r in bear[: cfg.get("top_n", 20)]]
+    return {
+        "regime": regime, "breadth_ma60": breadth60, "breadth_ma20": breadth20,
+        "median_ret20": round(med20, 1), "analyzed": len(base),
+        "bearish_count": len(bear), "bearish_top": bear_top,
+    }
+
+
 class Discovery:
     def __init__(self) -> None:
         self.running = False
         self.progress = ""
         self.last_run = ""
+        self.market: dict = {}      # 최근 시장 국면·상대강도·하락 후보 요약
 
     def latest(self) -> dict:
         with _conn() as conn:
@@ -119,8 +168,10 @@ class Discovery:
                         (date,),
                     )
                 ]
+        market = self.market or (export.latest_manifest() or {}).get("market", {})
         return {"date": date, "picks": picks, "running": self.running,
-                "progress": self.progress, "last_run": self.last_run}
+                "progress": self.progress, "last_run": self.last_run,
+                "market": market}
 
     async def run_once(self) -> int:
         """전종목 수집 + 스크리닝. 반환: 발굴 종목 수."""
@@ -178,10 +229,13 @@ class Discovery:
             scored.sort(key=lambda x: -x["score"])
             top = scored[: cfg.get("top_n", 20)]
             today = datetime.now(KST).date().isoformat()
+            # 시장 국면(breadth) + 상대강도(RS) + 하락(숏) 후보 점수 산출
+            market = compute_market(feature_rows, cfg)
+            self.market = market
             # 전종목 피처를 파일로 내보내 외부 스케줄러/분석기가 소비하게 한다
             if settings.CONFIG.get("export", {}).get("enabled", True) and feature_rows:
                 try:
-                    export.write_dataset(today, feature_rows)
+                    export.write_dataset(today, feature_rows, market=market)
                 except Exception:  # noqa: BLE001 - 내보내기 실패는 발굴 자체를 막지 않음
                     log.exception("데이터셋 내보내기 실패")
             with _conn() as conn:

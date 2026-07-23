@@ -31,6 +31,10 @@ discovery:
   max_symbols: 0                # 0 = 전종목 (테스트 시 소수로 제한)
   auto_watch: true              # 발굴 상위 종목을 감시목록에 자동 편입
   auto_watch_n: 5               # 자동 편입 수 (기존 auto 항목은 교체됨)
+  bearish_min_score: 2          # 하락(숏) 후보 최소 점수(역배열·저점근접·60이평 하회 중)
+  regime:                       # 시장 국면 판정(60이평 상회 종목 비율=breadth 기준)
+    bull_breadth: 60            # 이 이상이면 강세장
+    bear_breadth: 40            # 이 이하면 약세장 (사이는 중립)
   # ETF·ETN·리츠·채권형 등 비보통주 제외 (이름 기반). 아래 비우면 기본값 사용.
   # exclude_keywords: [리츠, 스팩, ETN, ETF, 레버리지, 인버스, 선물, 채권, 국채, 금리, 액티브, 커버드콜, 배당, TR, 합성]
   # exclude_prefixes: [KODEX, TIGER, KOSEF, ARIRANG, HANARO, TIMEFOLIO, KOACT, TREX, PLUS, RISE, ACE, SOL, KBSTAR]
