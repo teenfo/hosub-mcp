@@ -3,7 +3,9 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -22,6 +24,7 @@ from .trade import orders
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("trading")
+KST = ZoneInfo("Asia/Seoul")
 
 engine = SignalEngine()
 aggregator = BarAggregator()
@@ -47,6 +50,37 @@ async def _resubscribe() -> None:
     await feed.update(list(settings.WATCHLIST.keys()))
 
 
+def _price_of(symbol: str) -> float | None:
+    """실시간 형성 봉(우선) → 최근 저장 분봉 종가."""
+    snap = aggregator.snapshot(symbol)
+    if snap:
+        return float(snap["close"])
+    from .trade import ledger
+    return ledger.latest_price(symbol)
+
+
+async def _ledger_loop() -> None:
+    """오픈 포지션 손절/목표 감시(장중 30초) + 장 마감 미청산분 정리(1회)."""
+    from .trade import ledger
+
+    eod_done = ""
+    while True:
+        try:
+            now = datetime.now(KST)
+            hhmm = now.strftime("%H:%M")
+            if now.weekday() < 5:
+                if "09:00" <= hhmm <= "15:30":
+                    await asyncio.to_thread(ledger.monitor, _price_of)
+                elif hhmm > "15:30" and eod_done != now.date().isoformat():
+                    n = await asyncio.to_thread(ledger.force_close_eod, _price_of)
+                    eod_done = now.date().isoformat()
+                    if n:
+                        log.info("장 마감 미청산 %d건 종가 정리", n)
+        except Exception:  # noqa: BLE001
+            log.exception("실거래 성과 감시 오류")
+        await asyncio.sleep(30)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     watchlist.init()               # DB 기준으로 감시목록 복원 (최초엔 config 시드)
@@ -59,6 +93,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(scanner.loop()),
         asyncio.create_task(discovery.loop()),
         asyncio.create_task(reporter.loop()),
+        asyncio.create_task(_ledger_loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
@@ -239,6 +274,29 @@ async def api_account(_=Depends(require_auth)):
             engine.equity = engine.state.equity = float(equity)
         _account_cache.update(ts=now, data=data)
     return data
+
+
+@app.get("/api/performance")
+async def api_performance(_=Depends(require_auth)):
+    """실거래 성과: 청산 완료 집계(전체·규칙별) + 오픈/최근 청산 포지션."""
+    from .trade import ledger
+
+    return {"stats": ledger.stats(),
+            "open": ledger.positions(status="open", limit=50),
+            "closed": ledger.positions(status="closed", limit=50)}
+
+
+@app.post("/api/positions/{pos_id}/close")
+async def api_position_close(pos_id: str, _=Depends(require_auth)):
+    """추적 중인 포지션을 현재가로 청산 처리(장부상 — 실제 청산 주문은 별도)."""
+    from .trade import ledger
+
+    pos = next((p for p in ledger.positions(status="open", limit=200)
+                if p["id"] == pos_id), None)
+    if not pos:
+        return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
+    px = _price_of(pos["symbol"]) or pos["entry"]
+    return {"ok": ledger.close_position(pos_id, float(px), "manual")}
 
 
 @app.get("/api/scanner")

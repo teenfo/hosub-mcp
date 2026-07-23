@@ -99,12 +99,13 @@ export default {
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
     const reportC = card("분석 보고 리스트", null, { icon: "bi-journal-text" });
     const backtestC = card("규칙 백테스트 (내 데이터 검증)", null, { icon: "bi-clipboard-data" });
+    const perfC = card("실거래 성과 로그", null, { icon: "bi-cash-coin" });
     // 각 카드를 독립 그리드 아이템으로 등록(id·기본 폭). 편집 모드에서 자유 배치·크기조절.
     const CARDS = [
       ["status", status, 6], ["watch", watchC, 6],
       ["pending", pending, 6], ["report", reportC, 6],
       ["scanner", scannerC, 12], ["discovery", discoveryC, 12],
-      ["backtest", backtestC, 12],
+      ["performance", perfC, 12], ["backtest", backtestC, 12],
       ["chart", chart, 12], ["signals", signals, 12],
     ];
     CARDS.forEach(([id, c, w], i) => {
@@ -211,6 +212,91 @@ export default {
       ]),
       rptOut,
     );
+
+    // --- 실거래 성과 로그 ---
+    const perfBody = el("div");
+    perfC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-cash-coin"></i> 승인·발주된 신호의 <b>진입가·청산가·실현손익·슬리피지</b>를 추적. 손절/목표 터치는 장중 30초 감시, 미청산분은 장 마감에 종가 정리. 딥리서치의 "실력 지속성은 실재" 검증용.' })),
+      perfBody,
+    );
+    const closePosition = async (id) => {
+      if (!confirm("이 추적 포지션을 현재가로 청산 처리할까요? (장부상 기록 — 실제 청산 주문은 별도)")) return;
+      try { await postJSON(`/api/trading/positions/${id}/close`); _memo["perf"] = undefined; await loadPerformance(); }
+      catch (e) { alert("실패: " + e.message); }
+    };
+    const won = (n) => (n > 0 ? "+" : "") + fmt(n) + "원";
+    const pct = (n) => (n > 0 ? "+" : "") + n + "%";
+    const loadPerformance = async () => {
+      let d;
+      try { d = await fetchJSON("/api/trading/performance"); } catch (e) { return; }
+      if (!changed("perf", d)) return;
+      perfBody.innerHTML = "";
+      const o = (d.stats && d.stats.overall) || {};
+      if (!o.trades && !(d.open || []).length) {
+        perfBody.appendChild(el("div", { class: "text-secondary small" },
+          "아직 기록 없음 — 승인·발주된 주문이 생기면 여기에 진입/청산/손익이 쌓입니다."));
+        return;
+      }
+      // 전체 요약
+      if (o.trades) {
+        const tone = o.total_pnl_krw >= 0 ? "text-danger" : "text-primary"; // 한국식: 이익 빨강
+        const stat = (k, v, cls) => el("div", { class: "col-6 col-md-3 col-xl-2" },
+          el("div", { class: "border rounded p-2" }, [el("div", { class: "text-secondary small" }, k), el("div", { class: "fw-semibold " + (cls || "") }, v)]));
+        perfBody.appendChild(el("div", { class: "row g-2 mb-3" }, [
+          stat("청산", o.trades + "건"), stat("승률", o.win_rate + "%"),
+          stat("건당 기대값", pct(o.expectancy_pct)), stat("실현손익", won(o.total_pnl_krw), tone),
+          stat("손익비(PF)", o.profit_factor), stat("평균 슬리피지", o.avg_slippage_pct + "%"),
+        ]));
+        const byRule = d.stats.by_rule || {};
+        if (Object.keys(byRule).length) {
+          perfBody.appendChild(el("div", { class: "small text-secondary mb-3" },
+            "규칙별 기대값: " + Object.entries(byRule).map(([k, v]) => `${k} ${pct(v.expectancy_pct)}(${v.trades}건 · 승률 ${v.win_rate}%)`).join(" · ")));
+        }
+      }
+      // 오픈 포지션
+      const opens = d.open || [];
+      perfBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, `보유(추적 중) ${opens.length}건`));
+      if (opens.length) {
+        const t = el("table", { class: "table table-sm align-middle mb-3 small" });
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입</th><th>손절</th><th>목표</th><th></th></tr>" }));
+        const tb = el("tbody");
+        for (const p of opens) {
+          const tr = el("tr", {
+            html: `<td>${p.name || p.symbol}</td><td>${p.rule}</td>` +
+              `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)}</td>` +
+              `<td>${fmt(p.stop)}</td><td>${fmt(p.target)}</td>`,
+          });
+          const td = el("td");
+          const b = el("button", { class: "btn btn-sm btn-outline-secondary py-0", type: "button" }, "청산");
+          b.onclick = () => closePosition(p.id);
+          td.appendChild(b); tr.appendChild(td); tb.appendChild(tr);
+        }
+        t.appendChild(tb);
+        perfBody.appendChild(el("div", { class: "table-responsive" }, t));
+      } else {
+        perfBody.appendChild(el("div", { class: "text-secondary small mb-3" }, "보유 포지션 없음"));
+      }
+      // 최근 청산
+      const closed = d.closed || [];
+      if (closed.length) {
+        perfBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, "최근 청산"));
+        const t = el("table", { class: "table table-sm align-middle mb-0 small" });
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입→청산</th><th>사유</th><th>손익%</th><th>손익</th></tr>" }));
+        const tb = el("tbody");
+        for (const p of closed) {
+          const cls = p.pnl_pct >= 0 ? "text-danger" : "text-primary";
+          tb.appendChild(el("tr", {
+            html: `<td>${p.name || p.symbol}</td><td>${p.rule}</td>` +
+              `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)} → ${fmt(p.exit)}</td>` +
+              `<td>${p.exit_reason}</td><td class="${cls}">${pct(p.pnl_pct)}</td>` +
+              `<td class="${cls}">${won(p.pnl_krw)}</td>`,
+          }));
+        }
+        t.appendChild(tb);
+        perfBody.appendChild(el("div", { class: "table-responsive" }, t));
+      }
+    };
 
     // --- 분석 보고 리스트 + 공용 모달 ---
     const rBody = el("div");
@@ -788,9 +874,9 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport(), loadPerformance()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
-    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); }, 30_000));
+    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); }, 30_000));
     ctx.addTimer(setInterval(() => { loadReport(); loadBacktestReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
