@@ -1,21 +1,20 @@
-import { fetchJSON, el } from "../app.js";
+import { fetchJSON, el, badge } from "../app.js";
 
 function outcomeBadge(outcome) {
   const map = {
-    ok: "ok",
-    succeeded: "ok",
-    job_started: "warn",
-    approval_required: "warn",
-    rejected: "muted",
-    error: "err",
-    failed: "err",
-    timeout: "err",
+    ok: "success",
+    succeeded: "success",
+    job_started: "warning",
+    approval_required: "warning",
+    rejected: "secondary",
+    error: "danger",
+    failed: "danger",
+    timeout: "danger",
   };
-  return el("span", { class: "badge " + (map[outcome] || "muted") }, outcome);
+  return badge(outcome, map[outcome] || "secondary");
 }
 
 function shortTs(ts) {
-  // ISO → HH:MM:SS
   try {
     return new Date(ts).toLocaleTimeString("ko-KR");
   } catch {
@@ -26,34 +25,35 @@ function shortTs(ts) {
 export default {
   id: "audit",
   title: "감사 로그 (최근 활동)",
+  icon: "bi-shield-check",
   wide: true,
   refreshMs: 7000,
   async render(body) {
     const data = await fetchJSON("/api/audit?limit=25");
     body.innerHTML = "";
     if (!data.audit || !data.audit.length) {
-      body.appendChild(el("div", { class: "empty" }, "기록된 활동이 없습니다."));
+      body.appendChild(el("div", { class: "text-secondary small" }, "기록된 활동이 없습니다."));
       return;
     }
-    const tbl = el("table", {}, [
-      el("thead", {}, el("tr", {}, [
-        el("th", {}, "시각"), el("th", {}, "도구"), el("th", {}, "결과"),
-        el("th", {}, "확인"), el("th", {}, "요약"),
-      ])),
-    ]);
-    const tb = el("tbody");
-    for (const r of data.audit) {
-      tb.appendChild(
-        el("tr", {}, [
-          el("td", { class: "mono" }, shortTs(r.ts)),
-          el("td", { class: "mono" }, r.tool),
-          el("td", {}, outcomeBadge(r.outcome)),
-          el("td", {}, r.confirm ? "✓" : ""),
-          el("td", { class: "mono", style: "max-width:360px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap" }, r.result_summary || ""),
-        ])
-      );
-    }
-    tbl.appendChild(tb);
-    body.appendChild(el("div", { class: "scroll" }, tbl));
+    const rows = data.audit.map((r) =>
+      el("tr", {}, [
+        el("td", { class: "mono text-nowrap" }, shortTs(r.ts)),
+        el("td", { class: "mono" }, r.tool),
+        el("td", {}, outcomeBadge(r.outcome)),
+        el("td", { class: "text-center" }, r.confirm ? el("i", { class: "bi bi-check-lg text-success" }) : ""),
+        el("td", {
+          class: "mono text-truncate",
+          style: "max-width:360px",
+          title: r.result_summary || "",
+        }, r.result_summary || ""),
+      ])
+    );
+    const thead = el("thead", {}, el("tr", {}, [
+      el("th", {}, "시각"), el("th", {}, "도구"), el("th", {}, "결과"),
+      el("th", { class: "text-center" }, "확인"), el("th", {}, "요약"),
+    ]));
+    const tbl = el("table", { class: "table table-sm table-hover align-middle mb-0" },
+      [thead, el("tbody", {}, rows)]);
+    body.appendChild(el("div", { class: "table-responsive" }, tbl));
   },
 };

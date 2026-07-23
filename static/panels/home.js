@@ -6,14 +6,14 @@ import { el } from "../app.js";
 export default {
   id: "home",
   title: "홈",
+  icon: "bi-house",
   async render(body) {
     body.innerHTML = "";
     body.appendChild(
-      el("div", { class: "placeholder" }, [
-        el("div", { style: "font-size:22px; margin-bottom:6px" }, "🏠"),
+      el("div", { class: "text-center text-secondary py-4 border border-2 border-dashed rounded" }, [
+        el("div", { class: "display-6 mb-2" }, el("i", { class: "bi bi-house-heart" })),
         el("div", {}, "홈 관련 컨텐츠 자리입니다."),
-        el("div", { style: "margin-top:6px; font-size:12px" },
-          "패널 하나를 추가해 날씨·미디어·메모 등을 붙일 수 있습니다."),
+        el("div", { class: "small mt-1" }, "패널 하나를 추가해 날씨·미디어·메모 등을 붙일 수 있습니다."),
       ])
     );
   },

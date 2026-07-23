@@ -91,9 +91,11 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         return JSONResponse({"audit": ctx.audit.recent(limit)})
 
     async def static_file(request):
-        # 로그인 페이지 자산은 인증 전에도 필요하므로 화이트리스트로만 서빙
+        # 로그인 페이지 자산(스타일·vendor 라이브러리)은 인증 전에도 필요하므로 공개.
+        # 그 외 자산(app.js, panels/*)은 로그인 후 로드되므로 세션 필요.
         name = request.path_params["path"]
-        if not _is_authed(request) and name not in _PUBLIC_ASSETS:
+        public = name in _PUBLIC_ASSETS or name.startswith("vendor/")
+        if not _is_authed(request) and not public:
             return JSONResponse({"error": "unauthorized"}, status_code=401)
         target = (STATIC_DIR / name).resolve()
         if STATIC_DIR not in target.parents or not target.is_file():
