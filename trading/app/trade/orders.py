@@ -146,4 +146,12 @@ async def approve_and_send(order_id: str) -> dict:
             "UPDATE orders SET status=?, result=? WHERE id=?", (status, detail, order_id)
         )
         _audit(conn, order_id, status, detail)
+    if status == "sent":
+        # 실거래 성과 로그에 오픈 포지션 기록 (체결가는 최신가 근사)
+        from . import ledger
+
+        try:
+            ledger.open_position(order)
+        except Exception:  # noqa: BLE001 - 로그 실패가 발주를 되돌리지 않는다
+            pass
     return {"ok": status == "sent", "status": status, "result": result}
