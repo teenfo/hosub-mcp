@@ -480,6 +480,12 @@ export default {
       const tb = el("tbody");
       for (const it of w.entries) {
         const [label, tone] = SOURCE_BADGE[it.source] || [it.source, "secondary"];
+        const btBtn = el("button", { class: "btn btn-sm btn-outline-secondary py-0 me-1", title: "규칙 백테스트로 보내기" }, "백테스트");
+        btBtn.onclick = () => {
+          btInput.value = it.code;
+          runBacktest();   // 규칙 백테스트 카드에서 이 종목으로 즉시 실행
+          backtestC.body.closest(".card").scrollIntoView({ behavior: "smooth", block: "center" });
+        };
         const rm = el("button", { class: "btn btn-sm btn-outline-danger py-0" }, "제거");
         rm.onclick = async () => {
           if (!confirm(`${it.name}(${it.code}) 을 감시목록에서 제거할까요?`)) return;
@@ -490,7 +496,7 @@ export default {
         tb.appendChild(el("tr", {}, [
           el("td", {}, `${it.name} (${it.code})`),
           el("td", {}, badge(label, tone)),
-          el("td", {}, rm),
+          el("td", { class: "text-nowrap" }, [btBtn, rm]),
         ]));
       }
       tbl.appendChild(tb);
