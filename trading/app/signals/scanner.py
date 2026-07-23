@@ -47,6 +47,42 @@ def parse_rank(raw: dict) -> list[dict]:
     return out
 
 
+def parse_surge(raw: dict) -> list[dict]:
+    """거래량급증(ka10023) 응답 표준화. 배열 키: trde_qty_sdnin."""
+    out = []
+    for it in raw.get("trde_qty_sdnin") or []:
+        out.append(
+            {
+                "code": str(it.get("stk_cd", "")).lstrip("A"),
+                "name": it.get("stk_nm", ""),
+                "price": abs(_num(it.get("cur_prc"), int)),
+                "change_pct": _num(it.get("flu_rt")),
+                "surge_pct": _num(it.get("sdnin_rt")),      # 거래량 급증률
+                "now_volume": _num(it.get("now_trde_qty"), int),
+            }
+        )
+    return out
+
+
+def filter_presurge(items: list[dict], cfg: dict) -> list[dict]:
+    """'급등 조짐' 필터: 거래량은 급증했는데 가격은 아직 크게 안 움직인 종목.
+    거래량이 가격에 선행한다는 전제의 조기 포착 — 확정 신호가 아니라 관찰 후보다."""
+    min_surge = cfg.get("min_volume_surge_pct", 300.0)   # 거래량 급증률 최소
+    lo = cfg.get("change_pct_min", -1.0)                 # 등락률 하한
+    hi = cfg.get("change_pct_max", 3.0)                  # 이 이상 오르면 이미 급등(기존 스캐너 몫)
+    min_price = cfg.get("min_price", 1_000)
+    top_n = cfg.get("top_n", 10)
+    picked = [
+        it for it in items
+        if it.get("surge_pct", 0) >= min_surge
+        and lo <= it["change_pct"] <= hi
+        and it["price"] >= min_price
+        and it["code"] not in settings.WATCHLIST
+    ]
+    picked.sort(key=lambda x: x.get("surge_pct", 0), reverse=True)
+    return picked[:top_n]
+
+
 def filter_candidates(items: list[dict], cfg: dict) -> list[dict]:
     min_chg = cfg.get("min_change_pct", 3.0)
     min_val = cfg.get("min_trade_value", 10_000)   # trde_prica 와 같은 단위(통상 백만원)
@@ -65,7 +101,8 @@ def filter_candidates(items: list[dict], cfg: dict) -> list[dict]:
 
 class Scanner:
     def __init__(self) -> None:
-        self.results: list[dict] = []
+        self.results: list[dict] = []       # 이미 급등 중 (편승 후보)
+        self.presurge: list[dict] = []      # 급등 조짐 (거래량 선행)
         self.last_scan: str = ""
 
     async def scan_once(self) -> list[dict]:
@@ -74,6 +111,11 @@ class Scanner:
         cfg = settings.CONFIG.get("scanner", {})
         raw = await client.trade_value_rank(cfg.get("market", "000"))
         self.results = filter_candidates(parse_rank(raw), cfg)
+        try:
+            surge_raw = await client.volume_surge_rank(cfg.get("market", "000"))
+            self.presurge = filter_presurge(parse_surge(surge_raw), cfg)
+        except Exception as e:  # noqa: BLE001 - 조짐 스캔 실패는 비치명적
+            log.warning("거래량급증 스캔 실패: %s", e)
         self.last_scan = datetime.now(KST).isoformat(timespec="seconds")
         return self.results
 

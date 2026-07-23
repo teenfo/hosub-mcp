@@ -19,11 +19,14 @@ TR_ORDER_BUY = "kt10000"      # 주식 매수주문
 TR_ORDER_SELL = "kt10001"     # 주식 매도주문
 TR_ACCOUNT_BALANCE = "kt00018"  # 계좌평가잔고
 TR_TRADE_VALUE_RANK = "ka10032"  # 거래대금상위 (flu_rt/trde_prica 포함)
+TR_VOLUME_SURGE = "ka10023"      # 거래량급증 (sdnin_rt 급증률 포함)
+TR_STOCK_LIST = "ka10099"        # 종목정보 리스트 (요청 필드 실호출 검증 필요)
 
 PATH_CHART = "/api/dostk/chart"
 PATH_ORDER = "/api/dostk/ordr"
 PATH_ACCOUNT = "/api/dostk/acnt"
 PATH_RANK = "/api/dostk/rkinfo"
+PATH_STOCK_INFO = "/api/dostk/stkinfo"
 
 
 class RateLimiter:
@@ -101,6 +104,23 @@ class KiwoomClient:
             TR_TRADE_VALUE_RANK,
             {"mrkt_tp": market, "mang_stk_incls": "0", "stex_tp": "1"},
         )
+
+    async def volume_surge_rank(self, market: str = "000", sort: str = "2") -> dict:
+        """거래량급증 (ka10023). sort: 1 급증량 / 2 급증률. tm_tp=1 분 단위."""
+        return await self._call(
+            PATH_RANK,
+            TR_VOLUME_SURGE,
+            {
+                "mrkt_tp": market, "sort_tp": sort, "tm_tp": "1", "tm": "",
+                "trde_qty_tp": "50", "stk_cnd": "20",  # 5만주↑, ETF/ETN/스팩 제외
+                "pric_tp": "0", "stex_tp": "1",
+            },
+        )
+
+    async def stock_list(self, market: str = "0") -> dict:
+        """종목정보 리스트 (ka10099). market: 0 코스피 / 10 코스닥.
+        요청 필드는 공개 문서에 상세가 없어 실호출 검증 필요."""
+        return await self._call(PATH_STOCK_INFO, TR_STOCK_LIST, {"mrkt_tp": market})
 
     async def balance(self) -> dict:
         return await self._call(
