@@ -16,6 +16,11 @@ class TokenManager:
         self._token: str | None = None
         self._expires_at: float = 0.0
 
+    def reset(self) -> None:
+        """키/환경 변경 시 캐시 무효화."""
+        self._token = None
+        self._expires_at = 0.0
+
     async def get(self) -> str:
         if self._token and time.time() < self._expires_at - 60:
             return self._token

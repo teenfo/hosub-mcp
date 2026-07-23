@@ -64,8 +64,8 @@ WEATHER_LABEL = os.environ.get("HOSUB_WEATHER_LABEL", "서울")
 TRADING_URL = os.environ.get("HOSUB_TRADING_URL", "http://127.0.0.1:8600")
 TRADING_TOKEN = os.environ.get("HOSUB_TRADING_TOKEN", "")
 
-_TRADING_GET_RE = re.compile(r"^(status|signals|orders|bars/\d{6})$")
-_TRADING_POST_RE = re.compile(r"^orders/[0-9a-f]{12}/(approve|reject)$")
+_TRADING_GET_RE = re.compile(r"^(status|signals|orders|settings|bars/\d{6})$")
+_TRADING_POST_RE = re.compile(r"^(orders/[0-9a-f]{12}/(approve|reject)|settings)$")
 
 
 def _is_authed(request) -> bool:
@@ -226,12 +226,19 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         if not allowed:
             return JSONResponse({"error": "not allowed"}, status_code=404)
         try:
+            body = await request.body()
+            headers = {"X-Internal-Token": TRADING_TOKEN}
+            if body:
+                headers["Content-Type"] = request.headers.get(
+                    "content-type", "application/json"
+                )
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.request(
                     request.method,
                     f"{TRADING_URL}/api/{path}",
                     params=dict(request.query_params),
-                    headers={"X-Internal-Token": TRADING_TOKEN},
+                    content=body,
+                    headers=headers,
                 )
             return JSONResponse(resp.json(), status_code=resp.status_code)
         except Exception as exc:  # 서비스 다운 시 graceful

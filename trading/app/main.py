@@ -11,6 +11,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
 from .data import store
+from .kiwoom.auth import token_manager
 from .signals.engine import SignalEngine
 from .trade import orders
 
@@ -26,15 +27,13 @@ TEMPLATE = (Path(__file__).parent.parent / "templates" / "dashboard.html").read_
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = None
-    if settings.KIWOOM_APP_KEY:
-        task = asyncio.create_task(engine.loop())
-        log.info("신호 엔진 시작 (env=%s)", settings.KIWOOM_ENV)
-    else:
-        log.warning("KIWOOM_APP_KEY 미설정 — 엔진 비활성 (대시보드만 동작)")
+    # 루프는 항상 띄운다 — 키가 없으면 매 주기 스킵하고, 설정 화면에서
+    # 키가 입력되는 즉시 다음 주기부터 동작한다.
+    task = asyncio.create_task(engine.loop())
+    log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
+             "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
     yield
-    if task:
-        task.cancel()
+    task.cancel()
 
 
 app = FastAPI(title="hosub-trading", lifespan=lifespan)
@@ -128,3 +127,27 @@ async def api_bars(symbol: str, _=Depends(require_auth)):
 @app.get("/api/signals")
 async def api_signals(_=Depends(require_auth)):
     return engine.last_signals
+
+
+@app.get("/api/settings")
+async def api_settings(_=Depends(require_auth)):
+    return settings.masked()
+
+
+@app.post("/api/settings")
+async def api_settings_save(payload: dict, _=Depends(require_auth)):
+    env = (payload.get("env") or "").strip().lower() or None
+    if env and env not in ("mock", "real"):
+        return JSONResponse({"ok": False, "error": "env 는 mock/real 만 가능"}, 400)
+    try:
+        settings.save_keys(
+            env=env,
+            app_key=(payload.get("app_key") or "").strip() or None,
+            secret_key=(payload.get("secret_key") or "").strip() or None,
+            account=(payload.get("account") or "").strip() or None,
+        )
+    except (OSError, ValueError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, 400)
+    token_manager.reset()  # 키/환경이 바뀌었으니 토큰 재발급
+    log.info("API 설정 저장 (env=%s)", settings.KIWOOM_ENV)
+    return {"ok": True, **settings.masked()}

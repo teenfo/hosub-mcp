@@ -48,6 +48,18 @@
     <table id="sigTbl"><thead><tr>
       <th>종목</th><th>규칙</th><th>방향</th><th>사유</th>
     </tr></thead><tbody></tbody></table>
+    <h2 style="margin-top:16px">키움 API 설정</h2>
+    <div id="cfgForm" style="display:grid;gap:6px;font-size:13px">
+      <select id="cfgEnv">
+        <option value="mock">모의투자 (mockapi)</option>
+        <option value="real">실전 (api.kiwoom.com)</option>
+      </select>
+      <input id="cfgAppKey" placeholder="앱키" autocomplete="off">
+      <input id="cfgSecret" type="password" placeholder="시크릿 키" autocomplete="new-password">
+      <input id="cfgAccount" placeholder="계좌번호" autocomplete="off">
+      <button id="cfgSave" class="ok">저장</button>
+      <div id="cfgMsg" class="muted"></div>
+    </div>
   </section>
 </main>
 <script>
@@ -105,8 +117,32 @@ async function act(id, verb) {
   refreshOrders();
 }
 window.act = act;
+async function refreshSettings() {
+  const s = await j('/api/settings');
+  $('cfgEnv').value = s.env;
+  $('cfgAppKey').placeholder = s.app_key_masked ? `앱키 (현재 ${s.app_key_masked})` : '앱키 (미설정)';
+  $('cfgSecret').placeholder = s.has_secret ? '시크릿 키 (설정됨 — 변경 시에만 입력)' : '시크릿 키 (미설정)';
+  $('cfgAccount').placeholder = s.account_masked ? `계좌번호 (현재 ${s.account_masked})` : '계좌번호 (미설정)';
+}
+$('cfgSave').onclick = async () => {
+  if ($('cfgEnv').value === 'real' &&
+      !confirm('실전 환경으로 저장합니다. 승인된 주문은 실제 계좌로 발주됩니다. 계속할까요?')) return;
+  try {
+    const r = await j('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        env: $('cfgEnv').value, app_key: $('cfgAppKey').value,
+        secret_key: $('cfgSecret').value, account: $('cfgAccount').value,
+      }),
+    });
+    $('cfgMsg').textContent = `저장됨 (환경: ${r.env === 'real' ? '실전' : '모의투자'})`;
+    $('cfgAppKey').value = $('cfgSecret').value = $('cfgAccount').value = '';
+    refreshSettings(); refreshStatus();
+  } catch (e) { $('cfgMsg').textContent = '저장 실패: ' + e.message; }
+};
 refreshStatus().then(refreshChart);
 refreshOrders();
+refreshSettings();
 setInterval(() => { refreshStatus(); refreshOrders(); }, 10000);
 setInterval(refreshChart, 60000);
 </script>

@@ -3,8 +3,12 @@ import { fetchJSON, el, card, badge } from "../app.js";
 // 트레이딩 페이지: trading 서비스(127.0.0.1:8600)를 /api/trading/* 프록시로 조회하고
 // 승인 대기 주문을 승인/거부한다. 차트는 외부 의존성 없는 캔버스 캔들로 그린다.
 
-async function postJSON(path) {
-  const res = await fetch(path, { method: "POST", headers: { Accept: "application/json" } });
+async function postJSON(path, body) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
   if (res.status === 401) {
     window.location.href = "/login";
     throw new Error("unauthorized");
@@ -71,10 +75,65 @@ export default {
     container.appendChild(row);
 
     const status = card("트레이딩 상태", null, { icon: "bi-activity" });
+    const apiCfg = card("키움 API 설정", null, { icon: "bi-key" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    row.append(status.col, pending.col, chart.col, signals.col);
+    row.append(status.col, apiCfg.col, pending.col, chart.col, signals.col);
+
+    // --- 키움 API 설정 폼 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
+    const envSel = el("select", { class: "form-select form-select-sm" }, [
+      el("option", { value: "mock" }, "모의투자 (mockapi)"),
+      el("option", { value: "real" }, "실전 (api.kiwoom.com)"),
+    ]);
+    const appKeyIn = el("input", { class: "form-control form-control-sm", autocomplete: "off" });
+    const secretIn = el("input", { class: "form-control form-control-sm", type: "password", autocomplete: "new-password" });
+    const accountIn = el("input", { class: "form-control form-control-sm", autocomplete: "off" });
+    const saveBtn = el("button", { class: "btn btn-sm btn-primary mt-2" }, "저장");
+    const cfgMsg = el("div", { class: "small mt-2" });
+    const field = (label, input) =>
+      el("div", { class: "mb-2" }, [el("label", { class: "form-label small mb-1" }, label), input]);
+    apiCfg.body.append(
+      field("환경", envSel),
+      field("앱키 (App Key)", appKeyIn),
+      field("시크릿 키 (Secret Key)", secretIn),
+      field("계좌번호", accountIn),
+      saveBtn, cfgMsg,
+    );
+
+    const loadSettings = async () => {
+      try {
+        const s = await fetchJSON("/api/trading/settings");
+        envSel.value = s.env;
+        appKeyIn.placeholder = s.app_key_masked || "미설정";
+        secretIn.placeholder = s.has_secret ? "설정됨 — 변경 시에만 입력" : "미설정";
+        accountIn.placeholder = s.account_masked || "미설정";
+      } catch (e) { /* 서비스 다운은 상태 카드가 알림 */ }
+    };
+    saveBtn.onclick = async () => {
+      if (envSel.value === "real" &&
+          !confirm("실전 환경으로 저장합니다. 승인된 주문은 실제 계좌로 발주됩니다. 계속할까요?")) return;
+      saveBtn.disabled = true;
+      cfgMsg.textContent = "";
+      try {
+        const r = await postJSON("/api/trading/settings", {
+          env: envSel.value,
+          app_key: appKeyIn.value,
+          secret_key: secretIn.value,
+          account: accountIn.value,
+        });
+        cfgMsg.className = "small mt-2 text-success";
+        cfgMsg.textContent = `저장됨 (환경: ${r.env === "real" ? "실전" : "모의투자"})`;
+        appKeyIn.value = secretIn.value = accountIn.value = "";
+        loadSettings();
+        loadStatus();
+      } catch (e) {
+        cfgMsg.className = "small mt-2 text-danger";
+        cfgMsg.textContent = "저장 실패: " + e.message;
+      } finally {
+        saveBtn.disabled = false;
+      }
+    };
 
     const canvas = el("canvas", { style: "width:100%" });
     const symbolSel = el("select", { class: "form-select form-select-sm w-auto mb-2" });

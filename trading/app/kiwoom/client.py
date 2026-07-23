@@ -43,14 +43,15 @@ class RateLimiter:
 
 class KiwoomClient:
     def __init__(self) -> None:
-        self._http = httpx.AsyncClient(base_url=settings.REST_BASE, timeout=15)
+        self._http = httpx.AsyncClient(timeout=15)
         self._limiter = RateLimiter()
 
     async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N") -> dict:
         await self._limiter.wait()
         token = await token_manager.get()
+        # base URL 은 호출 시점에 읽는다 — 설정 화면에서 mock/real 전환 즉시 반영
         resp = await self._http.post(
-            path,
+            settings.REST_BASE + path,
             json=body,
             headers={
                 "authorization": f"Bearer {token}",

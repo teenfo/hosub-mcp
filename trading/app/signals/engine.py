@@ -76,7 +76,11 @@ class SignalEngine:
         while True:
             try:
                 now = datetime.now(KST)
-                if now.weekday() < 5 and "09:00" <= now.strftime("%H:%M") <= "15:30":
+                if (
+                    settings.KIWOOM_APP_KEY
+                    and now.weekday() < 5
+                    and "09:00" <= now.strftime("%H:%M") <= "15:30"
+                ):
                     await self.run_once()
             except Exception:  # noqa: BLE001
                 log.exception("엔진 루프 오류")
