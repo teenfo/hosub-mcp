@@ -24,7 +24,8 @@ const sideBadge = (side) =>
   badge(side === "short" ? "숏" : "롱", side === "short" ? "danger" : "success");
 
 // --- 캔버스 캔들차트 (한국식: 상승 빨강 / 하락 파랑) ---
-function drawCandles(canvas, bars) {
+// daily=true 면 하단 축을 날짜(월/일)로, false 면 시각(시:분)으로 표기.
+function drawCandles(canvas, bars, daily = false) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth || 600;
   const h = 320;
@@ -61,8 +62,10 @@ function drawCandles(canvas, bars) {
   g.fillStyle = "#999";
   g.font = "11px sans-serif";
   [hi, (hi + lo) / 2, lo].forEach((p) => g.fillText(fmt(p), w - padR + 6, y(p) + 4));
-  // 하단 시간 축 (시작/끝)
-  const t = (s) => new Date(s * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+  // 하단 축 (시작/끝) — 일봉이면 날짜, 분봉이면 시각
+  const t = (s) => daily
+    ? new Date(s * 1000).toLocaleDateString("ko-KR", { month: "2-digit", day: "2-digit" })
+    : new Date(s * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
   g.fillText(t(view[0].time), padL, h - 2);
   g.fillText(t(view[view.length - 1].time), w - padR - 40, h - 2);
 }
@@ -120,6 +123,37 @@ export default {
     );
     container.appendChild(reportModalEl);
     const reportModal = new bootstrap.Modal(reportModalEl);
+
+    // 종목 일봉 차트 모달 (발굴 종목명 클릭 시)
+    const chartModalTitle = el("h5", { class: "modal-title" });
+    const chartModalCanvas = el("canvas", { style: "width:100%" });
+    const chartModalMsg = el("div", { class: "text-secondary small" });
+    const stockChartModalEl = el("div", { class: "modal fade", tabindex: "-1" },
+      el("div", { class: "modal-dialog modal-lg modal-dialog-centered" },
+        el("div", { class: "modal-content" }, [
+          el("div", { class: "modal-header" }, [
+            chartModalTitle,
+            el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
+          ]),
+          el("div", { class: "modal-body" }, [chartModalMsg, chartModalCanvas]),
+        ]),
+      ),
+    );
+    container.appendChild(stockChartModalEl);
+    const stockChartModal = new bootstrap.Modal(stockChartModalEl);
+    const openStockChart = async (code, name) => {
+      chartModalTitle.textContent = `${name} (${code}) 일봉`;
+      chartModalMsg.textContent = "불러오는 중…";
+      stockChartModal.show();
+      try {
+        const bars = await fetchJSON(`/api/trading/bars/${code}?tf=1d`);
+        chartModalMsg.textContent = bars.length ? "" : "일봉 데이터 없음 (야간 발굴 수집 후 표시)";
+        // 모달이 표시된 뒤 캔버스 폭이 잡히도록 다음 프레임에 그린다
+        requestAnimationFrame(() => drawCandles(chartModalCanvas, bars, true));
+      } catch (e) {
+        chartModalMsg.textContent = "불러오기 실패: " + e.message;
+      }
+    };
 
     const openReport = async (date) => {
       reportModalTitle.textContent = `${date} 야간 분석 리포트`;
@@ -528,8 +562,11 @@ export default {
             loadStatus();
           } catch (e) { alert("실패: " + e.message); add.disabled = false; }
         };
+        const nameLink = el("a", { href: "#", class: "text-decoration-none" },
+          `${p.name} (${p.code})`);
+        nameLink.onclick = (e) => { e.preventDefault(); openStockChart(p.code, p.name); };
         tb.appendChild(el("tr", {}, [
-          el("td", {}, `${p.name} (${p.code})`),
+          el("td", {}, [nameLink, el("i", { class: "bi bi-graph-up ms-1 small text-secondary" })]),
           el("td", {}, fmt(p.close)),
           el("td", {}, String(p.score)),
           el("td", { class: "small text-secondary" }, (p.reasons || []).join(" · ")),
