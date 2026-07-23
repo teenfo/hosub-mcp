@@ -245,6 +245,19 @@ async def api_signals(_=Depends(require_auth)):
     return engine.last_signals
 
 
+@app.get("/api/backtest/coverage")
+async def api_backtest_coverage(_=Depends(require_auth)):
+    """감시목록 종목별 분봉 축적 일수(백테스트 표본 크기 확인용).
+    주의: '/{symbol}' 보다 먼저 등록해야 'coverage' 가 종목코드로 매칭되지 않는다."""
+    from .data import symbols
+
+    counts = dict(store.minute_symbols(1))   # {code: 축적 일수}
+    rows = [{"code": c, "name": n or symbols.name_of(c) or c,
+             "days": counts.get(c, 0)} for c, n in settings.WATCHLIST.items()]
+    rows.sort(key=lambda x: -x["days"])
+    return {"symbols": rows}
+
+
 @app.get("/api/backtest/{symbol}")
 async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
     """저장된 봉으로 규칙 백테스트(비용 반영). 딥리서치 원칙 '내 데이터로 검증'.
@@ -267,18 +280,6 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
 
     return {"ok": True, "symbol": symbol, "name": symbols.name_of(symbol),
             "tf": tf, "days": days, "stats": result.stats(), "trades": trades}
-
-
-@app.get("/api/backtest/coverage")
-async def api_backtest_coverage(_=Depends(require_auth)):
-    """감시목록 종목별 분봉 축적 일수(백테스트 표본 크기 확인용)."""
-    from .data import symbols
-
-    counts = dict(store.minute_symbols(1))   # {code: 축적 일수}
-    rows = [{"code": c, "name": n or symbols.name_of(c) or c,
-             "days": counts.get(c, 0)} for c, n in settings.WATCHLIST.items()]
-    rows.sort(key=lambda x: -x["days"])
-    return {"symbols": rows}
 
 
 @app.get("/api/backtest/report/latest")
