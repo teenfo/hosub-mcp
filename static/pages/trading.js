@@ -25,53 +25,6 @@ const fmt = (n) => Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 0 
 const sideBadge = (side) =>
   badge(side === "short" ? "숏" : "롱", side === "short" ? "danger" : "success");
 
-// --- 캔버스 캔들차트 (한국식: 상승 빨강 / 하락 파랑) ---
-// daily=true 면 하단 축을 날짜(월/일)로, false 면 시각(시:분)으로 표기.
-function drawCandles(canvas, bars, daily = false) {
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth || 600;
-  const h = 320;
-  canvas.width = w * dpr;
-  canvas.height = h * dpr;
-  canvas.style.height = h + "px";
-  const g = canvas.getContext("2d");
-  g.scale(dpr, dpr);
-  g.clearRect(0, 0, w, h);
-  if (!bars.length) {
-    g.fillStyle = "#888";
-    g.font = "13px sans-serif";
-    g.fillText("데이터 없음 — 장중 수집 후 표시됩니다", 16, 40);
-    return;
-  }
-  const view = bars.slice(-120);
-  const padL = 8, padR = 56, padY = 12;
-  const lo = Math.min(...view.map((b) => b.low));
-  const hi = Math.max(...view.map((b) => b.high));
-  const y = (p) => padY + (hi - p) / (hi - lo || 1) * (h - padY * 2);
-  const cw = (w - padL - padR) / view.length;
-  view.forEach((b, i) => {
-    const x = padL + i * cw + cw / 2;
-    const up = b.close >= b.open;
-    g.strokeStyle = g.fillStyle = up ? "#d64545" : "#3a6fd8";
-    g.beginPath();
-    g.moveTo(x, y(b.high));
-    g.lineTo(x, y(b.low));
-    g.stroke();
-    const bh = Math.max(1, Math.abs(y(b.open) - y(b.close)));
-    g.fillRect(x - cw * 0.35, Math.min(y(b.open), y(b.close)), cw * 0.7, bh);
-  });
-  // 우측 가격 축 (고/중/저)
-  g.fillStyle = "#999";
-  g.font = "11px sans-serif";
-  [hi, (hi + lo) / 2, lo].forEach((p) => g.fillText(fmt(p), w - padR + 6, y(p) + 4));
-  // 하단 축 (시작/끝) — 일봉이면 날짜, 분봉이면 시각
-  const t = (s) => daily
-    ? new Date(s * 1000).toLocaleDateString("ko-KR", { month: "2-digit", day: "2-digit" })
-    : new Date(s * 1000).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
-  g.fillText(t(view[0].time), padL, h - 2);
-  g.fillText(t(view[view.length - 1].time), w - padR - 40, h - 2);
-}
-
 export default {
   id: "trading",
   title: "트레이딩",
@@ -596,15 +549,42 @@ export default {
       }
     };
 
-    const canvas = el("canvas", { style: "width:100%" });
-    const symbolSel = el("select", { class: "form-select form-select-sm w-auto mb-2" });
-    chart.body.append(symbolSel, canvas);
+    // 1분봉도 상용급 인터랙티브 차트(시각 축) — 실시간 갱신은 확대/이동을 보존.
+    const mHost = el("div", { style: "width:100%;height:52vh;min-height:300px" });
+    const symbolSel = el("select", { class: "form-select form-select-sm w-auto" });
+    const mChart = createProChart(mHost, { up: "#d64545", down: "#3a6fd8", axis: "time" });
+    const mPeriods = [["30분", 30], ["1시간", 60], ["2시간", 120], ["전체", "all"]];
+    const mPeriodGroup = el("div", { class: "btn-group btn-group-sm" });
+    const mPeriodBtns = mPeriods.map(([lbl, n]) => {
+      const b = el("button", { class: "btn btn-outline-secondary", type: "button" }, lbl);
+      b.onclick = () => { mChart.setVisibleCount(n); mPeriodBtns.forEach((x) => x.classList.toggle("active", x === b)); };
+      mPeriodGroup.appendChild(b);
+      return b;
+    });
+    const mBB = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "볼린저밴드");
+    let mBBon = false;
+    mBB.onclick = () => { mBBon = !mBBon; mBB.classList.toggle("active", mBBon); mChart.setIndicator("bb", mBBon); };
+    const mLegend = el("div", { class: "small d-flex gap-2 flex-wrap align-items-center ms-auto" },
+      MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`)));
+    chart.body.append(
+      el("div", { class: "d-flex align-items-center gap-2 flex-wrap mb-2" },
+        [symbolSel, mPeriodGroup, mBB, el("span", { class: "small text-secondary" }, "휠 확대·드래그 이동·더블클릭 리셋"), mLegend]),
+      mHost,
+    );
 
     let watch = {};
+    let mCurSym = "";
     const loadChart = async () => {
       if (!symbolSel.value) return;
       try {
-        drawCandles(canvas, await fetchJSON("/api/trading/bars/" + symbolSel.value));
+        const bars = await fetchJSON("/api/trading/bars/" + symbolSel.value);
+        if (symbolSel.value !== mCurSym) {
+          mCurSym = symbolSel.value;
+          mChart.setData(bars);                       // 종목 전환 → 새로 그림(확대 리셋)
+          mPeriodBtns.forEach((x) => x.classList.remove("active"));
+        } else {
+          mChart.update(bars);                        // 실시간 갱신 → 확대/이동 보존
+        }
       } catch (e) { /* 서비스 다운 시 상태 카드에 표시됨 */ }
     };
     symbolSel.onchange = loadChart;
