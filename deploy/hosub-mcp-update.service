@@ -1,0 +1,14 @@
+# /etc/systemd/system/hosub-mcp-update.service
+# hosub-mcp-update.timer 가 주기적으로 호출하는 oneshot 서비스.
+# git pull + 변경 시 재시작 (deploy/update.sh).
+[Unit]
+Description=hosub-mcp auto-update (git pull + restart if changed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=hosub
+WorkingDirectory=/opt/hosub-mcp
+EnvironmentFile=-/opt/hosub-mcp/.env
+ExecStart=/opt/hosub-mcp/deploy/update.sh

@@ -99,9 +99,12 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 
 ## 배포
 
-- **설치·연동 전체 절차**: [`docs/SETUP.md`](docs/SETUP.md)
-- **자동 배포**: `main` 브랜치 push → GitHub Actions(`appleboy/ssh-action`) → SSH 로 `git pull` + 재시작
-  (시크릿 `HOSUB_HOST` / `HOSUB_USER` / `HOSUB_SSH_KEY` 필요)
+- **설치·연동 전체 절차**: [`docs/SETUP.md`](docs/SETUP.md) (로컬 Claude Code 기준 상세 가이드)
+- **최초 설치**: `sudo bash deploy/bootstrap.sh` — 전용 유저·venv·의존성·.env(시크릿 자동 발급)·systemd 유닛을 한 번에 준비
+- **자동 배포 (pull 기반, 권장)**: `hosub-mcp-update.timer` 가 5분마다 추적 브랜치(`HOSUB_MCP_BRANCH`, 기본 `main`)를 폴링 → 변경 시 `git pull` + `pip install` + 서비스 재시작. **코드를 머지하면 서버가 자동으로 최신화**된다(NAT 뒤 홈서버에 적합, SSH 개방 불필요).
+  - 즉시 반영: `sudo -u hosub /opt/hosub-mcp/deploy/update.sh`
+  - 로그: `journalctl -u hosub-mcp-update.service`
+- **대안 (push 기반)**: `.github/workflows/deploy.yml` (GitHub Actions `appleboy/ssh-action`, 시크릿 `HOSUB_HOST`/`HOSUB_USER`/`HOSUB_SSH_KEY`). SSH 인바운드가 필요해 NAT 환경엔 pull 방식을 권장.
 
 ## 보안 노트
 

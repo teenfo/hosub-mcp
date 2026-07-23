@@ -1,0 +1,13 @@
+# /etc/systemd/system/hosub-mcp-update.timer
+# 부팅 2분 후부터, 이후 5분 간격으로 자동 업데이트를 실행한다.
+# 활성화: sudo systemctl enable --now hosub-mcp-update.timer
+[Unit]
+Description=Run hosub-mcp auto-update periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
