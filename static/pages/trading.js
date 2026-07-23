@@ -82,8 +82,8 @@ export default {
     const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    const reportC = card("야간 분석 리포트", null, { icon: "bi-journal-text" });
-    // 레이아웃: 상단(상태|감시목록) → 중단(왼쪽: 승인/스캐너/발굴 스택, 오른쪽: 분석 리포트 세로 구역) → 하단(차트/신호)
+    const reportC = card("분석 보고 리스트", null, { icon: "bi-journal-text" });
+    // 레이아웃: 상단(상태|감시목록) → 중단(왼쪽: 승인/스캐너/발굴 스택, 오른쪽: 분석 보고 리스트) → 하단(차트/신호)
     const leftStack = el("div", { class: "col-12 col-xl-6 d-flex flex-column gap-3" });
     for (const c of [pending, scannerC, discoveryC]) {
       const cardEl = c.col.querySelector(".card");
@@ -96,49 +96,90 @@ export default {
     rightStack.appendChild(reportCard);
     row.append(status.col, watchC.col, leftStack, rightStack, chart.col, signals.col);
 
-    // --- 야간 분석 리포트: 스케줄러가 쓴 브리핑을 트레이딩 페이지에서 바로 표시 ---
-    const rSel = el("select", { class: "form-select form-select-sm w-auto d-none" });
-    const rTime = el("span", { class: "small text-secondary" });
+    // --- 분석 보고 리스트 + 공용 모달 ---
     const rBody = el("div");
-    reportC.body.append(
-      el("div", { class: "d-flex align-items-center gap-2 mb-2" }, [rSel, rTime]),
-      rBody,
+    reportC.body.append(rBody);
+
+    // 리포트 표시 모달 (리스트/야간발굴 링크 공용)
+    const modalTitle = el("h5", { class: "modal-title" });
+    const modalBody = el("div", { class: "modal-body" });
+    const reportModalEl = el("div", { class: "modal fade", tabindex: "-1" },
+      el("div", { class: "modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable" },
+        el("div", { class: "modal-content" }, [
+          el("div", { class: "modal-header" }, [
+            modalTitle,
+            el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
+          ]),
+          modalBody,
+        ]),
+      ),
     );
-    const loadReport = async (date) => {
+    container.appendChild(reportModalEl);
+    const reportModal = new bootstrap.Modal(reportModalEl);
+
+    const openReport = async (date) => {
+      modalTitle.textContent = `${date} 야간 분석 리포트`;
+      modalBody.innerHTML = "";
+      modalBody.appendChild(el("div", { class: "text-secondary small" }, "불러오는 중…"));
+      reportModal.show();
       let d;
       try {
-        d = await fetchJSON("/api/briefing" + (date ? "?date=" + encodeURIComponent(date) : ""));
-      } catch (e) { return; }
-      rBody.innerHTML = "";
-      if (!d.exists) {
-        rSel.classList.add("d-none");
-        rTime.textContent = "";
-        rBody.appendChild(el("div", { class: "text-secondary small py-3 text-center" },
-          "아직 분석 리포트가 없습니다 — Cowork 예약 작업이 리포트를 생성하면 여기 표시됩니다."));
+        d = await fetchJSON("/api/briefing?date=" + encodeURIComponent(date));
+      } catch (e) {
+        modalBody.innerHTML = "";
+        modalBody.appendChild(el("div", { class: "text-danger small" }, "불러오기 실패: " + e.message));
         return;
       }
-      if (d.dates && d.dates.length > 1) {
-        rSel.innerHTML = "";
-        for (const dt of d.dates) {
-          const opt = el("option", { value: dt }, dt);
-          if (dt === d.date) opt.selected = true;
-          rSel.appendChild(opt);
-        }
-        rSel.classList.remove("d-none");
-      } else {
-        rSel.classList.add("d-none");
+      modalBody.innerHTML = "";
+      if (!d.exists) {
+        modalBody.appendChild(el("div", { class: "text-secondary" }, "리포트를 찾을 수 없습니다."));
+        return;
       }
-      rTime.textContent = (d.date ? `기준일 ${d.date}` : "") +
-        (d.updated_at ? " · " + new Date(d.updated_at).toLocaleString("ko-KR") : "");
       if (d.format === "md") {
         const holder = el("div", { class: "briefing-body" });
         holder.innerHTML = mdToHtml(d.content);
-        rBody.appendChild(holder);
+        modalBody.appendChild(holder);
       } else {
-        renderIframe(rBody, d.content);  // HTML 은 iframe 격리 (스타일 누출 방지)
+        renderIframe(modalBody, d.content);  // HTML 은 iframe 격리
       }
     };
-    rSel.addEventListener("change", () => loadReport(rSel.value));
+
+    // 야간 발굴 카드 헤더에 최신 리포트 링크 (loadReport 가 갱신)
+    const discHeader = discoveryC.body.closest(".card").querySelector(".card-header");
+    discHeader.classList.add("d-flex", "justify-content-between", "align-items-center");
+    const discReportLink = el("a", { href: "#", class: "small text-decoration-none d-none" });
+    discHeader.appendChild(discReportLink);
+    const setDiscReportLink = (date) => {
+      if (!date) { discReportLink.classList.add("d-none"); return; }
+      discReportLink.innerHTML = `<i class="bi bi-journal-text"></i> ${date} 리포트`;
+      discReportLink.classList.remove("d-none");
+      discReportLink.onclick = (e) => { e.preventDefault(); openReport(date); };
+    };
+
+    const loadReport = async () => {
+      let d;
+      try { d = await fetchJSON("/api/briefing"); } catch (e) { return; }
+      rBody.innerHTML = "";
+      if (!d.exists || !(d.dates && d.dates.length)) {
+        setDiscReportLink(null);
+        rBody.appendChild(el("div", { class: "text-secondary small py-3 text-center" },
+          "아직 분석 리포트가 없습니다 — Cowork 예약 작업이 리포트를 생성하면 목록에 표시됩니다."));
+        return;
+      }
+      setDiscReportLink(d.date);  // 서버가 최신 날짜를 d.date 로 반환
+      const listg = el("div", { class: "list-group list-group-flush" });
+      for (const dt of d.dates) {
+        const item = el("button", {
+          class: "list-group-item list-group-item-action d-flex justify-content-between align-items-center py-2",
+        }, [
+          el("span", { html: `<i class="bi bi-file-earmark-text me-2"></i>${dt} 분석 리포트` }),
+          dt === d.date ? badge("최신", "success") : el("span", {}),
+        ]);
+        item.onclick = () => openReport(dt);
+        listg.appendChild(item);
+      }
+      rBody.appendChild(listg);
+    };
 
     // 상태 카드 헤더에 설정(기어) 버튼 추가 → 클릭 시 API 설정 모달 표시
     const statusHeader = status.col.querySelector(".card-header");
@@ -562,7 +603,7 @@ export default {
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
     ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); }, 30_000));
-    ctx.addTimer(setInterval(() => loadReport(rSel.classList.contains("d-none") ? null : rSel.value), 300_000));
+    ctx.addTimer(setInterval(loadReport, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
 };
