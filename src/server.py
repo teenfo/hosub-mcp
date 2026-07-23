@@ -7,6 +7,8 @@ build_app() 은 MCP 엔드포인트(/mcp, Bearer 인증)와 대시보드(세션 
 
 from __future__ import annotations
 
+import hmac
+
 from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import TransportSecuritySettings
 from starlette.applications import Starlette
@@ -14,11 +16,12 @@ from starlette.middleware import Middleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.routing import Mount
 
-from . import dashboard
+from . import dashboard, oauth
 from .audit import AuditLog
 from .auth import BearerAuthMiddleware
 from .context import AppContext
 from .jobs import JobManager
+from .oauth import OAuthStore
 from .registry import Registry
 from .runner import CommandRunner
 from .tools import control, files, scripts, shell, system
@@ -79,14 +82,32 @@ def build_app(
     session_secret: str,
     jobs: JobManager | None = None,
     allowed_hosts: list[str] | None = None,
+    oauth_store: OAuthStore | None = None,
+    public_url: str | None = None,
 ) -> Starlette:
     ctx = build_context(registry, runner, audit, jobs=jobs)
     mcp = build_mcp(ctx, allowed_hosts=allowed_hosts)
     mcp_app = mcp.streamable_http_app()
 
-    routes = dashboard.build_routes(ctx, dash_password)
-    # Bearer 인증은 MCP 마운트에만 적용. 대시보드/정적 자산은 세션 인증.
-    routes.append(Mount("/", app=BearerAuthMiddleware(mcp_app, mcp_token)))
+    store = oauth_store if oauth_store is not None else OAuthStore("data/oauth.db")
+
+    def verify(token: str) -> bool:
+        # 정적 토큰(curl/비상용) 또는 OAuth 발급 액세스 토큰을 수용.
+        if mcp_token and hmac.compare_digest(token, mcp_token):
+            return True
+        return store.verify_access(token)
+
+    routes: list = []
+    # OAuth 엔드포인트는 공개(인증 불필요). MCP 마운트보다 먼저 매칭되어야 함.
+    routes += oauth.build_oauth_routes(
+        store, dash_password, public_url=public_url, audit=audit
+    )
+    # 대시보드/정적 자산(세션 인증)
+    routes += dashboard.build_routes(ctx, dash_password)
+    # Bearer 인증은 MCP 마운트에만 적용.
+    routes.append(
+        Mount("/", app=BearerAuthMiddleware(mcp_app, verify, public_url=public_url))
+    )
 
     app = Starlette(
         routes=routes,
@@ -104,4 +125,5 @@ def build_app(
     )
     # 컨텍스트를 앱에 노출 (테스트/디버깅용)
     app.state.ctx = ctx
+    app.state.oauth_store = store
     return app

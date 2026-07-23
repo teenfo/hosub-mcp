@@ -7,6 +7,7 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
 ## 특징
 
 - **표준 MCP SDK 기반** (`mcp` v1 FastMCP, Streamable HTTP)
+- **OAuth 2.1 인증** (claude.ai 커넥터용, 대시보드 비밀번호로 승인) + 정적 토큰 병행
 - **서버 전체 제어**: 화이트리스트 도구 + 임의 셸 명령(`run_command`) + 파일 입출력
 - **위험도 기반 승인 흐름**: Medium/High 도구는 `confirm=true` 없이는 실행되지 않음
 - **백그라운드 잡**: 오래 걸리는 작업은 즉시 `job_id` 반환 + 상태 조회
@@ -50,7 +51,8 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
 [Cloudflare Tunnel]  →  https://mcp.example.com
       ↓
 [hosub MCP 서버 (uvicorn, 127.0.0.1:8700)]
-   ├─ /mcp        도구 계층 (Bearer 인증)
+   ├─ /mcp        도구 계층 (OAuth/정적 Bearer 인증)
+   ├─ /.well-known·/authorize·/token·/register  OAuth 2.1 (대시보드 비번 승인)
    ├─ /  ·  /api  대시보드 (세션 인증, 조회 전용)
    ├─ 정책 계층 (위험도 + confirm 게이트)
    ├─ 화이트리스트 레지스트리 (config/registry.yaml)
