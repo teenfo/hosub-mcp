@@ -32,6 +32,19 @@ feed = RealtimeFeed(aggregator.on_tick)
 scanner = Scanner()
 discovery = Discovery()
 reporter = BacktestReporter()
+
+
+async def _on_fill(fill: dict) -> None:
+    """주문체결 실시간 → 실거래 로그에 실측 체결 기록(진입가 근사 → 실측)."""
+    from .trade import ledger
+
+    try:
+        await asyncio.to_thread(ledger.record_fill, fill)
+    except Exception:  # noqa: BLE001
+        log.exception("실측 체결 기록 실패: %s", fill)
+
+
+feed.on_fill = _on_fill   # 주문체결 실시간 → 실측 체결 기록
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
 
 
@@ -283,7 +296,8 @@ async def api_performance(_=Depends(require_auth)):
 
     return {"stats": ledger.stats(),
             "open": ledger.positions(status="open", limit=50),
-            "closed": ledger.positions(status="closed", limit=50)}
+            "closed": ledger.positions(status="closed", limit=50),
+            "fills": ledger.fills(limit=30)}
 
 
 @app.post("/api/positions/{pos_id}/close")
