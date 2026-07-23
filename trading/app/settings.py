@@ -36,6 +36,8 @@ WS_BASE = {
 
 DASH_PASSWORD = os.environ.get("DASH_PASSWORD", "change-me")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-secret")
+# hosub-mcp 대시보드 프록시용 공유 시크릿 (HOSUB_TRADING_TOKEN 과 동일 값 설정)
+INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)

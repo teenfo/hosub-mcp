@@ -6,8 +6,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=hosub
-WorkingDirectory=/home/hosub/apps/hosub-mcp/trading
-ExecStart=/home/hosub/apps/hosub-mcp/trading/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8600
+WorkingDirectory=/opt/hosub-trading/trading
+ExecStart=/opt/hosub-trading/trading/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8600
 Restart=on-failure
 RestartSec=5
 

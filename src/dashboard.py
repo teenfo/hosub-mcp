@@ -58,6 +58,15 @@ def _list_briefings() -> list[tuple[str, Path]]:
 _WEATHER_LATLON = os.environ.get("HOSUB_WEATHER_LATLON", "37.5665,126.9780")
 WEATHER_LABEL = os.environ.get("HOSUB_WEATHER_LABEL", "서울")
 
+# 트레이딩 서비스(trading/) 프록시. 같은 호스트의 별도 프로세스로 떠 있고,
+# 대시보드 세션 인증을 통과한 요청만 내부 토큰을 붙여 전달한다.
+# HOSUB_TRADING_TOKEN 은 trading 쪽 INTERNAL_TOKEN 과 같은 값이어야 한다.
+TRADING_URL = os.environ.get("HOSUB_TRADING_URL", "http://127.0.0.1:8600")
+TRADING_TOKEN = os.environ.get("HOSUB_TRADING_TOKEN", "")
+
+_TRADING_GET_RE = re.compile(r"^(status|signals|orders|bars/\d{6})$")
+_TRADING_POST_RE = re.compile(r"^orders/[0-9a-f]{12}/(approve|reject)$")
+
 
 def _is_authed(request) -> bool:
     return bool(request.session.get(_SESSION_KEY))
@@ -205,6 +214,31 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
             return JSONResponse({"ok": False, "label": WEATHER_LABEL, "error": str(exc)})
         return JSONResponse({"ok": True, "label": WEATHER_LABEL, "data": data})
 
+    async def api_trading(request):
+        if (d := _require_auth_json(request)):
+            return d
+        path = request.path_params["path"]
+        allowed = (
+            _TRADING_GET_RE.match(path)
+            if request.method == "GET"
+            else _TRADING_POST_RE.match(path)
+        )
+        if not allowed:
+            return JSONResponse({"error": "not allowed"}, status_code=404)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.request(
+                    request.method,
+                    f"{TRADING_URL}/api/{path}",
+                    params=dict(request.query_params),
+                    headers={"X-Internal-Token": TRADING_TOKEN},
+                )
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+        except Exception as exc:  # 서비스 다운 시 graceful
+            return JSONResponse(
+                {"error": f"trading 서비스 연결 실패: {exc}"}, status_code=502
+            )
+
     async def static_file(request):
         # 로그인 페이지 자산(스타일·vendor 라이브러리)은 인증 전에도 필요하므로 공개.
         name = request.path_params["path"]
@@ -229,6 +263,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/briefing", api_briefing),
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
+        Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),
         Route("/static/{path:path}", static_file),
     ]
 

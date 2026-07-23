@@ -75,13 +75,26 @@ uvicorn app.main:app --host 127.0.0.1 --port 8600
 
 ## 배포 (hosub 서버)
 
+배포 절차는 런북 `docs/requests/trading-deploy.md` (local-request 브랜치) 를 따른다.
+요약: `/opt/hosub-trading` 에 별도 클론 → venv → `.env` → systemd 유닛.
+
 ```bash
 sudo cp deploy/trading.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable --now trading
 ```
 
-Caddy 뒤에 붙이려면 `deploy/caddy-snippet.txt` 참고.
-hosub-mcp 의 `deploy_service` 레지스트리에 등록하면 Claude 대화로 배포할 수 있다.
+## hosub-mcp 대시보드 연동
+
+hosub-mcp 대시보드에 "트레이딩" 메뉴가 있다 (`static/pages/trading.js`).
+대시보드 서버가 `/api/trading/*` 를 이 서비스(127.0.0.1:8600)로 프록시하며,
+공유 시크릿으로 인증한다:
+
+- trading `.env`: `INTERNAL_TOKEN=<시크릿>`
+- hosub-mcp `.env`: `HOSUB_TRADING_TOKEN=<같은 값>`, `HOSUB_TRADING_URL=http://127.0.0.1:8600`
+
+주의: 대시보드는 원래 조회 전용이지만, 트레이딩 페이지의 승인/거부 버튼은
+예외로 추가된 것이다(주문 실행은 이 trading 서비스가 담당하고, MCP 서버 제어
+권한과는 분리되어 있다).
 
 ## 세금·수수료 가정 (backtest)
 

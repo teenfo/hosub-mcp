@@ -41,6 +41,10 @@ app = FastAPI(title="hosub-trading", lifespan=lifespan)
 
 
 def _authed(request: Request) -> bool:
+    # hosub-mcp 대시보드 프록시는 공유 시크릿 헤더로 인증한다
+    internal = request.headers.get("x-internal-token", "")
+    if settings.INTERNAL_TOKEN and hmac.compare_digest(internal, settings.INTERNAL_TOKEN):
+        return True
     cookie = request.cookies.get("dash_session", "")
     try:
         return signer.loads(cookie) == "ok"
