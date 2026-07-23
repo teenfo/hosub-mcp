@@ -290,6 +290,6 @@ export default {
 
     await Promise.all([loadStatus(), loadOrders(), loadSignals()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); }, 10_000));
-    ctx.addTimer(setInterval(loadChart, 60_000));
+    ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
 };

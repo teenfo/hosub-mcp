@@ -165,7 +165,7 @@ refreshOrders();
 refreshSettings();
 refreshAccount();
 setInterval(() => { refreshStatus(); refreshOrders(); refreshAccount(); }, 10000);
-setInterval(refreshChart, 60000);
+setInterval(refreshChart, 5000); // 실시간 분봉 (형성 중 봉 포함)
 </script>
 </body>
 </html>

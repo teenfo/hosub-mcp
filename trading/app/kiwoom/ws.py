@@ -30,12 +30,15 @@ class RealtimeFeed:
             self._task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
+        backoff = 5
         while True:
             try:
                 await self._connect_once()
+                backoff = 5  # 정상 종료 후엔 빠르게 재접속
             except Exception as e:  # noqa: BLE001 - 재접속 루프
-                log.warning("WS 재접속 대기: %s", e)
-                await asyncio.sleep(5)
+                log.warning("WS 재접속 %ds 후: %s", backoff, e)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)  # 장 마감 등 지속 실패 시 완화
 
     async def _connect_once(self) -> None:
         token = await token_manager.get()

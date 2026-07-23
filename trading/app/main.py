@@ -11,7 +11,9 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
 from .data import store
+from .data.collector import BarAggregator
 from .kiwoom.auth import token_manager
+from .kiwoom.ws import RealtimeFeed
 from .signals.engine import SignalEngine
 from .trade import orders
 
@@ -19,7 +21,17 @@ logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("trading")
 
 engine = SignalEngine()
+aggregator = BarAggregator()
+feed = RealtimeFeed(aggregator.on_tick)
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
+
+
+async def _feed_starter() -> None:
+    """API 키가 준비되는 즉시(설정 화면 입력 포함) 실시간 시세 구독 시작."""
+    while not settings.KIWOOM_APP_KEY:
+        await asyncio.sleep(10)
+    feed.start(list(settings.WATCHLIST.keys()))
+    log.info("실시간 시세 구독 시작: %s", list(settings.WATCHLIST.keys()))
 TEMPLATE = (Path(__file__).parent.parent / "templates" / "dashboard.html").read_text(
     encoding="utf-8"
 )
@@ -29,11 +41,15 @@ TEMPLATE = (Path(__file__).parent.parent / "templates" / "dashboard.html").read_
 async def lifespan(app: FastAPI):
     # 루프는 항상 띄운다 — 키가 없으면 매 주기 스킵하고, 설정 화면에서
     # 키가 입력되는 즉시 다음 주기부터 동작한다.
-    task = asyncio.create_task(engine.loop())
+    tasks = [
+        asyncio.create_task(engine.loop()),
+        asyncio.create_task(_feed_starter()),
+    ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
     yield
-    task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 app = FastAPI(title="hosub-trading", lifespan=lifespan)
@@ -115,13 +131,19 @@ async def api_reject(order_id: str, _=Depends(require_auth)):
 @app.get("/api/bars/{symbol}")
 async def api_bars(symbol: str, _=Depends(require_auth)):
     df = store.load_bars(symbol, "1m", limit=500)
-    if df.empty:
-        return []
-    return [
+    bars = [] if df.empty else [
         {"time": int(ts.timestamp()), "open": r.open, "high": r.high,
          "low": r.low, "close": r.close, "volume": int(r.volume)}
         for ts, r in df.iterrows()
     ]
+    # 형성 중인 현재 분봉을 덧붙인다 (실시간 WS 수신분)
+    cur = aggregator.snapshot(symbol)
+    if cur:
+        if bars and bars[-1]["time"] == cur["time"]:
+            bars[-1] = cur
+        elif not bars or bars[-1]["time"] < cur["time"]:
+            bars.append(cur)
+    return bars
 
 
 @app.get("/api/signals")
