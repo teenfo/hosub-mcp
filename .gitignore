@@ -11,7 +11,7 @@ data/
 *.db-shm
 
 # 데일리 브리핑 (서버에서 Claude 가 write_file 로 생성 → git pull 충돌 방지)
-html/morning-brif/
+html/morning-brief/
 
 # Python
 __pycache__/
