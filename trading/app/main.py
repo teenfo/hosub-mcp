@@ -289,6 +289,31 @@ async def api_account(_=Depends(require_auth)):
     return data
 
 
+@app.get("/api/risk")
+async def api_risk(_=Depends(require_auth)):
+    """일일 목표·손실 가드 상태 + 오늘 실현손익 + 설정값."""
+    return engine.day_guard_status() | {
+        "risk_per_trade_pct": settings.RISK.get("risk_per_trade_pct", 0),
+        "max_positions": settings.RISK.get("max_positions", 3),
+    }
+
+
+@app.post("/api/risk")
+async def api_risk_save(payload: dict, _=Depends(require_auth)):
+    """일일 목표·손실한도·거래당 리스크 설정(영속). 목표값을 UI 에서 조정."""
+    try:
+        settings.save_risk(
+            daily_target_pct=payload.get("daily_target_pct"),
+            daily_loss_limit_pct=payload.get("daily_loss_limit_pct"),
+            risk_per_trade_pct=payload.get("risk_per_trade_pct"),
+        )
+    except (OSError, ValueError, TypeError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, 400)
+    log.info("리스크 설정 갱신: %s", {k: settings.RISK.get(k) for k in
+             ("daily_target_pct", "daily_loss_limit_pct", "risk_per_trade_pct")})
+    return {"ok": True, **engine.day_guard_status()}
+
+
 @app.get("/api/performance")
 async def api_performance(_=Depends(require_auth)):
     """실거래 성과: 청산 완료 집계(전체·규칙별) + 오픈/최근 청산 포지션."""

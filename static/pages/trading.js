@@ -53,11 +53,12 @@ export default {
     const reportC = card("분석 보고 리스트", null, { icon: "bi-journal-text" });
     const backtestC = card("규칙 백테스트 (내 데이터 검증)", null, { icon: "bi-clipboard-data" });
     const perfC = card("실거래 성과 로그", null, { icon: "bi-cash-coin" });
+    const guardC = card("일일 목표·가드", null, { icon: "bi-shield-check" });
     // 각 카드를 독립 그리드 아이템으로 등록(id·기본 폭). 편집 모드에서 자유 배치·크기조절.
     const CARDS = [
-      ["status", status, 6], ["watch", watchC, 6],
-      ["pending", pending, 6], ["report", reportC, 6],
-      ["scanner", scannerC, 12], ["discovery", discoveryC, 12],
+      ["status", status, 6], ["guard", guardC, 6],
+      ["watch", watchC, 6], ["pending", pending, 6],
+      ["report", reportC, 6], ["scanner", scannerC, 12], ["discovery", discoveryC, 12],
       ["performance", perfC, 12], ["backtest", backtestC, 12],
       ["chart", chart, 12], ["signals", signals, 12],
     ];
@@ -253,6 +254,58 @@ export default {
         }
         t.appendChild(tb);
         perfBody.appendChild(el("div", { class: "table-responsive" }, t));
+      }
+    };
+
+    // --- 일일 목표·가드 (목표값 설정 가능) ---
+    const gTarget = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
+    const gLoss = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
+    const gSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "저장");
+    const gStatus = el("div", { class: "mt-2 small" });
+    const saveRisk = async () => {
+      gSave.disabled = true;
+      try {
+        await postJSON("/api/trading/risk", {
+          daily_target_pct: parseFloat(gTarget.value),
+          daily_loss_limit_pct: parseFloat(gLoss.value),
+        });
+        _memo["risk"] = undefined;
+        await loadRisk();
+      } catch (e) { alert("저장 실패: " + e.message); }
+      finally { gSave.disabled = false; }
+    };
+    gSave.onclick = saveRisk;
+    const fld = (lbl, input) => el("div", {}, [el("label", { class: "form-label small text-secondary mb-0" }, lbl), input]);
+    guardC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-shield-check"></i> 당일 실현손익이 <b>목표</b> 도달 시 이익 확정, <b>손실한도</b> 도달 시 손실 차단 — 그날 신규 진입을 멈춥니다. (실거래 성과 로그 기준)' })),
+      el("div", { class: "d-flex gap-3 flex-wrap align-items-end" },
+        [fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss), el("div", {}, gSave)]),
+      gStatus,
+    );
+    const loadRisk = async () => {
+      let r;
+      try { r = await fetchJSON("/api/trading/risk"); } catch (e) { return; }
+      if (!changed("risk", r)) return;
+      if (document.activeElement !== gTarget) gTarget.value = r.daily_target_pct;
+      if (document.activeElement !== gLoss) gLoss.value = r.daily_loss_limit_pct;
+      gStatus.innerHTML = "";
+      const cls = r.pct >= 0 ? "text-danger" : "text-primary";
+      gStatus.append(el("div", {}, [
+        el("span", { class: "text-secondary" }, "오늘 실현손익 "),
+        el("span", { class: "fw-semibold " + cls }, `${won(r.krw)} (${pct(r.pct)})`),
+        el("span", { class: "text-secondary" }, ` · ${r.trades}건`),
+      ]));
+      const bar = el("div", { class: "progress mt-2", style: "height:8px" });
+      const hi = r.daily_target_pct || 0;
+      const frac = hi > 0 ? Math.max(0, Math.min(100, r.pct / hi * 100)) : 0;
+      bar.appendChild(el("div", { class: "progress-bar " + (r.pct >= 0 ? "bg-danger" : "bg-primary"), style: `width:${r.pct >= 0 ? frac : 0}%` }));
+      gStatus.appendChild(bar);
+      gStatus.appendChild(el("div", { class: "mt-2" },
+        r.halted ? el("span", { class: "badge text-bg-warning" }, r.reason)
+          : el("span", { class: "badge text-bg-success" }, "정상 — 진입 허용")));
+      if (!r.halted && hi > 0 && r.pct < hi) {
+        gStatus.appendChild(el("div", { class: "text-secondary mt-1" }, `목표까지 ${(hi - r.pct).toFixed(2)}% 남음`));
       }
     };
 
@@ -859,9 +912,9 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport(), loadPerformance()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport(), loadPerformance(), loadRisk()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
-    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); }, 30_000));
+    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); loadRisk(); }, 30_000));
     ctx.addTimer(setInterval(() => { loadReport(); loadBacktestReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
