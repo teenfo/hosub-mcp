@@ -1,7 +1,6 @@
 import { fetchJSON, el } from "../app.js";
 
-// 아주 작은 마크다운 렌더러 (제목/굵게/기울임/코드/목록/링크/문단).
-// HTML 을 먼저 이스케이프한 뒤 변환하므로 원본에 태그가 있어도 안전하다.
+// 아주 작은 마크다운 렌더러 (.md 브리핑용). HTML 은 서버에서 script 제거 후 그대로 렌더.
 function mdToHtml(src) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const inline = (s) =>
@@ -10,18 +9,16 @@ function mdToHtml(src) {
       .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/\*([^*]+)\*/g, "<em>$1</em>")
       .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-
   const lines = src.replace(/\r\n/g, "\n").split("\n");
   const out = [];
-  let list = null; // "ul" | "ol" | null
+  let list = null;
   const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
-
   for (const raw of lines) {
     const line = raw.trimEnd();
     let m;
     if ((m = line.match(/^(#{1,4})\s+(.*)$/))) {
       closeList();
-      const lvl = m[1].length + 2; // h3~h6
+      const lvl = m[1].length + 2;
       out.push(`<h${lvl} class="mt-3">${inline(m[2])}</h${lvl}>`);
     } else if ((m = line.match(/^\s*[-*]\s+(.*)$/))) {
       if (list !== "ul") { closeList(); list = "ul"; out.push('<ul class="mb-2">'); }
@@ -45,25 +42,29 @@ export default {
   title: "데일리 브리핑",
   icon: "bi-journal-text",
   async render(container, ctx) {
-    const wrap = el("div", { class: "row g-3" });
-    const col = el("div", { class: "col-12 col-xxl-9" });
+    const col = el("div", { class: "col-12 col-xxl-9 mx-auto" });
     const cardEl = el("div", { class: "card shadow-sm" });
-    const header = el("div", { class: "card-header d-flex align-items-center" }, [
+    const header = el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
       el("span", { html: '<i class="bi bi-journal-text"></i> 데일리 브리핑' }),
-      el("span", { class: "ms-auto small text-secondary", id: "briefing-time" }),
+      el("select", { class: "form-select form-select-sm w-auto ms-auto d-none", id: "briefing-date" }),
+      el("span", { class: "small text-secondary", id: "briefing-time" }),
     ]);
     const body = el("div", { class: "card-body" });
     cardEl.appendChild(header);
     cardEl.appendChild(body);
     col.appendChild(cardEl);
-    wrap.appendChild(col);
-    container.appendChild(wrap);
+    container.appendChild(el("div", { class: "row g-3" }, col));
 
-    const load = async () => {
-      const d = await fetchJSON("/api/briefing");
-      const timeEl = document.getElementById("briefing-time");
+    const select = header.querySelector("#briefing-date");
+    const timeEl = header.querySelector("#briefing-time");
+
+    const load = async (date) => {
+      const q = date ? "?date=" + encodeURIComponent(date) : "";
+      const d = await fetchJSON("/api/briefing" + q);
       body.innerHTML = "";
+
       if (!d.exists) {
+        select.classList.add("d-none");
         timeEl.textContent = "";
         body.appendChild(
           el("div", { class: "text-center text-secondary py-5 border border-2 border-dashed rounded" }, [
@@ -74,13 +75,29 @@ export default {
         );
         return;
       }
-      if (d.updated_at) {
-        timeEl.textContent = "업데이트: " + new Date(d.updated_at).toLocaleString("ko-KR");
+
+      // 날짜 드롭다운 (2개 이상일 때 표시)
+      if (d.dates && d.dates.length > 1) {
+        select.innerHTML = "";
+        for (const dt of d.dates) {
+          const opt = el("option", { value: dt }, dt);
+          if (dt === d.date) opt.selected = true;
+          select.appendChild(opt);
+        }
+        select.classList.remove("d-none");
+      } else {
+        select.classList.add("d-none");
       }
-      body.appendChild(el("div", { class: "briefing-body", html: mdToHtml(d.content) }));
+      timeEl.textContent = d.updated_at ? "업데이트: " + new Date(d.updated_at).toLocaleString("ko-KR") : "";
+
+      const holder = el("div", { class: "briefing-body" });
+      // HTML 은 서버에서 script 제거됨 → 그대로 렌더. md 는 변환.
+      holder.innerHTML = d.format === "md" ? mdToHtml(d.content) : d.content;
+      body.appendChild(holder);
     };
 
+    select.addEventListener("change", () => load(select.value));
     await load();
-    ctx.addTimer(setInterval(load, 60000)); // 1분마다 갱신
+    ctx.addTimer(setInterval(() => load(select.classList.contains("d-none") ? null : select.value), 60000));
   },
 };

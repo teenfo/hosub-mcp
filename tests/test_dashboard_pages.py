@@ -36,28 +36,45 @@ def _login(c):
 
 
 def test_briefing_absent(tmp_path, monkeypatch):
-    monkeypatch.setattr(dashboard, "BRIEFING_PATH", str(tmp_path / "nope.md"))
+    monkeypatch.setattr(dashboard, "BRIEFING_DIR", str(tmp_path / "empty"))
     with _client() as c:
         _login(c)
         r = c.get("/api/briefing")
         assert r.status_code == 200
         body = r.json()
         assert body["exists"] is False
+        assert body["dates"] == []
         assert "hint" in body
 
 
-def test_briefing_present(tmp_path, monkeypatch):
-    f = tmp_path / "briefing.md"
-    f.write_text("# 오늘의 브리핑\n\n- 항목 1\n- 항목 2\n", encoding="utf-8")
-    monkeypatch.setattr(dashboard, "BRIEFING_PATH", str(f))
+def test_briefing_latest_and_dates(tmp_path, monkeypatch):
+    (tmp_path / "2026-07-21.html").write_text("<h2>21일</h2>", encoding="utf-8")
+    (tmp_path / "2026-07-23.html").write_text("<h2>23일</h2><script>alert(1)</script>", encoding="utf-8")
+    (tmp_path / "2026-07-22.md").write_text("# 22일", encoding="utf-8")
+    monkeypatch.setattr(dashboard, "BRIEFING_DIR", str(tmp_path))
     with _client() as c:
         _login(c)
         r = c.get("/api/briefing")
-        assert r.status_code == 200
         body = r.json()
         assert body["exists"] is True
-        assert "오늘의 브리핑" in body["content"]
-        assert body["updated_at"]
+        assert body["date"] == "2026-07-23"           # 최신
+        assert body["dates"] == ["2026-07-23", "2026-07-22", "2026-07-21"]
+        assert body["format"] == "html"
+        assert "23일" in body["content"]
+        assert "<script>" not in body["content"]        # script 제거됨
+
+
+def test_briefing_by_date_and_md(tmp_path, monkeypatch):
+    (tmp_path / "2026-07-22.md").write_text("# 22일 브리핑", encoding="utf-8")
+    (tmp_path / "2026-07-23.html").write_text("<h2>23일</h2>", encoding="utf-8")
+    monkeypatch.setattr(dashboard, "BRIEFING_DIR", str(tmp_path))
+    with _client() as c:
+        _login(c)
+        r = c.get("/api/briefing?date=2026-07-22")
+        body = r.json()
+        assert body["date"] == "2026-07-22"
+        assert body["format"] == "md"
+        assert "22일" in body["content"]
 
 
 def test_briefing_requires_auth():
