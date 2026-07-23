@@ -95,7 +95,7 @@ export default {
         const stat = (k, v) => el("div", { class: "col-6 col-md-3" },
           el("div", { class: "border rounded p-2" }, [el("div", { class: "text-secondary" }, k), el("div", { class: "fw-semibold" }, v)]));
         btOut.append(
-          el("div", { class: "text-secondary mb-1" }, `${r.days}일치 · 총 ${s.trades}건`),
+          el("div", { class: "text-secondary mb-1" }, `${r.name ? r.name + " (" + r.symbol + ")" : r.symbol} · ${r.days}일치 · 총 ${s.trades}건`),
           el("div", { class: "row g-2" }, [
             stat("승률", s.win_rate + "%"), stat("평균손익", s.avg_pnl_pct + "%"),
             stat("손익비(PF)", s.profit_factor), stat("누적수익", s.total_return_pct + "%"),
@@ -140,7 +140,7 @@ export default {
         const tb = el("tbody");
         for (const r of d.symbols) {
           tb.appendChild(el("tr", {
-            html: `<td>${r.symbol}</td><td>${r.days}</td><td>${r.trades || 0}</td>` +
+            html: `<td>${r.name ? r.name + " (" + r.symbol + ")" : r.symbol}</td><td>${r.days}</td><td>${r.trades || 0}</td>` +
               `<td>${r.win_rate ?? "-"}</td><td>${r.avg_pnl_pct ?? "-"}</td><td>${r.profit_factor ?? "-"}</td>` +
               `<td>${r.total_return_pct ?? "-"}</td><td>${r.max_drawdown_pct ?? "-"}</td>`,
           }));
@@ -635,7 +635,7 @@ export default {
     const loadChart = async () => {
       if (!symbolSel.value) return;
       try {
-        const bars = await fetchJSON("/api/trading/bars/" + symbolSel.value);
+        const bars = await fetchJSON("/api/trading/bars/" + symbolSel.value + "?tf=1m&live=1");
         if (symbolSel.value !== mCurSym) {
           mCurSym = symbolSel.value;
           mChart.setData(bars);                       // 종목 전환 → 새로 그림(확대 리셋)

@@ -211,10 +211,18 @@ async def api_reject(order_id: str, _=Depends(require_auth)):
 
 
 @app.get("/api/bars/{symbol}")
-async def api_bars(symbol: str, tf: str = "1m", _=Depends(require_auth)):
-    """봉 데이터. tf=1m(분봉, 기본) 또는 1d(일봉, 발굴 수집분)."""
+async def api_bars(symbol: str, tf: str = "1m", live: int = 0, _=Depends(require_auth)):
+    """봉 데이터. tf=1m(분봉, 기본) 또는 1d(일봉, 발굴 수집분).
+    live=1 이면 분봉을 키움 REST 로 즉시 조회해 최신분을 채운 뒤 반환(실시간)."""
     if tf not in ("1m", "1d"):
         tf = "1m"
+    if tf == "1m" and live and settings.KIWOOM_APP_KEY:
+        from .data import collector
+
+        try:
+            await collector.backfill_minutes(symbol)  # REST 즉시 조회(실시간)
+        except Exception:  # noqa: BLE001 - 조회 실패 시 저장분으로 폴백
+            pass
     df = store.load_bars(symbol, tf, limit=500)
     bars = [] if df.empty else [
         {"time": int(ts.timestamp()), "open": r.open, "high": r.high,
@@ -255,14 +263,21 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
          "pnl_pct": round(t.pnl_pct(settings.COSTS), 3)}
         for t in result.trades[-100:]
     ]
-    return {"ok": True, "symbol": symbol, "tf": tf, "days": days,
-            "stats": result.stats(), "trades": trades}
+    from .data import symbols
+
+    return {"ok": True, "symbol": symbol, "name": symbols.name_of(symbol),
+            "tf": tf, "days": days, "stats": result.stats(), "trades": trades}
 
 
 @app.get("/api/backtest/report/latest")
 async def api_backtest_report(_=Depends(require_auth)):
-    """분봉 축적분 주기 백테스트 최신 리포트(전체 요약 + 종목별)."""
-    return reporter.latest()
+    """분봉 축적분 주기 백테스트 최신 리포트(전체 요약 + 종목별). 종목명 포함."""
+    from .data import symbols
+
+    data = reporter.latest()
+    for row in data.get("symbols", []):
+        row["name"] = symbols.name_of(row.get("symbol", "")) or ""
+    return data
 
 
 @app.get("/api/backtest/report/history")
