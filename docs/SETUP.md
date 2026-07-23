@@ -136,7 +136,7 @@ sudo -u hosub vi /opt/hosub-mcp/.env      # HOSUB_DASH_PASSWORD 입력
 | `HOSUB_DASH_PASSWORD` | 대시보드 웹 로그인 비밀번호 **(직접 입력)** |
 | `HOSUB_SESSION_SECRET` | 세션 쿠키 서명 키 (자동 발급) |
 | `HOSUB_MCP_BRANCH` | 자동 업데이트가 추적할 브랜치 (기본 `main`) |
-| `HOSUB_ALLOWED_HOSTS` | (선택) 허용 Host. 예: `mcp.example.com` |
+| `HOSUB_ALLOWED_HOSTS` | (선택) DNS 리바인딩 보호용 허용 Host. **Claude 커넥터 사용 시 반드시 비워둘 것** (설정하면 커넥터 Origin 거부로 연결 실패 — 아래 주의 참고) |
 | `HOSUB_MCP_STRICT` | `true` 면 스크립트 경로 존재/실행권한 검증 |
 
 > `.env` 는 절대 커밋하지 않는다(`.gitignore` 포함). 권한은 `600`, 소유자 `hosub`.
@@ -198,8 +198,12 @@ sudo systemctl restart cloudflared
 curl -s -o /dev/null -w "%{http_code}\n" -X POST https://mcp.example.com/mcp
 ```
 
-`.env` 의 `HOSUB_ALLOWED_HOSTS=mcp.example.com` 을 채우고 `sudo systemctl restart hosub-mcp`
-하면 DNS 리바인딩 보호까지 켜진다.
+> **⚠️ `HOSUB_ALLOWED_HOSTS` 는 Claude 커넥터와 함께 쓸 수 없다.** 이 값을 채우면 MCP SDK 의
+> DNS 리바인딩 보호가 켜지고, Claude 커넥터가 보내는 `Origin: https://claude.ai` 를
+> 403 "Invalid Origin header" 로 거부한다 → OAuth 인증은 되지만 `/mcp` 연결이 "서버 접근
+> 불가"로 실패한다. **커넥터를 쓰면 `HOSUB_ALLOWED_HOSTS` 를 비워두라.** `/mcp` 는 Bearer/
+> OAuth 토큰 + Caddy TLS 로 이미 보호되고, DNS 리바인딩 공격은 쿠키 기반이라 Bearer 인증
+> 엔드포인트에는 해당하지 않으므로 비워도 안전하다.
 
 #### 7.2 Claude Custom Connector (OAuth 2.1)
 
@@ -429,9 +433,10 @@ journalctl -u caddy -n 40 --no-pager
 # 외부 도달 + 인증 (401 이면 정상: TLS OK + 인증 요구)
 curl -s -o /dev/null -w "%{http_code}\n" -X POST https://hosub.duckdns.org/mcp
 
-# .env 에 공개 URL(OAuth 메타데이터용) + Host 검증 설정
+# .env 에 공개 URL(OAuth 메타데이터용) 설정
 sudo -u hosub sed -i 's#^HOSUB_PUBLIC_URL=.*#HOSUB_PUBLIC_URL=https://hosub.duckdns.org#' /opt/hosub-mcp/.env
-sudo -u hosub sed -i 's/^HOSUB_ALLOWED_HOSTS=.*/HOSUB_ALLOWED_HOSTS=hosub.duckdns.org/' /opt/hosub-mcp/.env
+# ⚠️ HOSUB_ALLOWED_HOSTS 는 비워둔다 (설정하면 Claude 커넥터 Origin 이 거부되어 연결 실패)
+sudo -u hosub sed -i 's/^HOSUB_ALLOWED_HOSTS=.*/HOSUB_ALLOWED_HOSTS=/' /opt/hosub-mcp/.env
 sudo systemctl restart hosub-mcp
 
 # OAuth 메타데이터 확인 (issuer 가 https://hosub.duckdns.org 이어야 함)
