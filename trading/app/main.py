@@ -15,6 +15,7 @@ from .data.collector import BarAggregator
 from .kiwoom.auth import token_manager
 from .kiwoom.ws import RealtimeFeed
 from .signals.engine import SignalEngine
+from .signals.scanner import Scanner
 from .trade import orders
 
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +24,7 @@ log = logging.getLogger("trading")
 engine = SignalEngine()
 aggregator = BarAggregator()
 feed = RealtimeFeed(aggregator.on_tick)
+scanner = Scanner()
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
 
 
@@ -44,6 +46,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(engine.loop()),
         asyncio.create_task(_feed_starter()),
+        asyncio.create_task(scanner.loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
@@ -178,6 +181,25 @@ async def api_account(_=Depends(require_auth)):
             engine.equity = engine.state.equity = float(equity)
         _account_cache.update(ts=now, data=data)
     return data
+
+
+@app.get("/api/scanner")
+async def api_scanner(_=Depends(require_auth)):
+    return {"last_scan": scanner.last_scan, "results": scanner.results,
+            "config": settings.CONFIG.get("scanner", {})}
+
+
+@app.post("/api/watchlist")
+async def api_watchlist_add(payload: dict, _=Depends(require_auth)):
+    """스캐너에서 고른 종목을 감시목록에 편입 (런타임 — 재시작 시 config.yaml 기준으로 복원)."""
+    code = str(payload.get("code", "")).strip()
+    name = str(payload.get("name", "")).strip() or code
+    if not (code.isdigit() and len(code) == 6):
+        return JSONResponse({"ok": False, "error": "종목코드는 6자리 숫자"}, 400)
+    settings.WATCHLIST[code] = name
+    await feed.update(list(settings.WATCHLIST.keys()))
+    log.info("감시목록 편입: %s(%s) — 총 %d 종목", name, code, len(settings.WATCHLIST))
+    return {"ok": True, "watchlist": settings.WATCHLIST}
 
 
 @app.get("/api/settings")

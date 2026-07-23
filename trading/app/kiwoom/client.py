@@ -18,10 +18,12 @@ TR_DAILY_CHART = "ka10081"    # 주식 일봉차트 조회
 TR_ORDER_BUY = "kt10000"      # 주식 매수주문
 TR_ORDER_SELL = "kt10001"     # 주식 매도주문
 TR_ACCOUNT_BALANCE = "kt00018"  # 계좌평가잔고
+TR_TRADE_VALUE_RANK = "ka10032"  # 거래대금상위 (flu_rt/trde_prica 포함)
 
 PATH_CHART = "/api/dostk/chart"
 PATH_ORDER = "/api/dostk/ordr"
 PATH_ACCOUNT = "/api/dostk/acnt"
+PATH_RANK = "/api/dostk/rkinfo"
 
 
 class RateLimiter:
@@ -90,6 +92,15 @@ class KiwoomClient:
             "trde_tp": "3" if price == 0 else "0",  # 3=시장가, 0=보통(지정가)
         }
         return await self._call(PATH_ORDER, tr, body)
+
+    async def trade_value_rank(self, market: str = "000") -> dict:
+        """거래대금 상위. market: 000 전체 / 001 코스피 / 101 코스닥.
+        stex_tp 값은 문서 미상 — 모의투자 호출로 검증 필요."""
+        return await self._call(
+            PATH_RANK,
+            TR_TRADE_VALUE_RANK,
+            {"mrkt_tp": market, "mang_stk_incls": "0", "stex_tp": "1"},
+        )
 
     async def balance(self) -> dict:
         return await self._call(
