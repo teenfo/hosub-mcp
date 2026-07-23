@@ -39,6 +39,17 @@ class BarAggregator:
         bar["c"] = price
         bar["v"] += volume
 
+    def snapshot(self, symbol: str) -> dict | None:
+        """형성 중인 현재 분봉 (차트 실시간 표시용)."""
+        bar = self._current.get(symbol)
+        if not bar:
+            return None
+        return {
+            "time": int(bar["minute"].timestamp()),
+            "open": bar["o"], "high": bar["h"], "low": bar["l"],
+            "close": bar["c"], "volume": bar["v"],
+        }
+
     def _flush(self, symbol: str, bar: dict) -> None:
         df = pd.DataFrame(
             [{"open": bar["o"], "high": bar["h"], "low": bar["l"],
