@@ -13,6 +13,8 @@ from __future__ import annotations
 import hmac
 import json
 import os
+import re
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -32,8 +34,26 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 _SESSION_KEY = "dash_auth"
 
-# 데일리 브리핑 파일 경로 (Claude 가 MCP write_file 로 여기에 쓴다)
-BRIEFING_PATH = os.environ.get("HOSUB_BRIEFING_PATH", "data/briefing.md")
+# 데일리 브리핑 디렉터리 (Claude 가 MCP write_file 로 날짜별 파일을 쓴다).
+# 파일명은 날짜(YYYY-MM-DD.html / .md). 예: html/morning-brif/2026-07-23.html
+BRIEFING_DIR = os.environ.get("HOSUB_BRIEFING_DIR", "html/morning-brif")
+
+_BRIEFING_EXTS = (".html", ".htm", ".md")
+_SCRIPT_RE = re.compile(r"(?is)<script.*?</script>")
+
+
+def _list_briefings() -> list[tuple[str, Path]]:
+    """브리핑 파일을 (이름, 경로) 목록으로, 이름 내림차순(최신 먼저) 반환."""
+    d = Path(BRIEFING_DIR)
+    if not d.is_dir():
+        return []
+    items = [
+        (f.stem, f)
+        for f in d.iterdir()
+        if f.is_file() and f.suffix.lower() in _BRIEFING_EXTS
+    ]
+    items.sort(key=lambda x: x[0], reverse=True)
+    return items
 # 날씨 위치 (기본 서울). "위도,경도" 형식으로 HOSUB_WEATHER_LATLON 설정 가능.
 _WEATHER_LATLON = os.environ.get("HOSUB_WEATHER_LATLON", "37.5665,126.9780")
 WEATHER_LABEL = os.environ.get("HOSUB_WEATHER_LABEL", "서울")
@@ -100,26 +120,34 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
     async def api_briefing(request):
         if (d := _require_auth_json(request)):
             return d
-        p = Path(BRIEFING_PATH)
-        if not p.is_file():
+        items = _list_briefings()
+        dates = [name for name, _ in items]
+        if not items:
             return JSONResponse(
                 {
                     "exists": False,
+                    "dates": [],
                     "content": "",
-                    "updated_at": None,
-                    "hint": f"Claude 가 write_file 로 {BRIEFING_PATH} 에 브리핑을 쓰면 여기에 표시됩니다.",
+                    "hint": f"Claude 가 write_file 로 {BRIEFING_DIR}/<날짜>.html 에 브리핑을 "
+                    "쓰면 여기에 표시됩니다.",
                 }
             )
+        # 요청한 날짜(있으면) 또는 최신
+        want = request.query_params.get("date")
+        chosen = next((p for name, p in items if name == want), items[0][1])
         try:
-            content = p.read_text(encoding="utf-8")[:100_000]
-            mtime = p.stat().st_mtime
+            raw = chosen.read_text(encoding="utf-8")[:200_000]
+            mtime = chosen.stat().st_mtime
         except OSError as exc:
-            return JSONResponse({"exists": False, "content": "", "error": str(exc)})
-        from datetime import datetime, timezone
-
+            return JSONResponse({"exists": False, "dates": dates, "content": "", "error": str(exc)})
+        fmt = "md" if chosen.suffix.lower() == ".md" else "html"
+        content = raw if fmt == "md" else _SCRIPT_RE.sub("", raw)  # HTML 은 script 제거
         return JSONResponse(
             {
                 "exists": True,
+                "date": chosen.stem,
+                "dates": dates,
+                "format": fmt,
                 "content": content,
                 "updated_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
             }
