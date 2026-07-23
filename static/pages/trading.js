@@ -100,17 +100,17 @@ export default {
     const rBody = el("div");
     reportC.body.append(rBody);
 
-    // 리포트 표시 모달 (리스트/야간발굴 링크 공용)
-    const modalTitle = el("h5", { class: "modal-title" });
-    const modalBody = el("div", { class: "modal-body" });
+    // 리포트 표시 모달 (리스트/야간발굴 링크 공용) — API 설정 모달과 변수 충돌 방지 위해 report* 접두
+    const reportModalTitle = el("h5", { class: "modal-title" });
+    const reportModalBody = el("div", { class: "modal-body" });
     const reportModalEl = el("div", { class: "modal fade", tabindex: "-1" },
       el("div", { class: "modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable" },
         el("div", { class: "modal-content" }, [
           el("div", { class: "modal-header" }, [
-            modalTitle,
+            reportModalTitle,
             el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
           ]),
-          modalBody,
+          reportModalBody,
         ]),
       ),
     );
@@ -118,29 +118,29 @@ export default {
     const reportModal = new bootstrap.Modal(reportModalEl);
 
     const openReport = async (date) => {
-      modalTitle.textContent = `${date} 야간 분석 리포트`;
-      modalBody.innerHTML = "";
-      modalBody.appendChild(el("div", { class: "text-secondary small" }, "불러오는 중…"));
+      reportModalTitle.textContent = `${date} 야간 분석 리포트`;
+      reportModalBody.innerHTML = "";
+      reportModalBody.appendChild(el("div", { class: "text-secondary small" }, "불러오는 중…"));
       reportModal.show();
       let d;
       try {
         d = await fetchJSON("/api/night-report?date=" + encodeURIComponent(date));
       } catch (e) {
-        modalBody.innerHTML = "";
-        modalBody.appendChild(el("div", { class: "text-danger small" }, "불러오기 실패: " + e.message));
+        reportModalBody.innerHTML = "";
+        reportModalBody.appendChild(el("div", { class: "text-danger small" }, "불러오기 실패: " + e.message));
         return;
       }
-      modalBody.innerHTML = "";
+      reportModalBody.innerHTML = "";
       if (!d.exists) {
-        modalBody.appendChild(el("div", { class: "text-secondary" }, "리포트를 찾을 수 없습니다."));
+        reportModalBody.appendChild(el("div", { class: "text-secondary" }, "리포트를 찾을 수 없습니다."));
         return;
       }
       if (d.format === "md") {
         const holder = el("div", { class: "briefing-body" });
         holder.innerHTML = mdToHtml(d.content);
-        modalBody.appendChild(holder);
+        reportModalBody.appendChild(holder);
       } else {
-        renderIframe(modalBody, d.content);  // HTML 은 iframe 격리
+        renderIframe(reportModalBody, d.content);  // HTML 은 iframe 격리
       }
     };
 
