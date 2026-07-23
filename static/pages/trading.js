@@ -1,5 +1,6 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { mdToHtml, renderIframe } from "./briefing.js";
+import { makeLayoutEditable } from "../layout.js";
 
 // 트레이딩 페이지: trading 서비스(127.0.0.1:8600)를 /api/trading/* 프록시로 조회하고
 // 승인 대기 주문을 승인/거부한다. 차트는 외부 의존성 없는 캔버스 캔들로 그린다.
@@ -96,18 +97,22 @@ export default {
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
     const reportC = card("분석 보고 리스트", null, { icon: "bi-journal-text" });
-    // 레이아웃: 상단(상태|감시목록) → 중단(왼쪽: 승인/스캐너/발굴 스택, 오른쪽: 분석 보고 리스트) → 하단(차트/신호)
-    const leftStack = el("div", { class: "col-12 col-xl-6 d-flex flex-column gap-3" });
-    for (const c of [pending, scannerC, discoveryC]) {
-      const cardEl = c.col.querySelector(".card");
-      cardEl.classList.remove("h-100");
-      leftStack.appendChild(cardEl);
-    }
-    const rightStack = el("div", { class: "col-12 col-xl-6" });
-    const reportCard = reportC.col.querySelector(".card");
-    reportCard.classList.add("h-100");
-    rightStack.appendChild(reportCard);
-    row.append(status.col, watchC.col, leftStack, rightStack, chart.col, signals.col);
+    // 각 카드를 독립 그리드 아이템으로 등록(id·기본 폭). 편집 모드에서 자유 배치·크기조절.
+    const CARDS = [
+      ["status", status, 6], ["watch", watchC, 6],
+      ["pending", pending, 6], ["report", reportC, 6],
+      ["scanner", scannerC, 12], ["discovery", discoveryC, 12],
+      ["chart", chart, 12], ["signals", signals, 12],
+    ];
+    CARDS.forEach(([id, c, w], i) => {
+      c.col.dataset.cardId = id;
+      c.col.dataset.cardIndex = i;      // 초기화 시 원래 순서 복원용
+      c.col.className = "col-12 col-xl-" + w;
+      c.col.querySelector(".card").classList.add("h-100");
+      row.appendChild(c.col);
+    });
+    // 저장된 배치·크기 복원 + '레이아웃 편집' 툴바 (브라우저별 localStorage)
+    makeLayoutEditable(row, { key: "trading" });
 
     // --- 분석 보고 리스트 + 공용 모달 ---
     const rBody = el("div");
