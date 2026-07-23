@@ -269,6 +269,18 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
             "tf": tf, "days": days, "stats": result.stats(), "trades": trades}
 
 
+@app.get("/api/backtest/coverage")
+async def api_backtest_coverage(_=Depends(require_auth)):
+    """감시목록 종목별 분봉 축적 일수(백테스트 표본 크기 확인용)."""
+    from .data import symbols
+
+    counts = dict(store.minute_symbols(1))   # {code: 축적 일수}
+    rows = [{"code": c, "name": n or symbols.name_of(c) or c,
+             "days": counts.get(c, 0)} for c, n in settings.WATCHLIST.items()]
+    rows.sort(key=lambda x: -x["days"])
+    return {"symbols": rows}
+
+
 @app.get("/api/backtest/report/latest")
 async def api_backtest_report(_=Depends(require_auth)):
     """분봉 축적분 주기 백테스트 최신 리포트(전체 요약 + 종목별). 종목명 포함."""
@@ -309,11 +321,13 @@ async def api_account(_=Depends(require_auth)):
     if _account_cache["data"] and now - _account_cache["ts"] < 30:
         return _account_cache["data"]
     if not settings.KIWOOM_APP_KEY:
-        return {"ok": False, "error": "API 키 미설정"}
+        return {"ok": False, "error": "API 키 미설정",
+                "account_no": settings.KIWOOM_ACCOUNT}
     try:
         data = parse_balance(await client.balance())
     except Exception as e:  # noqa: BLE001 - 조회 실패는 화면에 표시
         data = {"ok": False, "error": str(e)}
+    data["account_no"] = settings.KIWOOM_ACCOUNT   # 계좌번호 노출(마스킹 안 함)
     if data.get("ok"):
         # 포지션 사이징 기준 자산을 실제 예탁자산으로 동기화
         equity = data.get("deposit_est") or data.get("total_eval") or 0

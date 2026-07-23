@@ -53,7 +53,8 @@ def masked() -> dict:
         "env": KIWOOM_ENV,
         "app_key_masked": _mask(KIWOOM_APP_KEY),
         "has_secret": bool(KIWOOM_SECRET_KEY),
-        "account_masked": _mask(KIWOOM_ACCOUNT),
+        "account": KIWOOM_ACCOUNT,          # 계좌번호는 마스킹하지 않음(사용자 요청)
+        "account_masked": KIWOOM_ACCOUNT,   # 하위호환
     }
 
 

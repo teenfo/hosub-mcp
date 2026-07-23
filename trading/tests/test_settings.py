@@ -7,9 +7,9 @@ def test_masked_hides_secret(monkeypatch):
     monkeypatch.setattr(settings, "KIWOOM_ACCOUNT", "12345678")
     m = settings.masked()
     assert m["app_key_masked"] == "ABCD…MNOP"
-    assert "supersecret" not in str(m)
+    assert "supersecret" not in str(m)      # 시크릿 원문은 절대 노출 안 함
     assert m["has_secret"] is True
-    assert m["account_masked"] == "설정됨"  # 10자 미만은 부분 노출도 하지 않음
+    assert m["account"] == "12345678"       # 계좌번호는 마스킹하지 않음(사용자 요청)
 
 
 def test_apply_keys_switches_env(monkeypatch):

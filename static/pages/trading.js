@@ -115,6 +115,36 @@ export default {
       btOut,
     );
 
+    // --- 감시목록 종목별 분봉 축적 일수 (백테스트 표본 크기) ---
+    const covOut = el("div", { class: "small mt-2" });
+    const loadCoverage = async () => {
+      let d;
+      try { d = await fetchJSON("/api/trading/backtest/coverage"); } catch (e) { return; }
+      if (!changed("coverage", d)) return;
+      covOut.innerHTML = "";
+      covOut.appendChild(el("div", { class: "text-secondary mb-1" },
+        el("span", { html: '<i class="bi bi-database"></i> 감시목록 분봉 축적 일수 (3일↑부터 백테스트 표본 형성)' })));
+      if (!(d.symbols || []).length) {
+        covOut.appendChild(el("div", { class: "text-secondary" }, "감시목록이 비어 있습니다"));
+        return;
+      }
+      const t = el("table", { class: "table table-sm align-middle mb-0 small" });
+      t.appendChild(el("thead", { html: "<tr><th>종목</th><th>분봉 일수</th><th></th></tr>" }));
+      const tb = el("tbody");
+      for (const r of d.symbols) {
+        const run = el("button", { class: "btn btn-sm btn-outline-secondary py-0" }, "백테스트");
+        run.onclick = () => { btInput.value = r.code; btTf.value = "1m"; runBacktest(); };
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, `${r.name} (${r.code})`),
+          el("td", { class: r.days >= 3 ? "text-success fw-semibold" : "text-secondary" }, `${r.days}일`),
+          el("td", {}, run),
+        ]));
+      }
+      t.appendChild(tb);
+      covOut.appendChild(el("div", { class: "table-responsive" }, t));
+    };
+    backtestC.body.appendChild(covOut);
+
     // --- 자동 백테스트 리포트 (분봉 축적분, 평일 장 마감 후 자동) ---
     const rptOut = el("div", { class: "small" });
     const rptRun = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "지금 실행");
@@ -585,7 +615,7 @@ export default {
         envSel.value = s.env;
         appKeyIn.placeholder = s.app_key_masked || "미설정";
         secretIn.placeholder = s.has_secret ? "설정됨 — 변경 시에만 입력" : "미설정";
-        accountIn.placeholder = s.account_masked || "미설정";
+        accountIn.placeholder = s.account || s.account_masked || "미설정";
       } catch (e) { /* 서비스 다운은 상태 카드가 알림 */ }
     };
     saveBtn.onclick = async () => {
@@ -694,7 +724,7 @@ export default {
           const plTone = a.total_pl >= 0 ? "text-danger" : "text-primary"; // 한국식: 수익 빨강
           status.body.appendChild(
             el("ul", { class: "list-unstyled small mb-1" }, [
-              el("li", {}, `계좌: ${a.account_name || "—"}`),
+              el("li", {}, `계좌번호: ${a.account_no || a.account_name || "—"}`),
               el("li", {}, `추정예탁자산: ${fmt(a.deposit_est)} 원`),
               el("li", {}, `총평가금액: ${fmt(a.total_eval)} 원 (매입 ${fmt(a.total_buy)})`),
               el("li", { class: plTone },
@@ -934,9 +964,9 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport(), loadPerformance(), loadRisk()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadBacktestReport(), loadPerformance(), loadRisk(), loadCoverage()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
-    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); loadRisk(); }, 30_000));
+    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); loadRisk(); loadCoverage(); }, 30_000));
     ctx.addTimer(setInterval(() => { loadReport(); loadBacktestReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
