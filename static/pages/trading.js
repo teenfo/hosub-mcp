@@ -746,7 +746,8 @@ export default {
           try {
             await postJSON("/api/trading/watchlist", { code: r.code, name: r.name });
             add.textContent = "추가됨";
-            loadStatus();
+            add.classList.replace("btn-outline-primary", "btn-success");
+            loadWatch(); loadStatus();   // 감시목록 카드·차트 드롭다운 즉시 갱신
           } catch (e) { alert("실패: " + e.message); add.disabled = false; }
         };
         return add;
@@ -826,7 +827,8 @@ export default {
           try {
             await postJSON("/api/trading/watchlist", { code: p.code, name: p.name });
             add.textContent = "추가됨";
-            loadStatus();
+            add.classList.replace("btn-outline-primary", "btn-success");
+            loadWatch(); loadStatus();   // 감시목록 카드·차트 드롭다운 즉시 갱신
           } catch (e) { alert("실패: " + e.message); add.disabled = false; }
         };
         const nameLink = el("a", { href: "#", class: "text-decoration-none" },
