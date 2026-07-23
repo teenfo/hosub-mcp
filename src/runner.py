@@ -86,7 +86,15 @@ class SubprocessRunner:
             return RunResult(exit_code=proc.returncode, stdout=stdout, stderr=stderr)
         except subprocess.TimeoutExpired:
             self._kill_group(proc)
-            stdout, stderr = proc.communicate()
+            # 죽인 뒤의 재수거에도 반드시 timeout 을 건다. 명령이 setsid/daemon 으로
+            # double-fork 한 손자 프로세스는 우리 프로세스 그룹을 벗어나 killpg 로
+            # 죽지 않으면서 stdout/stderr 파이프의 write-end 를 계속 쥐고 있다.
+            # timeout 없는 communicate() 는 이 파이프의 EOF 를 영원히 기다려
+            # 워커 스레드를 영구히 잠근다(= run_command 교착의 원인).
+            try:
+                stdout, stderr = proc.communicate(timeout=5)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""  # 탈출한 자식이 파이프를 쥔 상태 — 수거 포기
             return RunResult(
                 exit_code=proc.returncode if proc.returncode is not None else -1,
                 stdout=stdout or "",
