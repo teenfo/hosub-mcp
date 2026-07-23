@@ -75,13 +75,62 @@ export default {
     container.appendChild(row);
 
     const status = card("트레이딩 상태", null, { icon: "bi-activity" });
+    const watchC = card("감시목록 관리", null, { icon: "bi-eye" });
     const apiCfg = card("키움 API 설정", null, { icon: "bi-key" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
-    const scannerC = card("급등 스캐너 (하락장 주도주)", null, { wide: true, icon: "bi-rocket-takeoff" });
+    const scannerC = card("급등 스캐너", null, { wide: true, icon: "bi-rocket-takeoff" });
     const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    row.append(status.col, apiCfg.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
+    row.append(status.col, watchC.col, apiCfg.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
+
+    // --- 감시목록 관리: 직접 추가 + 영속 목록 + 제거 ---
+    const SOURCE_BADGE = { seed: ["기본", "secondary"], manual: ["수동", "primary"], auto: ["발굴", "warning"] };
+    const wCode = el("input", { class: "form-control form-control-sm", placeholder: "종목코드 6자리", maxlength: "6" });
+    const wName = el("input", { class: "form-control form-control-sm", placeholder: "종목명 (선택)" });
+    const wAdd = el("button", { class: "btn btn-sm btn-primary" }, "추가");
+    const wMsg = el("div", { class: "small text-danger mt-1" });
+    const wTblWrap = el("div", { class: "table-responsive mt-2" });
+    watchC.body.append(
+      el("div", { class: "d-flex gap-1" }, [wCode, wName, wAdd]), wMsg, wTblWrap,
+    );
+    const loadWatch = async () => {
+      let w;
+      try { w = await fetchJSON("/api/trading/watchlist"); } catch (e) { return; }
+      wTblWrap.innerHTML = "";
+      const tbl = el("table", { class: "table table-sm align-middle mb-0 small" });
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>출처</th><th></th></tr>" }));
+      const tb = el("tbody");
+      for (const it of w.entries) {
+        const [label, tone] = SOURCE_BADGE[it.source] || [it.source, "secondary"];
+        const rm = el("button", { class: "btn btn-sm btn-outline-danger py-0" }, "제거");
+        rm.onclick = async () => {
+          if (!confirm(`${it.name}(${it.code}) 을 감시목록에서 제거할까요?`)) return;
+          try { await postJSON("/api/trading/watchlist/remove", { code: it.code }); }
+          catch (e) { alert("실패: " + e.message); }
+          loadWatch(); loadStatus();
+        };
+        tb.appendChild(el("tr", {}, [
+          el("td", {}, `${it.name} (${it.code})`),
+          el("td", {}, badge(label, tone)),
+          el("td", {}, rm),
+        ]));
+      }
+      tbl.appendChild(tb);
+      wTblWrap.appendChild(tbl);
+    };
+    wAdd.onclick = async () => {
+      wMsg.textContent = "";
+      const code = wCode.value.trim();
+      if (!/^\d{6}$/.test(code)) { wMsg.textContent = "종목코드는 숫자 6자리입니다"; return; }
+      wAdd.disabled = true;
+      try {
+        await postJSON("/api/trading/watchlist", { code, name: wName.value.trim() });
+        wCode.value = wName.value = "";
+        loadWatch(); loadStatus();
+      } catch (e) { wMsg.textContent = "추가 실패: " + e.message; }
+      finally { wAdd.disabled = false; }
+    };
 
     // --- 키움 API 설정 폼 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
     const envSel = el("select", { class: "form-select form-select-sm" }, [
@@ -397,9 +446,9 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
-    ctx.addTimer(setInterval(loadDiscovery, 30_000));
+    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); }, 30_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
 };

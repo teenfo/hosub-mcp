@@ -157,6 +157,12 @@ class Discovery:
                     [(today, p["code"], p["name"], p["close"], p["score"],
                       json.dumps(p["reasons"], ensure_ascii=False)) for p in top],
                 )
+            # 발굴 상위 종목 자동 감시 편입 (이전 auto 항목은 교체)
+            if cfg.get("auto_watch", True) and top:
+                from .data import watchlist
+
+                watchlist.replace_auto(top[: cfg.get("auto_watch_n", 5)])
+                await watchlist.notify()
             self.progress = f"완료: {len(symbols)}종목 분석 → {len(top)}종목 발굴"
             self.last_run = datetime.now(KST).isoformat(timespec="seconds")
             log.info("야간 발굴 %s", self.progress)
