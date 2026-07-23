@@ -106,7 +106,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 - **자동 배포 (pull 기반, 권장)**: `hosub-mcp-update.timer` 가 5분마다 추적 브랜치(`HOSUB_MCP_BRANCH`, 기본 `main`)를 폴링 → 변경 시 `git pull` + `pip install` + 서비스 재시작. **코드를 머지하면 서버가 자동으로 최신화**된다(NAT 뒤 홈서버에 적합, SSH 개방 불필요).
   - 즉시 반영: `sudo -u hosub /opt/hosub-mcp/deploy/update.sh`
   - 로그: `journalctl -u hosub-mcp-update.service`
-- **대안 (push 기반)**: `.github/workflows/deploy.yml` (GitHub Actions `appleboy/ssh-action`, 시크릿 `HOSUB_HOST`/`HOSUB_USER`/`HOSUB_SSH_KEY`). SSH 인바운드가 필요해 NAT 환경엔 pull 방식을 권장.
+> 참고: 과거 대안이던 GitHub Actions push 배포(`appleboy/ssh-action`)는 NAT 뒤 홈서버로 SSH 인바운드가 필요해 이 환경에 맞지 않아 제거했다. pull 방식(위)이 유일한 자동 배포 경로다. 굳이 push 배포를 원하면 22번 포트 개방(또는 cloudflared access) + 시크릿 설정이 필요하다.
 
 ### 인터넷 노출 (앱/모바일에서 쓸 때만 필요)
 

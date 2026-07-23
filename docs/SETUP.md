@@ -269,12 +269,15 @@ OTP/SSO) 병행을 권장**한다.
 > 즉 그 브랜치에 push 할 수 있는 사람은 서버에서 코드를 돌릴 수 있다. 브랜치
 > 보호 규칙(main 직접 push 금지, PR 리뷰 필수)을 걸어 두는 것을 권장한다.
 
-### (대안) GitHub Actions push 배포
+### (제거됨) GitHub Actions push 배포
 
-NAT 뒤 홈서버라 GitHub Actions 가 SSH 로 들어오려면 22번 포트 개방(또는 cloudflared
-access)이 필요하다. 위 pull 방식이 더 안전하므로 기본 권장이지만, 굳이 push 방식을
-쓰려면 `.github/workflows/deploy.yml` + 시크릿 `HOSUB_HOST`/`HOSUB_USER`/`HOSUB_SSH_KEY`
-를 설정한다.
+과거 대안으로 `appleboy/ssh-action` 기반 push 배포 워크플로우가 있었으나, NAT 뒤
+홈서버로 GitHub Actions 가 SSH 인바운드를 해야 해서(22번 포트 개방 또는 cloudflared
+access 필요) 이 환경에 맞지 않아 **제거했다.** 위 pull 방식이 유일한 자동 배포 경로다.
+
+굳이 push 배포를 복원하려면: `.github/workflows/deploy.yml` 을 다시 만들고,
+GitHub 저장소 Settings → Secrets 에 `HOSUB_HOST`/`HOSUB_USER`/`HOSUB_SSH_KEY` 를
+설정한 뒤, 라우터에서 22번 포트를 서버로 포워딩(보안 노출 감수)해야 한다.
 
 ---
 
