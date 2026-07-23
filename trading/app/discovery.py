@@ -159,7 +159,7 @@ class Discovery:
                     continue
                 if df.empty:
                     continue
-                store.upsert_bars(s["code"], "1d", df.tail(80))
+                store.upsert_bars(s["code"], "1d", df.tail(250))  # 약 1년치 (MA120·기간뷰용)
                 f = compute_features(df, cfg)
                 if f is None:
                     continue

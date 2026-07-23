@@ -1,6 +1,7 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { mdToHtml, renderIframe } from "./briefing.js";
 import { makeLayoutEditable } from "../layout.js";
+import { createProChart, MA_DEFS } from "../chart.js";
 
 // 트레이딩 페이지: trading 서비스(127.0.0.1:8600)를 /api/trading/* 프록시로 조회하고
 // 승인 대기 주문을 승인/거부한다. 차트는 외부 의존성 없는 캔버스 캔들로 그린다.
@@ -139,32 +140,53 @@ export default {
     container.appendChild(reportModalEl);
     const reportModal = new bootstrap.Modal(reportModalEl);
 
-    // 종목 일봉 차트 모달 (발굴 종목명 클릭 시)
+    // 종목 일봉 차트 모달 (발굴 종목명 클릭 시) — 상용 HTS 급 인터랙티브 차트
     const chartModalTitle = el("h5", { class: "modal-title" });
-    const chartModalCanvas = el("canvas", { style: "width:100%" });
-    const chartModalMsg = el("div", { class: "text-secondary small" });
+    const chartModalMsg = el("span", { class: "text-secondary small ms-2" });
+    const chartHost = el("div", { style: "width:100%;height:62vh;min-height:360px" });
+    // 기간 버튼
+    const periods = [["1개월", 21], ["3개월", 63], ["6개월", 126], ["1년", 252], ["전체", "all"]];
+    const periodGroup = el("div", { class: "btn-group btn-group-sm" });
+    const periodBtns = periods.map(([lbl, n]) => {
+      const b = el("button", { class: "btn btn-outline-secondary", type: "button" }, lbl);
+      b.onclick = () => { proChart.setVisibleCount(n); periodBtns.forEach((x) => x.classList.toggle("active", x === b)); };
+      periodGroup.appendChild(b);
+      return b;
+    });
+    // 볼린저밴드 토글
+    const bbBtn = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "볼린저밴드");
+    let bbOn = false;
+    bbBtn.onclick = () => { bbOn = !bbOn; bbBtn.classList.toggle("active", bbOn); proChart.setIndicator("bb", bbOn); };
+    // 이동평균 범례
+    const maLegend = el("div", { class: "small d-flex gap-2 flex-wrap align-items-center ms-auto" },
+      MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`)));
+    const chartToolbar = el("div", { class: "d-flex align-items-center gap-2 flex-wrap mb-2" },
+      [periodGroup, bbBtn, el("span", { class: "small text-secondary" }, "휠 확대·드래그 이동·더블클릭 리셋"), maLegend]);
     const stockChartModalEl = el("div", { class: "modal fade", tabindex: "-1" },
-      el("div", { class: "modal-dialog modal-lg modal-dialog-centered" },
+      el("div", { class: "modal-dialog modal-xl modal-dialog-centered" },
         el("div", { class: "modal-content" }, [
-          el("div", { class: "modal-header" }, [
-            chartModalTitle,
+          el("div", { class: "modal-header py-2" }, [
+            el("div", { class: "d-flex align-items-baseline" }, [chartModalTitle, chartModalMsg]),
             el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
           ]),
-          el("div", { class: "modal-body" }, [chartModalMsg, chartModalCanvas]),
+          el("div", { class: "modal-body pt-2" }, [chartToolbar, chartHost]),
         ]),
       ),
     );
     container.appendChild(stockChartModalEl);
     const stockChartModal = new bootstrap.Modal(stockChartModalEl);
+    const proChart = createProChart(chartHost, { up: "#d64545", down: "#3a6fd8" });
+    // 모달이 완전히 표시돼 폭이 잡힌 뒤 다시 그린다
+    stockChartModalEl.addEventListener("shown.bs.modal", () => proChart.redraw());
     const openStockChart = async (code, name) => {
       chartModalTitle.textContent = `${name} (${code}) 일봉`;
       chartModalMsg.textContent = "불러오는 중…";
+      periodBtns.forEach((x) => x.classList.remove("active"));
       stockChartModal.show();
       try {
         const bars = await fetchJSON(`/api/trading/bars/${code}?tf=1d`);
-        chartModalMsg.textContent = bars.length ? "" : "일봉 데이터 없음 (야간 발굴 수집 후 표시)";
-        // 모달이 표시된 뒤 캔버스 폭이 잡히도록 다음 프레임에 그린다
-        requestAnimationFrame(() => drawCandles(chartModalCanvas, bars, true));
+        chartModalMsg.textContent = bars.length ? `${bars.length}봉` : "일봉 데이터 없음 (야간 발굴 수집 후 표시)";
+        proChart.setData(bars);
       } catch (e) {
         chartModalMsg.textContent = "불러오기 실패: " + e.message;
       }
