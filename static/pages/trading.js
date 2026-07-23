@@ -859,10 +859,14 @@ export default {
       tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량</th><th>사유</th><th></th></tr>" }));
       const tb = el("tbody");
       for (const o of orders) {
-        const approve = el("button", { class: "btn btn-sm btn-success me-1" }, "승인");
-        const rejectB = el("button", { class: "btn btn-sm btn-outline-danger" }, "거부");
+        const isExit = o.kind === "exit";
+        const approve = el("button", { class: "btn btn-sm " + (isExit ? "btn-warning" : "btn-success") + " me-1" }, isExit ? "청산 승인" : "승인");
+        const rejectB = el("button", { class: "btn btn-sm btn-outline-danger" }, isExit ? "보류" : "거부");
         approve.onclick = async () => {
-          if (!confirm(`[${o.symbol}] ${o.rule} ${o.side} ${o.qty}주 — 실제로 발주할까요?`)) return;
+          const msg = isExit
+            ? `[${o.symbol}] 목표 도달 — ${o.qty}주 시장가 매도(청산)할까요?`
+            : `[${o.symbol}] ${o.rule} ${o.side} ${o.qty}주 — 실제로 발주할까요?`;
+          if (!confirm(msg)) return;
           approve.disabled = true;
           try { await postJSON(`/api/trading/orders/${o.id}/approve`); }
           catch (e) { alert("발주 실패: " + e.message); }
@@ -875,7 +879,7 @@ export default {
         tb.appendChild(el("tr", {}, [
           el("td", {}, o.symbol),
           el("td", {}, o.rule),
-          el("td", {}, sideBadge(o.side)),
+          el("td", {}, isExit ? badge("청산", "warning") : sideBadge(o.side)),
           el("td", {}, `${fmt(o.entry)} / ${fmt(o.stop)} / ${fmt(o.target)}`),
           el("td", {}, String(o.qty)),
           el("td", { class: "small text-secondary" }, o.reason || ""),

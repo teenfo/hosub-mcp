@@ -37,7 +37,20 @@ def _conn() -> sqlite3.Connection:
             ts TEXT NOT NULL, order_id TEXT, event TEXT, detail TEXT
         )"""
     )
+    # 청산 주문 지원용 컬럼 (기존 DB 호환 — 없는 것만 추가)
+    for col, ddl in (("kind", "TEXT DEFAULT 'entry'"),  # entry / exit
+                     ("link_pos", "TEXT"),               # exit 시 연결된 포지션 id
+                     ("exit_px", "REAL")):               # exit 청산 기준가
+        try:
+            conn.execute(f"ALTER TABLE orders ADD COLUMN {col} {ddl}")
+        except sqlite3.OperationalError:
+            pass
     return conn
+
+
+_ENTRY_COLS = ("id, created, expires, symbol, side, rule, reason, entry, stop, "
+               "target, qty, exec_symbol, exec_side, exec_qty, status, result, "
+               "kind, link_pos, exit_px")
 
 
 def _audit(conn: sqlite3.Connection, order_id: str, event: str, detail: str = "") -> None:
@@ -60,30 +73,89 @@ def propose(sig: Signal, qty: int) -> str:
         exec_symbol, exec_side, exec_qty = sig.symbol, "buy" if sig.side == "long" else "sell", qty
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO orders VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO orders ({_ENTRY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 order_id, now.isoformat(),
                 (now + timedelta(minutes=ttl_min)).isoformat(),
                 sig.symbol, sig.side, sig.rule, sig.reason,
                 sig.entry, sig.stop, sig.target, qty,
                 exec_symbol, exec_side, exec_qty,
-                "pending", None,
+                "pending", None, "entry", None, None,
             ),
         )
         _audit(conn, order_id, "proposed", sig.reason)
     return order_id
 
 
+def propose_exit(pos: dict, reason: str, exit_px: float) -> str:
+    """포지션 청산을 '승인 대기 주문'으로 등록(매도). 목표 도달 청산(승인제)에 사용.
+    당일 만료로 두어 미승인 시 사라지되, exit_pending 을 세워 중복 제안을 막는다."""
+    order_id = uuid.uuid4().hex[:12]
+    now = datetime.now(UTC)
+    exec_symbol = pos.get("exec_symbol") or pos["symbol"]
+    with _conn() as conn:
+        conn.execute(
+            f"INSERT INTO orders ({_ENTRY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (order_id, now.isoformat(), (now + timedelta(hours=8)).isoformat(),
+             pos["symbol"], pos["side"], pos["rule"], "🎯 목표 도달 — 청산(매도) 승인",
+             pos["entry"], pos["stop"], pos["target"], pos["qty"],
+             exec_symbol, "sell", pos["qty"], "pending", None,
+             "exit", pos["id"], float(exit_px)),
+        )
+        _audit(conn, order_id, "exit_proposed", f"{reason} @ {exit_px}")
+    from . import ledger
+    ledger.set_exit_pending(pos["id"], 1)
+    return order_id
+
+
+async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
+    """즉시 시장가 매도로 청산(승인 없이). 손절 자동/장 마감 정리에 사용.
+    키움은 네이티브 스톱주문이 없어 서버가 감시 후 직접 발주한다."""
+    from ..kiwoom.client import client
+    from . import ledger
+
+    exec_symbol = pos.get("exec_symbol") or pos["symbol"]
+    order_id = uuid.uuid4().hex[:12]
+    now = datetime.now(UTC)
+    try:
+        result = await client.order("sell", exec_symbol, int(pos["qty"]), price=0)
+        status, detail = "sent", json.dumps(result, ensure_ascii=False)[:2000]
+    except Exception as e:  # noqa: BLE001
+        status, detail, result = "error", str(e), {"error": str(e)}
+    with _conn() as conn:
+        conn.execute(
+            f"INSERT INTO orders ({_ENTRY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (order_id, now.isoformat(), now.isoformat(),
+             pos["symbol"], pos["side"], pos["rule"], f"자동청산({reason})",
+             pos["entry"], pos["stop"], pos["target"], pos["qty"],
+             exec_symbol, "sell", pos["qty"], status, detail,
+             "exit", pos["id"], float(exit_px)),
+        )
+        _audit(conn, order_id, f"exit_{reason}", detail)
+    if status == "sent":
+        ledger.close_position(pos["id"], float(exit_px), reason)
+    return {"ok": status == "sent", "status": status, "result": result}
+
+
 def expire_stale() -> int:
     now = datetime.now(UTC).isoformat()
     with _conn() as conn:
+        # 만료된 청산(exit) 주문은 exit_pending 을 풀어 재제안이 가능하게 한다
+        stale_exits = conn.execute(
+            "SELECT link_pos FROM orders WHERE status='pending' AND expires < ? "
+            "AND kind='exit'", (now,),
+        ).fetchall()
         cur = conn.execute(
             "UPDATE orders SET status='expired' WHERE status='pending' AND expires < ?",
             (now,),
         )
         if cur.rowcount:
             _audit(conn, "", "expired_batch", f"{cur.rowcount}건 만료")
-        return cur.rowcount
+    for r in stale_exits:
+        if r["link_pos"]:
+            from . import ledger
+            ledger.set_exit_pending(r["link_pos"], 0)
+    return cur.rowcount
 
 
 def list_orders(status: str | None = None, limit: int = 50) -> list[dict]:
@@ -109,12 +181,17 @@ def get(order_id: str) -> dict | None:
 
 def reject(order_id: str) -> bool:
     with _conn() as conn:
+        row = conn.execute("SELECT kind, link_pos FROM orders WHERE id=?", (order_id,)).fetchone()
         cur = conn.execute(
             "UPDATE orders SET status='rejected' WHERE id=? AND status='pending'",
             (order_id,),
         )
         if cur.rowcount:
             _audit(conn, order_id, "rejected")
+    # 청산 승인을 거부하면 포지션은 열린 채로 두고 재제안 가능하게 exit_pending 해제
+    if cur.rowcount and row and row["kind"] == "exit" and row["link_pos"]:
+        from . import ledger
+        ledger.set_exit_pending(row["link_pos"], 0)
     return bool(cur.rowcount)
 
 
@@ -147,16 +224,23 @@ async def approve_and_send(order_id: str) -> dict:
         )
         _audit(conn, order_id, status, detail)
     if status == "sent":
-        # 실거래 성과 로그에 오픈 포지션 기록. 키움 주문번호(ord_no)를 함께 저장해
-        # 두면 실시간 체결 수신 시 진입가를 실측으로 갱신한다(체결가 근사 → 실측).
         from . import ledger
 
-        ord_no = ""
-        if isinstance(result, dict):
-            ord_no = str(result.get("ord_no") or result.get("odno")
-                         or result.get("order_no") or "").strip()
-        try:
-            ledger.open_position(order, ord_no=ord_no or None)
-        except Exception:  # noqa: BLE001 - 로그 실패가 발주를 되돌리지 않는다
-            pass
+        if order.get("kind") == "exit":
+            # 청산(매도) 승인 발주 → 연결 포지션을 청산 처리
+            try:
+                ledger.close_position(order["link_pos"], float(order["exit_px"]), "target")
+            except Exception:  # noqa: BLE001
+                pass
+        else:
+            # 실거래 성과 로그에 오픈 포지션 기록. 키움 주문번호(ord_no)를 함께 저장해
+            # 두면 실시간 체결 수신 시 진입가를 실측으로 갱신한다(체결가 근사 → 실측).
+            ord_no = ""
+            if isinstance(result, dict):
+                ord_no = str(result.get("ord_no") or result.get("odno")
+                             or result.get("order_no") or "").strip()
+            try:
+                ledger.open_position(order, ord_no=ord_no or None)
+            except Exception:  # noqa: BLE001 - 로그 실패가 발주를 되돌리지 않는다
+                pass
     return {"ok": status == "sent", "status": status, "result": result}

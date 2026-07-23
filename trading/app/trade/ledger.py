@@ -47,6 +47,10 @@ def _conn() -> sqlite3.Connection:
             state TEXT, matched INTEGER
         )"""
     )
+    try:
+        conn.execute("ALTER TABLE positions ADD COLUMN exit_pending INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -198,6 +202,34 @@ def monitor(price_of) -> int:
                 _close(conn, row, float(px), hit)
                 closed += 1
     return closed
+
+
+def due_exits(price_of) -> list[dict]:
+    """손절/목표에 닿은 오픈 포지션 목록(청산 대상). 실제 청산·기록은 호출자가.
+    이미 청산 승인 대기(exit_pending)인 포지션은 제외한다. 포지션을 변경하지 않는다."""
+    out: list[dict] = []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE status='open' "
+            "AND (exit_pending IS NULL OR exit_pending=0)"
+        ).fetchall()
+    for row in rows:
+        p = price_of(row["symbol"])
+        if p is None:
+            continue
+        if row["side"] == "long":
+            reason = "stop" if p <= row["stop"] else ("target" if p >= row["target"] else None)
+        else:
+            reason = "stop" if p >= row["stop"] else ("target" if p <= row["target"] else None)
+        if reason:
+            px = row["stop"] if reason == "stop" else row["target"]
+            out.append(dict(row) | {"reason": reason, "exit_px": float(px)})
+    return out
+
+
+def set_exit_pending(pos_id: str, val: int) -> None:
+    with _conn() as conn:
+        conn.execute("UPDATE positions SET exit_pending=? WHERE id=?", (val, pos_id))
 
 
 def force_close_eod(price_of) -> int:
