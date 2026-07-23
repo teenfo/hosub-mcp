@@ -97,6 +97,18 @@ body {
   border-style: dashed !important;
 }
 
+/* 감사 로그: 높이 고정 + 세로 스크롤, 헤더 sticky */
+.audit-scroll {
+  max-height: 380px;
+  overflow-y: auto;
+}
+.audit-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--bs-body-bg);
+  z-index: 1;
+}
+
 /* 데일리 브리핑 iframe (내용 높이에 맞춰 JS 가 height 설정, 내부 스크롤 없음) */
 .briefing-frame {
   width: 100%;
