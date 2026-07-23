@@ -1,4 +1,5 @@
 import { fetchJSON, el, card, badge } from "../app.js";
+import { mdToHtml, renderIframe } from "./briefing.js";
 
 // 트레이딩 페이지: trading 서비스(127.0.0.1:8600)를 /api/trading/* 프록시로 조회하고
 // 승인 대기 주문을 승인/거부한다. 차트는 외부 의존성 없는 캔버스 캔들로 그린다.
@@ -81,7 +82,52 @@ export default {
     const discoveryC = card("야간 발굴 (전일 전종목 분석)", null, { wide: true, icon: "bi-moon-stars" });
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
-    row.append(status.col, watchC.col, pending.col, scannerC.col, discoveryC.col, chart.col, signals.col);
+    const reportC = card("야간 분석 리포트", null, { wide: true, icon: "bi-journal-text" });
+    row.append(status.col, watchC.col, pending.col, scannerC.col, discoveryC.col, reportC.col, chart.col, signals.col);
+
+    // --- 야간 분석 리포트: 스케줄러가 쓴 브리핑을 트레이딩 페이지에서 바로 표시 ---
+    const rSel = el("select", { class: "form-select form-select-sm w-auto d-none" });
+    const rTime = el("span", { class: "small text-secondary" });
+    const rBody = el("div");
+    reportC.body.append(
+      el("div", { class: "d-flex align-items-center gap-2 mb-2" }, [rSel, rTime]),
+      rBody,
+    );
+    const loadReport = async (date) => {
+      let d;
+      try {
+        d = await fetchJSON("/api/briefing" + (date ? "?date=" + encodeURIComponent(date) : ""));
+      } catch (e) { return; }
+      rBody.innerHTML = "";
+      if (!d.exists) {
+        rSel.classList.add("d-none");
+        rTime.textContent = "";
+        rBody.appendChild(el("div", { class: "text-secondary small py-3 text-center" },
+          "아직 분석 리포트가 없습니다 — Cowork 예약 작업이 리포트를 생성하면 여기 표시됩니다."));
+        return;
+      }
+      if (d.dates && d.dates.length > 1) {
+        rSel.innerHTML = "";
+        for (const dt of d.dates) {
+          const opt = el("option", { value: dt }, dt);
+          if (dt === d.date) opt.selected = true;
+          rSel.appendChild(opt);
+        }
+        rSel.classList.remove("d-none");
+      } else {
+        rSel.classList.add("d-none");
+      }
+      rTime.textContent = (d.date ? `기준일 ${d.date}` : "") +
+        (d.updated_at ? " · " + new Date(d.updated_at).toLocaleString("ko-KR") : "");
+      if (d.format === "md") {
+        const holder = el("div", { class: "briefing-body" });
+        holder.innerHTML = mdToHtml(d.content);
+        rBody.appendChild(holder);
+      } else {
+        renderIframe(rBody, d.content);  // HTML 은 iframe 격리 (스타일 누출 방지)
+      }
+    };
+    rSel.addEventListener("change", () => loadReport(rSel.value));
 
     // 상태 카드 헤더에 설정(기어) 버튼 추가 → 클릭 시 API 설정 모달 표시
     const statusHeader = status.col.querySelector(".card-header");
@@ -502,9 +548,10 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch()]);
+    await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport()]);
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
     ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); }, 30_000));
+    ctx.addTimer(setInterval(() => loadReport(rSel.classList.contains("d-none") ? null : rSel.value), 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
 };
