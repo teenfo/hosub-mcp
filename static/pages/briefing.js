@@ -1,7 +1,7 @@
 import { fetchJSON, el } from "../app.js";
 
 // 아주 작은 마크다운 렌더러 (.md 브리핑용).
-function mdToHtml(src) {
+export function mdToHtml(src) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const inline = (s) =>
     esc(s)
@@ -41,7 +41,7 @@ function mdToHtml(src) {
 // 브리핑 파일은 웹 루트(/var/www/html)에 있는 독립 HTML 문서일 수 있어, 자체 스타일이
 // 대시보드로 새어 레이아웃이 커지는 것을 막으려면 격리가 필요하다.
 // sandbox="allow-same-origin" : 스크립트 실행 차단(격리) + 부모가 높이 측정은 가능.
-function renderIframe(body, html) {
+export function renderIframe(body, html) {
   const iframe = el("iframe", { class: "briefing-frame", sandbox: "allow-same-origin" });
   body.appendChild(iframe);
   iframe.addEventListener("load", () => resize(iframe));
