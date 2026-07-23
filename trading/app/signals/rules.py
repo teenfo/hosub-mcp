@@ -229,4 +229,10 @@ def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
         s := breakdown_retest(df, rules_cfg["breakdown_retest"])
     ):
         out.append(s)
+    # 손절폭 상한 필터: 손절 거리가 과도한(고변동성·와이드스탑) 신호는 버린다.
+    # OCI 사례처럼 손절이 6% 떨어진 곳에 잡히는 저품질·휩쏘 거래를 애초에 차단.
+    max_stop = rules_cfg.get("max_stop_pct", 0)
+    if max_stop:
+        out = [s for s in out
+               if s.entry and abs(s.entry - s.stop) / s.entry * 100 <= max_stop]
     return out

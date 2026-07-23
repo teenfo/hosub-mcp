@@ -26,6 +26,7 @@ class Trade:
     exit_reason: str = ""
 
     def pnl_pct(self, costs: dict) -> float:
+        """비용 반영 '주가 순수 변동률(%)'. 포지션 사이징 미반영(참고용)."""
         if self.exit is None:
             return 0.0
         raw = (self.exit - self.entry) / self.entry * 100
@@ -36,40 +37,60 @@ class Trade:
         slip = costs.get("slippage_bp", 5) / 100 * 2
         return raw - commission - tax - slip
 
+    def stop_dist_pct(self) -> float:
+        return abs(self.entry - self.stop) / self.entry * 100 if self.entry else 0.0
+
+    def r_multiple(self, costs: dict) -> float:
+        """손절 거리 대비 손익 배수(R). 손절가면 ≈ -1, 목표(1.5R)면 ≈ +1.5."""
+        d = self.stop_dist_pct()
+        return self.pnl_pct(costs) / d if d > 0 else 0.0
+
+    def account_pct(self, costs: dict, risk_pct: float) -> float:
+        """계좌 대비 손익%(포지션 사이징 반영). 손절 1회 = -risk_pct.
+        고변동성·와이드스탑 종목의 큰 주가 변동률을 실제 계좌 영향으로 환산한다."""
+        return self.r_multiple(costs) * risk_pct
+
 
 @dataclass
 class Result:
     trades: list[Trade] = field(default_factory=list)
 
-    def stats(self, costs: dict | None = None) -> dict:
+    def stats(self, costs: dict | None = None, risk_pct: float | None = None) -> dict:
+        """계좌 리스크 기준 통계(포지션 사이징 반영). avg_pnl_pct·누적·MDD·PF 는
+        모두 '계좌 대비 %'. avg_price_pct 는 참고용 주가 변동률."""
         costs = costs or settings.COSTS
+        risk_pct = risk_pct if risk_pct is not None else settings.RISK.get(
+            "risk_per_trade_pct", 0.5)
         closed = [t for t in self.trades if t.exit is not None]
         if not closed:
             return {"trades": 0}
-        pnls = [t.pnl_pct(costs) for t in closed]
-        wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p <= 0]
-        equity = 1.0
-        peak, mdd = 1.0, 0.0
-        for p in pnls:
-            equity *= 1 + p / 100
+        accts = [t.account_pct(costs, risk_pct) for t in closed]   # 계좌 대비 %
+        rs = [t.r_multiple(costs) for t in closed]
+        price_pnls = [t.pnl_pct(costs) for t in closed]
+        wins = [a for a in accts if a > 0]
+        losses = [a for a in accts if a <= 0]
+        equity, peak, mdd = 1.0, 1.0, 0.0
+        for a in accts:
+            equity *= 1 + a / 100
             peak = max(peak, equity)
             mdd = max(mdd, (peak - equity) / peak)
+        pairs = list(zip(closed, accts))
         return {
             "trades": len(closed),
             "win_rate": round(len(wins) / len(closed) * 100, 1),
-            "avg_pnl_pct": round(sum(pnls) / len(pnls), 3),
+            "avg_pnl_pct": round(sum(accts) / len(accts), 3),      # 계좌 기준 평균 손익%
+            "avg_r": round(sum(rs) / len(rs), 3),                  # 평균 R(리스크 대비 배수)
+            "avg_price_pct": round(sum(price_pnls) / len(price_pnls), 3),  # 주가 변동률(참고)
+            "risk_per_trade_pct": risk_pct,
             # 손실이 없으면 손익비는 수학적으로 무한 → JSON 직렬화 불가하므로 None(∞ 표시용)
             "profit_factor": round(
                 sum(wins) / abs(sum(losses)), 2
             ) if losses and sum(losses) != 0 else None,
-            "total_return_pct": round((equity - 1) * 100, 2),
-            "max_drawdown_pct": round(mdd * 100, 2),
+            "total_return_pct": round((equity - 1) * 100, 2),      # 계좌 기준 누적
+            "max_drawdown_pct": round(mdd * 100, 2),               # 계좌 기준 MDD
             "by_rule": {
-                r: round(
-                    sum(t.pnl_pct(costs) for t in closed if t.rule == r)
-                    / max(1, len([t for t in closed if t.rule == r])), 3,
-                )
+                r: round(sum(a for t, a in pairs if t.rule == r)
+                         / max(1, len([1 for t, _ in pairs if t.rule == r])), 3)
                 for r in {t.rule for t in closed}
             },
         }

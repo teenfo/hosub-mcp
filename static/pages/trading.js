@@ -97,12 +97,16 @@ export default {
         btOut.append(
           el("div", { class: "text-secondary mb-1" }, `${r.name ? r.name + " (" + r.symbol + ")" : r.symbol} · ${r.days}일치 · 총 ${s.trades}건`),
           el("div", { class: "row g-2" }, [
-            stat("승률", s.win_rate + "%"), stat("평균손익", s.avg_pnl_pct + "%"),
-            stat("손익비(PF)", s.profit_factor == null ? "∞" : s.profit_factor), stat("누적수익", s.total_return_pct + "%"),
-            stat("최대낙폭", s.max_drawdown_pct + "%"),
+            stat("승률", s.win_rate + "%"), stat("건당 손익(계좌)", s.avg_pnl_pct + "%"),
+            stat("기대값 R", s.avg_r ?? "-"),
+            stat("손익비(PF)", s.profit_factor == null ? "∞" : s.profit_factor), stat("누적수익(계좌)", s.total_return_pct + "%"),
+            stat("최대낙폭(계좌)", s.max_drawdown_pct + "%"),
           ]),
-          el("div", { class: "text-secondary small mt-2" }, "규칙별 평균손익%: " +
-            Object.entries(s.by_rule || {}).map(([k, v]) => `${k} ${v}`).join(" · ")),
+          el("div", { class: "text-secondary small mt-2" }, [
+            el("div", {}, "규칙별 건당 손익%(계좌): " +
+              Object.entries(s.by_rule || {}).map(([k, v]) => `${k} ${v}`).join(" · ")),
+            el("div", { class: "mt-1" }, `※ 계좌 기준 = 포지션 사이징(1회 리스크 ${s.risk_per_trade_pct ?? 0.5}%) 반영. 참고 주가변동률 ${s.avg_price_pct}%`),
+          ]),
         );
       } catch (e) { btOut.innerHTML = ""; btOut.appendChild(el("div", { class: "text-danger" }, "실패: " + e.message)); }
     };
@@ -163,10 +167,10 @@ export default {
         el("div", { class: "text-secondary mb-1" }, `최근 실행 ${d.run_ts.replace("T", " ")} · 대상 ${s.symbols || 0}종목 · 체결 ${s.trades || 0}건`),
       );
       if (s.trades) {
-        rptOut.append(el("div", { class: "mb-2" }, `전체 승률 ${s.win_rate}% · 평균손익 ${s.avg_pnl_pct}% · 규칙별 ` +
+        rptOut.append(el("div", { class: "mb-2" }, `전체 승률 ${s.win_rate}% · 건당 손익(계좌) ${s.avg_pnl_pct}% · 규칙별 ` +
           Object.entries(s.by_rule || {}).map(([k, v]) => `${k} ${v}`).join(" · ")));
         const tbl = el("table", { class: "table table-sm align-middle mb-0 small" });
-        tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>일수</th><th>체결</th><th>승률</th><th>평균손익%</th><th>PF</th><th>누적%</th><th>MDD%</th></tr>" }));
+        tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>일수</th><th>체결</th><th>승률</th><th>건당손익%(계좌)</th><th>PF</th><th>누적%</th><th>MDD%</th></tr>" }));
         const tb = el("tbody");
         for (const r of d.symbols) {
           tb.appendChild(el("tr", {

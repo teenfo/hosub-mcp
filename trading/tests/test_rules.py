@@ -143,3 +143,12 @@ def test_every_signal_has_exit():
     df = pd.concat([_range_bars(15), _bars([("09:15", 100, 100.5, 98.9, 99.0)])])
     for sig in rules.evaluate_all(df, {"orb": {"enabled": True, **ORB_CFG}}):
         assert sig.stop and sig.target and sig.risk > 0
+
+
+def test_max_stop_pct_filters_wide_stops():
+    # ORB 하단 이탈: 진입 99, 손절 102 → 손절폭 약 3.03%
+    df = pd.concat([_range_bars(15), _bars([("09:15", 100, 100.5, 98.9, 99.0)])])
+    cfg_on = {"orb": {"enabled": True, **ORB_CFG}, "max_stop_pct": 2.0}   # 2% 상한 → 폐기
+    assert rules.evaluate_all(df, cfg_on) == []
+    cfg_off = {"orb": {"enabled": True, **ORB_CFG}, "max_stop_pct": 5.0}  # 5% 상한 → 통과
+    assert len(rules.evaluate_all(df, cfg_off)) == 1

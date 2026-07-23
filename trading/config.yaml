@@ -75,6 +75,9 @@ risk:
   signal_ttl_min: 10          # 승인 대기 신호 만료(분)
 
 rules:
+  # 손절폭 상한(%). 손절 거리가 이보다 크면 신호 폐기 — 고변동성·와이드스탑
+  # 저품질 거래(예: OCI 6% 스탑) 차단. 0 이면 필터 끔.
+  max_stop_pct: 4.0
   orb:
     enabled: true
     range_start: "09:00"

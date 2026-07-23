@@ -53,7 +53,9 @@ def test_backtest_orb_short_hits_target():
     stats = result.stats()
     assert stats["trades"] == 1
     assert stats["win_rate"] == 100.0
-    assert stats["avg_pnl_pct"] > 3.0  # 비용 차감 후에도 양수
+    assert stats["avg_price_pct"] > 3.0        # 주가 변동률(참고)은 비용 차감 후에도 양수
+    assert stats["avg_pnl_pct"] > 0            # 계좌 기준 손익도 양수
+    assert stats["avg_r"] > 1.0                # 목표(1.5R) 도달이라 R>1
 
 
 def test_backtest_all_wins_profit_factor_json_safe():
@@ -68,3 +70,16 @@ def test_backtest_all_wins_profit_factor_json_safe():
     st = r.stats()
     assert st["profit_factor"] is None
     json.dumps(st)                               # inf 였다면 여기서 예외
+
+
+def test_account_pct_reflects_position_sizing():
+    """와이드스탑 종목의 큰 주가 손실도 계좌 기준으론 ≈ -risk_pct 로 제한된다."""
+    from app.backtest.runner import Trade
+    # 진입 100,000 손절 94,000(손절폭 6%). 손절 청산 → R≈-1
+    t = Trade("OCI", "gap", "long", None, 100_000.0, 94_000.0, 109_000.0)
+    t.exit, t.exit_reason = 94_000.0, "stop"
+    costs = {"commission_pct": 0.015, "sell_tax_pct": 0.15, "slippage_bp": 5}
+    assert t.pnl_pct(costs) < -6.0                    # 주가 변동률은 -6%대
+    assert -1.2 < t.r_multiple(costs) < -1.0          # R ≈ -1(손절)
+    acct = t.account_pct(costs, risk_pct=0.5)
+    assert -0.65 < acct < -0.5                        # 계좌 기준 ≈ -0.5%로 제한
