@@ -35,8 +35,8 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 _SESSION_KEY = "dash_auth"
 
 # 데일리 브리핑 디렉터리 (Claude 가 MCP write_file 로 날짜별 파일을 쓴다).
-# 파일명은 날짜(YYYY-MM-DD.html / .md). 예: html/morning-brif/2026-07-23.html
-BRIEFING_DIR = os.environ.get("HOSUB_BRIEFING_DIR", "html/morning-brif")
+# 파일명은 날짜(YYYY-MM-DD.html / .md). 예: html/morning-brief/2026-07-23.html
+BRIEFING_DIR = os.environ.get("HOSUB_BRIEFING_DIR", "html/morning-brief")
 
 _BRIEFING_EXTS = (".html", ".htm", ".md")
 _SCRIPT_RE = re.compile(r"(?is)<script.*?</script>")
