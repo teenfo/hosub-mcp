@@ -267,7 +267,7 @@ def _agg(rows: list[sqlite3.Row]) -> dict:
         "expectancy_pct": round(sum(pnls) / len(pnls), 3),   # 건당 기대값
         "total_pnl_krw": round(sum(r["pnl_krw"] for r in rows), 0),
         "profit_factor": round(sum(wins) / abs(sum(losses)), 2)
-        if losses and sum(losses) != 0 else (float("inf") if wins else 0.0),
+        if losses and sum(losses) != 0 else (None if wins else 0.0),
         "avg_slippage_pct": round(
             sum(r["slippage_pct"] or 0 for r in rows) / len(rows), 4),
     }

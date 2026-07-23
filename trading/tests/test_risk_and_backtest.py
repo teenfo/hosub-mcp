@@ -54,3 +54,17 @@ def test_backtest_orb_short_hits_target():
     assert stats["trades"] == 1
     assert stats["win_rate"] == 100.0
     assert stats["avg_pnl_pct"] > 3.0  # 비용 차감 후에도 양수
+
+
+def test_backtest_all_wins_profit_factor_json_safe():
+    """손실이 없는(전승) 결과의 profit_factor 는 inf 가 아니라 None(JSON 직렬화 가능)."""
+    import json
+
+    from app.backtest.runner import Result, Trade
+    r = Result()
+    t = Trade("T", "orb", "long", None, 100.0, 98.0, 104.0)
+    t.exit, t.exit_reason = 104.0, "target"      # 전승(손실 없음)
+    r.trades.append(t)
+    st = r.stats()
+    assert st["profit_factor"] is None
+    json.dumps(st)                               # inf 였다면 여기서 예외
