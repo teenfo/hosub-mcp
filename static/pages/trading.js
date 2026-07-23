@@ -354,6 +354,10 @@ export default {
         el("span", { class: "text-secondary small" },
           d.date ? `기준일 ${d.date} · ${d.progress || ""}` : "아직 분석 결과 없음 (평일 17:30 자동 실행)"),
       ]));
+      if (d.dataset) {
+        discoveryC.body.appendChild(el("div", { class: "text-secondary small mb-2" },
+          `📄 데이터셋: ${d.dataset.symbol_count}종목 피처 → ${d.dataset.features_file} (스케줄러 분석용)`));
+      }
       if (!(d.picks || []).length) return;
       const tbl = el("table", { class: "table table-sm align-middle mb-0" });
       tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>종가</th><th>점수</th><th>발굴 사유</th><th></th></tr>" }));

@@ -201,7 +201,9 @@ async def api_scanner(_=Depends(require_auth)):
 
 @app.get("/api/discovery")
 async def api_discovery(_=Depends(require_auth)):
-    return discovery.latest()
+    from . import export
+
+    return discovery.latest() | {"dataset": export.latest_manifest()}
 
 
 @app.post("/api/discovery/run")
