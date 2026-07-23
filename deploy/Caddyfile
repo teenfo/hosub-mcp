@@ -1,0 +1,34 @@
+# hosub-mcp 리버스 프록시 (Caddy)
+#
+# iptime DDNS(도메인 구매 불필요) + 자동 TLS로 MCP 서버를 HTTPS 노출한다.
+# Caddy가 Let's Encrypt/ZeroSSL에서 인증서를 자동 발급·갱신하고, 내부의
+# 평문 uvicorn(127.0.0.1:8700)으로 프록시한다.
+#
+# 설치: docs/SETUP.md "부록 B. iptime DDNS + Caddy" 참고
+#   sudo cp deploy/Caddyfile /etc/caddy/Caddyfile
+#   sudo systemctl restart caddy
+#
+# 전제:
+#   - iptime 공유기에서 외부 80, 443 → 192.168.0.3(서버)로 포트포워딩
+#   - kch83.iptime.org 가 집 공인 IP를 가리킴(DDNS)
+#
+# 아래 호스트명을 본인 DDNS 주소로 바꾼다.
+
+kch83.iptime.org {
+	# 내부 MCP 서버(+대시보드)로 프록시. /mcp, /, /api, /static 모두 통과.
+	reverse_proxy 127.0.0.1:8700
+
+	# 인증서 발급 알림용 이메일(선택, 권장). 본인 이메일로 교체.
+	# tls your-email@example.com
+
+	# 접근 로그(선택)
+	log {
+		output file /var/log/caddy/hosub-mcp.log
+		format console
+	}
+
+	# 참고: MCP는 Bearer 토큰으로, 대시보드는 세션 로그인으로 이미 보호된다.
+	# 추가로 특정 IP만 허용하려면 아래 주석을 참고해 조정한다.
+	# @blocked not remote_ip 1.2.3.4 5.6.7.0/24
+	# respond @blocked "forbidden" 403
+}
