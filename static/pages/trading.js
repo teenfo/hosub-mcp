@@ -124,7 +124,7 @@ export default {
       reportModal.show();
       let d;
       try {
-        d = await fetchJSON("/api/briefing?date=" + encodeURIComponent(date));
+        d = await fetchJSON("/api/night-report?date=" + encodeURIComponent(date));
       } catch (e) {
         modalBody.innerHTML = "";
         modalBody.appendChild(el("div", { class: "text-danger small" }, "불러오기 실패: " + e.message));
@@ -158,7 +158,7 @@ export default {
 
     const loadReport = async () => {
       let d;
-      try { d = await fetchJSON("/api/briefing"); } catch (e) { return; }
+      try { d = await fetchJSON("/api/night-report"); } catch (e) { return; }
       rBody.innerHTML = "";
       if (!d.exists || !(d.dates && d.dates.length)) {
         setDiscReportLink(null);

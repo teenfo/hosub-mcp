@@ -34,17 +34,18 @@ STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 _SESSION_KEY = "dash_auth"
 
-# 데일리 브리핑 디렉터리 (Claude 가 MCP write_file 로 날짜별 파일을 쓴다).
-# 파일명은 날짜(YYYY-MM-DD.html / .md). 예: html/morning-brief/2026-07-23.html
+# 날짜별 문서 디렉터리 (Claude 가 MCP write_file 로 YYYY-MM-DD.html/.md 를 쓴다).
+# 데일리 브리핑과 야간 분석 리포트는 별개 자료이므로 디렉터리를 분리한다.
 BRIEFING_DIR = os.environ.get("HOSUB_BRIEFING_DIR", "html/morning-brief")
+NIGHT_REPORT_DIR = os.environ.get("HOSUB_NIGHT_REPORT_DIR", "html/night-report")
 
 _BRIEFING_EXTS = (".html", ".htm", ".md")
 _SCRIPT_RE = re.compile(r"(?is)<script.*?</script>")
 
 
-def _list_briefings() -> list[tuple[str, Path]]:
-    """브리핑 파일을 (이름, 경로) 목록으로, 이름 내림차순(최신 먼저) 반환."""
-    d = Path(BRIEFING_DIR)
+def _list_dated(dir_path: str) -> list[tuple[str, Path]]:
+    """날짜 문서를 (이름, 경로) 목록으로, 이름 내림차순(최신 먼저) 반환."""
+    d = Path(dir_path)
     if not d.is_dir():
         return []
     items = [
@@ -131,23 +132,15 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         limit = _int_param(request, "limit", 50)
         return JSONResponse({"audit": ctx.audit.recent(limit)})
 
-    async def api_briefing(request):
-        if (d := _require_auth_json(request)):
-            return d
-        items = _list_briefings()
+    def _dated_response(dir_path: str, want: str | None, label: str):
+        items = _list_dated(dir_path)
         dates = [name for name, _ in items]
         if not items:
-            return JSONResponse(
-                {
-                    "exists": False,
-                    "dates": [],
-                    "content": "",
-                    "hint": f"Claude 가 write_file 로 {BRIEFING_DIR}/<날짜>.html 에 브리핑을 "
-                    "쓰면 여기에 표시됩니다.",
-                }
-            )
-        # 요청한 날짜(있으면) 또는 최신
-        want = request.query_params.get("date")
+            return JSONResponse({
+                "exists": False, "dates": [], "content": "",
+                "hint": f"Claude 가 write_file 로 {dir_path}/<날짜>.html 에 {label} 를 "
+                "쓰면 여기에 표시됩니다.",
+            })
         chosen = next((p for name, p in items if name == want), items[0][1])
         try:
             raw = chosen.read_text(encoding="utf-8")[:200_000]
@@ -156,16 +149,21 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
             return JSONResponse({"exists": False, "dates": dates, "content": "", "error": str(exc)})
         fmt = "md" if chosen.suffix.lower() == ".md" else "html"
         content = raw if fmt == "md" else _SCRIPT_RE.sub("", raw)  # HTML 은 script 제거
-        return JSONResponse(
-            {
-                "exists": True,
-                "date": chosen.stem,
-                "dates": dates,
-                "format": fmt,
-                "content": content,
-                "updated_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
-            }
-        )
+        return JSONResponse({
+            "exists": True, "date": chosen.stem, "dates": dates, "format": fmt,
+            "content": content,
+            "updated_at": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
+        })
+
+    async def api_briefing(request):
+        if (d := _require_auth_json(request)):
+            return d
+        return _dated_response(BRIEFING_DIR, request.query_params.get("date"), "브리핑")
+
+    async def api_night_report(request):
+        if (d := _require_auth_json(request)):
+            return d
+        return _dated_response(NIGHT_REPORT_DIR, request.query_params.get("date"), "야간 분석 리포트")
 
     async def api_docker(request):
         if (d := _require_auth_json(request)):
@@ -273,6 +271,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/jobs", api_jobs),
         Route("/api/audit", api_audit),
         Route("/api/briefing", api_briefing),
+        Route("/api/night-report", api_night_report),
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),
