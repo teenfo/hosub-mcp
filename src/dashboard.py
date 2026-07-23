@@ -64,8 +64,12 @@ WEATHER_LABEL = os.environ.get("HOSUB_WEATHER_LABEL", "서울")
 TRADING_URL = os.environ.get("HOSUB_TRADING_URL", "http://127.0.0.1:8600")
 TRADING_TOKEN = os.environ.get("HOSUB_TRADING_TOKEN", "")
 
-_TRADING_GET_RE = re.compile(r"^(status|signals|orders|settings|account|bars/\d{6})$")
-_TRADING_POST_RE = re.compile(r"^(orders/[0-9a-f]{12}/(approve|reject)|settings)$")
+_TRADING_GET_RE = re.compile(
+    r"^(status|signals|orders|settings|account|scanner|bars/\d{6})$"
+)
+_TRADING_POST_RE = re.compile(
+    r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist)$"
+)
 
 
 def _is_authed(request) -> bool:

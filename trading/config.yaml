@@ -6,6 +6,15 @@ watchlist:
 # 숏 신호를 인버스 ETF 매수로 집행할 때 사용할 매핑
 inverse_etf: "114800"   # KODEX 인버스 (지수 하락 베팅용)
 
+# 급등주 스캐너: 거래대금상위(ka10032)에서 등락률·거래대금·가격 필터 교차
+scanner:
+  enabled: true
+  market: "000"          # 000 전체 / 001 코스피 / 101 코스닥
+  min_change_pct: 3.0    # 당일 등락률 최소 (하락장 주도주 = 지수 역행 상승)
+  min_trade_value: 10000 # trde_prica 와 같은 단위(통상 백만원 → 100억). 실호출로 단위 검증할 것
+  min_price: 1000        # 저가주 제외
+  top_n: 10
+
 risk:
   risk_per_trade_pct: 0.5     # 1회 손절 시 계좌 대비 최대 손실 %
   daily_loss_limit_pct: 2.0   # 일일 누적 손실 한도 % (도달 시 신규 신호 차단)

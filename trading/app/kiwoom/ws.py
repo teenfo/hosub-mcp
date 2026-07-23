@@ -23,10 +23,22 @@ class RealtimeFeed:
         self.on_tick = on_tick
         self._symbols: set[str] = set()
         self._task: asyncio.Task | None = None
+        self._ws = None
 
     def start(self, symbols: list[str]) -> None:
         self._symbols = set(symbols)
         if not self._task or self._task.done():
+            self._task = asyncio.create_task(self._run())
+
+    async def update(self, symbols: list[str]) -> None:
+        """구독 종목 변경 — 현재 연결을 닫아 재접속하며 새 목록으로 REG 한다."""
+        self._symbols = set(symbols)
+        if self._ws is not None:
+            try:
+                await self._ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        elif not self._task or self._task.done():
             self._task = asyncio.create_task(self._run())
 
     async def _run(self) -> None:
@@ -42,35 +54,42 @@ class RealtimeFeed:
 
     async def _connect_once(self) -> None:
         token = await token_manager.get()
-        async with websockets.connect(settings.WS_BASE) as ws:
-            await ws.send(json.dumps({"trnm": "LOGIN", "token": token}))
-            await ws.send(
-                json.dumps(
-                    {
-                        "trnm": "REG",
-                        "grp_no": "1",
-                        "refresh": "1",
-                        "data": [
-                            {"item": sorted(self._symbols), "type": ["0B"]}  # 0B=주식체결
-                        ],
-                    }
-                )
+        try:
+            async with websockets.connect(settings.WS_BASE) as ws:
+                self._ws = ws
+                await self._session(ws, token)
+        finally:
+            self._ws = None
+
+    async def _session(self, ws, token: str) -> None:
+        await ws.send(json.dumps({"trnm": "LOGIN", "token": token}))
+        await ws.send(
+            json.dumps(
+                {
+                    "trnm": "REG",
+                    "grp_no": "1",
+                    "refresh": "1",
+                    "data": [
+                        {"item": sorted(self._symbols), "type": ["0B"]}  # 0B=주식체결
+                    ],
+                }
             )
-            async for raw in ws:
-                msg = json.loads(raw)
-                if msg.get("trnm") == "PING":
-                    await ws.send(raw)  # 그대로 회신
+        )
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg.get("trnm") == "PING":
+                await ws.send(raw)  # 그대로 회신
+                continue
+            if msg.get("trnm") != "REAL":
+                continue
+            for item in msg.get("data", []):
+                values = item.get("values", {})
+                symbol = item.get("item", "")
+                try:
+                    price = abs(float(values.get("10", 0)))   # 현재가
+                    volume = abs(int(float(values.get("15", 0))))  # 체결량
+                    ts = values.get("20", "")                 # 체결시간 HHMMSS
+                except (TypeError, ValueError):
                     continue
-                if msg.get("trnm") != "REAL":
-                    continue
-                for item in msg.get("data", []):
-                    values = item.get("values", {})
-                    symbol = item.get("item", "")
-                    try:
-                        price = abs(float(values.get("10", 0)))   # 현재가
-                        volume = abs(int(float(values.get("15", 0))))  # 체결량
-                        ts = values.get("20", "")                 # 체결시간 HHMMSS
-                    except (TypeError, ValueError):
-                        continue
-                    if symbol and price:
-                        await self.on_tick(symbol, price, volume, ts)
+                if symbol and price:
+                    await self.on_tick(symbol, price, volume, ts)
