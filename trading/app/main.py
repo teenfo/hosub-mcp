@@ -141,20 +141,24 @@ async def api_reject(order_id: str, _=Depends(require_auth)):
 
 
 @app.get("/api/bars/{symbol}")
-async def api_bars(symbol: str, _=Depends(require_auth)):
-    df = store.load_bars(symbol, "1m", limit=500)
+async def api_bars(symbol: str, tf: str = "1m", _=Depends(require_auth)):
+    """봉 데이터. tf=1m(분봉, 기본) 또는 1d(일봉, 발굴 수집분)."""
+    if tf not in ("1m", "1d"):
+        tf = "1m"
+    df = store.load_bars(symbol, tf, limit=500)
     bars = [] if df.empty else [
         {"time": int(ts.timestamp()), "open": r.open, "high": r.high,
          "low": r.low, "close": r.close, "volume": int(r.volume)}
         for ts, r in df.iterrows()
     ]
-    # 형성 중인 현재 분봉을 덧붙인다 (실시간 WS 수신분)
-    cur = aggregator.snapshot(symbol)
-    if cur:
-        if bars and bars[-1]["time"] == cur["time"]:
-            bars[-1] = cur
-        elif not bars or bars[-1]["time"] < cur["time"]:
-            bars.append(cur)
+    if tf == "1m":
+        # 형성 중인 현재 분봉을 덧붙인다 (실시간 WS 수신분)
+        cur = aggregator.snapshot(symbol)
+        if cur:
+            if bars and bars[-1]["time"] == cur["time"]:
+                bars[-1] = cur
+            elif not bars or bars[-1]["time"] < cur["time"]:
+                bars.append(cur)
     return bars
 
 
