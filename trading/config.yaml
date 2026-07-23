@@ -1,0 +1,39 @@
+# 감시 종목 (종목코드: 메모)
+watchlist:
+  "005930": 삼성전자
+  "000660": SK하이닉스
+  "035420": NAVER
+# 숏 신호를 인버스 ETF 매수로 집행할 때 사용할 매핑
+inverse_etf: "114800"   # KODEX 인버스 (지수 하락 베팅용)
+
+risk:
+  risk_per_trade_pct: 0.5     # 1회 손절 시 계좌 대비 최대 손실 %
+  daily_loss_limit_pct: 2.0   # 일일 누적 손실 한도 % (도달 시 신규 신호 차단)
+  max_positions: 3
+  signal_ttl_min: 10          # 승인 대기 신호 만료(분)
+
+rules:
+  orb:
+    enabled: true
+    range_start: "09:00"
+    range_end: "09:15"
+    target_r: 1.5             # 목표가 = 손절 거리의 1.5배
+  gap:
+    enabled: true
+    min_gap_pct: 2.0          # 시가 갭 최소 크기
+    range_wait_until: "10:00" # 첫 1시간 범위 형성 대기
+    trail_long_pct: 8.0
+    trail_short_pct: 4.0
+  bounce_fade:
+    enabled: true
+    rsi_hot: 60               # 분봉 RSI 이 값 이상에서 반등 소진 간주
+    lookback: 30              # 저점 갱신 구조 확인용 봉 수
+  breakdown_retest:
+    enabled: true
+    support_lookback: 60      # 지지선 산출용 봉 수
+    retest_tolerance_pct: 0.3
+
+costs:
+  commission_pct: 0.015       # 위탁 수수료(편도)
+  sell_tax_pct: 0.15          # 증권거래세(매도)
+  slippage_bp: 5

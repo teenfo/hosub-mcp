@@ -1,0 +1,15 @@
+[Unit]
+Description=hosub-trading (semi-auto trading dashboard)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hosub
+WorkingDirectory=/opt/hosub-trading/trading
+ExecStart=/opt/hosub-trading/trading/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8600
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

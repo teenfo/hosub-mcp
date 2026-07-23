@@ -11,7 +11,17 @@
 # 현재 서버는 기존 서비스를 정리한 초기 상태다. 아래는 비어 있으며(또는 예시 주석),
 # 서비스를 다시 올릴 때마다 해당 항목을 추가한다.
 
-services: {}
+services:
+  trading:
+    unit: trading.service
+    description: "반자동 트레이딩 대시보드 (키움 REST API, 127.0.0.1:8600)"
+    deploy:
+      workdir: /opt/hosub-trading
+      steps:
+        - ["git", "pull", "--ff-only"]
+        - ["trading/.venv/bin/pip", "install", "-q", "-r", "trading/requirements.txt"]
+      restart_after: true
+      timeout_seconds: 600
   # 예시) 서비스를 올린 뒤 아래 형태로 추가:
   # bcl-portal:
   #   unit: bcl-portal.service

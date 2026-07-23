@@ -2,8 +2,9 @@
 // 배열 순서가 사이드바/라우팅 순서다.
 
 import dashboard from "./dashboard.js";
+import trading from "./trading.js";
 import briefing from "./briefing.js";
 import weather from "./weather.js";
 import docker from "./docker.js";
 
-export const PAGES = [dashboard, briefing, weather, docker];
+export const PAGES = [dashboard, trading, briefing, weather, docker];
