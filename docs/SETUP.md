@@ -165,9 +165,20 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 
 ---
 
-## 7. Cloudflare Tunnel 노출 + 커넥터 등록
+## 7. 인터넷 노출 + 커넥터 등록
 
-### 7.1 터널 ingress
+> **노출이 꼭 필요한 경우는 하나뿐:** claude.ai / 모바일 앱 / Cowork 에서 커넥터로
+> 쓰려면 서버가 공인 HTTPS 로 도달 가능해야 한다. **집 LAN 안에서만**(대시보드,
+> 로컬 Claude Code) 쓸 거면 이 절은 건너뛰고 `http://192.168.0.3:8700/` 로 바로 쓴다.
+>
+> 노출 방법 두 가지 — 상황에 맞게 택1:
+> - **7-A. Cloudflare Tunnel** — Cloudflare 관리 도메인이 있을 때. 포트 개방 불필요.
+> - **부록 B. iptime DDNS + Caddy** — **도메인 구매 없이** 무료 DDNS(`kch83.iptime.org`)로
+>   노출. 포트포워딩 + Caddy 자동 TLS. → 이 문서 맨 아래 부록 B 참고.
+
+### 7-A. Cloudflare Tunnel
+
+#### 7.1 터널 ingress
 
 기존 tunnel 설정(`~/.cloudflared/config.yml`)에 추가:
 
@@ -189,7 +200,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://mcp.example.com/mcp
 `.env` 의 `HOSUB_ALLOWED_HOSTS=mcp.example.com` 을 채우고 `sudo systemctl restart hosub-mcp`
 하면 DNS 리바인딩 보호까지 켜진다.
 
-### 7.2 Claude Custom Connector
+#### 7.2 Claude Custom Connector
 
 1. Claude.ai → Settings → Connectors → **Add custom connector**
 2. **URL**: `https://mcp.example.com/mcp`
@@ -201,7 +212,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST https://mcp.example.com/mcp
 > 커넥터 UI가 커스텀 헤더를 지원하지 않는 요금제면, Cloudflare Access **서비스 토큰**을
 > 터널 엣지에서 강제하라. 토큰을 URL 쿼리에 넣지 말 것.
 
-### 7.3 대시보드 접속
+#### 7.3 대시보드 접속
 
 `https://mcp.example.com/` → `HOSUB_DASH_PASSWORD` 로그인. **Cloudflare Access(이메일
 OTP/SSO) 병행을 권장**한다.
@@ -282,7 +293,9 @@ backup_script: daily_backup
 | 대시보드 로그인 실패 | `HOSUB_DASH_PASSWORD` 미설정. `.env` 채우고 restart |
 | 자동 업데이트 안 됨 | `journalctl -u hosub-mcp-update.service` 확인. deploy key 인증 실패(3번) 또는 sudo 권한(4번) 문제 |
 | `git pull` 인증 실패 | deploy key 미등록 또는 remote 가 HTTPS. 3번 재확인 |
-| 외부 https 접속 안 됨 | cloudflared ingress/DNS. `cloudflared tunnel info <name>` |
+| 외부 https 접속 안 됨 (터널) | cloudflared ingress/DNS. `cloudflared tunnel info <name>` |
+| 외부 https 접속 안 됨 (Caddy) | 포트포워딩(80/443)·DDNS·인증서. 부록 B 확인 |
+| Caddy 인증서 발급 실패 | 80/443 포워딩 안 됨, 또는 LE 레이트리밋. `journalctl -u caddy` 확인 |
 | `restart_service` 실패 | sudoers 에 systemctl 권한 없음(4번) |
 
 ---
@@ -314,3 +327,66 @@ sudo install -m 644 /opt/hosub-mcp/deploy/hosub-mcp-update.timer /etc/systemd/sy
 sudo systemctl daemon-reload
 ```
 그다음 4·6·7번을 진행.
+
+---
+
+## 부록 B. iptime DDNS + Caddy 노출 (도메인 구매 불필요)
+
+Cloudflare 관리 도메인 없이, **무료 iptime DDNS(`kch83.iptime.org`)** 로 앱 커넥터용
+HTTPS 를 만든다. Caddy 가 Let's Encrypt/ZeroSSL 인증서를 자동 발급·갱신한다.
+
+### B.1 iptime 공유기 포트포워딩
+
+iptime 관리자(`192.168.0.1`) → 고급설정 → NAT/라우터 → 포트포워드 설정:
+
+| 외부 포트 | 내부 IP | 내부 포트 | 용도 |
+|---|---|---|---|
+| 80 | 192.168.0.3 | 80 | 인증서 발급(HTTP-01 챌린지) |
+| 443 | 192.168.0.3 | 443 | HTTPS 서비스 |
+
+> DDNS(`kch83.iptime.org`)가 집 공인 IP를 가리키는지 확인: iptime 관리자 → 특수기능 →
+> DDNS 설정에서 "정상 등록" 상태여야 한다.
+
+### B.2 Caddy 설치 + 설정
+
+```bash
+# Caddy 설치 (공식 저장소)
+sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | sudo tee /etc/apt/sources.list.d/caddy-stable.list
+sudo apt update && sudo apt install -y caddy
+
+# 설정 배치 (호스트명이 다르면 파일 안의 kch83.iptime.org 를 수정)
+sudo mkdir -p /var/log/caddy
+sudo cp /opt/hosub-mcp/deploy/Caddyfile /etc/caddy/Caddyfile
+sudo systemctl restart caddy
+
+# 인증서 발급 로그 확인 (certificate obtained 나오면 성공)
+journalctl -u caddy -n 40 --no-pager
+```
+
+### B.3 확인
+
+```bash
+# 외부 도달 + 인증 (401 이면 정상: TLS OK + Bearer 요구)
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://kch83.iptime.org/mcp
+
+# .env 에 Host 검증 켜기
+sudo -u hosub sed -i 's/^HOSUB_ALLOWED_HOSTS=.*/HOSUB_ALLOWED_HOSTS=kch83.iptime.org/' /opt/hosub-mcp/.env
+sudo systemctl restart hosub-mcp
+```
+
+### B.4 커넥터 등록 / 대시보드
+
+- 커넥터 URL: `https://kch83.iptime.org/mcp` + `Authorization: Bearer <토큰>`
+  (7-A 의 7.2 절차 동일)
+- 대시보드: `https://kch83.iptime.org/`
+
+### B.5 유의 (직접 노출이라 중요)
+
+- 포트포워딩은 서버를 **인터넷에 직접 노출**한다. 이 서버는 `run_command` 로 root 까지
+  되므로, **Bearer 토큰을 강하게 유지**하고 유출에 각별히 주의한다.
+- Let's Encrypt 는 등록 도메인당 주간 발급 한도가 있다. `iptime.org` 공유 특성상
+  드물게 레이트리밋에 걸릴 수 있는데, Caddy 는 ZeroSSL 로 자동 폴백하므로 대개 해결된다.
+- 필요하면 Caddyfile 의 `@blocked` 예시로 특정 IP만 허용하도록 조일 수 있다.
+- 방화벽(ufw)을 쓰면 80/443 을 열어야 한다: `sudo ufw allow 80,443/tcp`.
