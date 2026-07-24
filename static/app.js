@@ -31,7 +31,8 @@ export function el(tag, attrs = {}, children = []) {
   }
   for (const c of [].concat(children)) {
     if (c == null) continue;
-    node.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+    // 숫자·불리언 등 비문자 원시값도 텍스트로 — appendChild(숫자)는 TypeError
+    node.appendChild(c instanceof Node ? c : document.createTextNode(String(c)));
   }
   return node;
 }
