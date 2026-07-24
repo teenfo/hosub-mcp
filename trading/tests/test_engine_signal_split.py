@@ -50,6 +50,50 @@ async def test_affordable_signal_creates_pending_order(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_qty_zero_note_risk_vs_balance(monkeypatch):
+    # 저가주(HMM 케이스): 매수여력은 충분하나 손절폭이 리스크 한도보다 넓어 0주.
+    eng = SignalEngine(equity=142_589)
+    sig = Signal(rule="orb", side="long", entry=21_000, stop=20_100,
+                 target=22_000, reason="x")  # dist=900 > 0.5%예산 713; 여력=6주
+    _prep(monkeypatch, eng, sig)
+    found = await eng.run_once()
+    assert found[0]["qty"] == 0
+    assert "리스크 한도" in found[0]["note"]      # 잔고 문제가 아님을 명시
+    assert "잔고 부족" not in found[0]["note"]
+
+
+@pytest.mark.asyncio
+async def test_collect_only_skipped_but_backfilled(monkeypatch):
+    eng = SignalEngine(equity=10_000_000)
+    eng.equity_synced = True
+    monkeypatch.setattr(settings, "WATCHLIST",
+                        {"005930": "삼성전자", "006400": "삼성SDI"})
+    monkeypatch.setattr(settings, "COLLECT_ONLY", {"006400"})
+
+    async def _noop_sync():
+        return None
+
+    backfilled, evaluated = [], []
+
+    async def fake_backfill(sym):
+        backfilled.append(sym)
+
+    monkeypatch.setattr(eng, "_sync_equity", _noop_sync)
+    monkeypatch.setattr(eng, "day_guard_status",
+                        lambda: {"halted": False, "reason": "", "pct": 0.0})
+    monkeypatch.setattr(eng, "_today_df",
+                        lambda s: (evaluated.append(s),
+                                   (types.SimpleNamespace(empty=False), None))[1])
+    monkeypatch.setattr(eng, "_rules_for", lambda s: {})
+    monkeypatch.setattr(engine_mod.collector, "backfill_minutes", fake_backfill)
+    monkeypatch.setattr(engine_mod.rules, "evaluate_all", lambda df, cfg, prev: [])
+
+    await eng.run_once()
+    assert set(backfilled) == {"005930", "006400"}   # 둘 다 데이터 수집
+    assert evaluated == ["005930"]                    # 매매 평가는 006400 제외
+
+
+@pytest.mark.asyncio
 async def test_long_only_blocks_short_orders(monkeypatch):
     # 롱 전용 모드: 숏 신호는 기록만 하고 발주하지 않는다(잔고 충분해도).
     monkeypatch.setitem(settings.RISK, "long_only", True)

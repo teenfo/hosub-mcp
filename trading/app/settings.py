@@ -112,6 +112,9 @@ with open(BASE_DIR / "config.yaml", encoding="utf-8") as f:
     CONFIG: dict = yaml.safe_load(f)
 
 WATCHLIST: dict[str, str] = {str(k): v for k, v in CONFIG.get("watchlist", {}).items()}
+# 수집전용 종목코드 집합 — 감시목록에 있으나 매매(신호·주문)는 하지 않고 데이터만
+# 모은다. 감시목록 DB(collect_only=1)에서 런타임으로 재구성된다(watchlist._rebuild_runtime).
+COLLECT_ONLY: set[str] = set()
 RISK: dict = CONFIG.get("risk", {})
 RULES: dict = CONFIG.get("rules", {})
 COSTS: dict = CONFIG.get("costs", {})

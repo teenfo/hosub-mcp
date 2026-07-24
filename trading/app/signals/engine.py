@@ -159,8 +159,14 @@ class SignalEngine:
             log.info("일일 가드 작동: %s (오늘 %+.2f%%)",
                      self.guard["reason"], self.guard["pct"])
             return found
-        for symbol, name in settings.WATCHLIST.items():
+        # 수집: 전체 감시목록 백필(매매·수집전용 공통). 수집전용 종목도 데이터는 모은다.
+        for symbol in settings.WATCHLIST:
             await collector.backfill_minutes(symbol)
+        # 매매: 수집전용(COLLECT_ONLY)을 제외한 트레이딩 대상만 규칙 평가·주문 제안.
+        risk_pct = settings.RISK.get("risk_per_trade_pct", 0.5)
+        for symbol, name in settings.WATCHLIST.items():
+            if symbol in settings.COLLECT_ONLY:
+                continue  # 수집전용 — 데이터만 쌓고 신호·주문은 만들지 않는다
             df, prev_close = self._today_df(symbol)
             if df.empty:
                 continue
@@ -169,26 +175,33 @@ class SignalEngine:
                 if key in self._fired:
                     continue
                 sig.symbol = symbol
-                # 감시목록 신호는 '금액 제한 없이' 산출한다 — 계좌가 못 사는 종목
-                # (예: 고가주)도 최근 신호에 기록해 감사·검증에 쓴다.
-                qty = risk.position_size(
-                    self.equity, settings.RISK.get("risk_per_trade_pct", 0.5),
-                    sig.entry, sig.stop,
-                )
+                # 감시 신호는 금액 제한 없이 산출(최근 신호 기록). 승인대기 주문은
+                # position_size(매수여력 + 거래당 리스크 반영)가 1주 이상일 때만.
+                qty = risk.position_size(self.equity, risk_pct, sig.entry, sig.stop)
                 rec = {"symbol": symbol, "name": name, "rule": sig.rule,
                        "side": sig.side, "reason": sig.reason,
                        "entry": sig.entry, "stop": sig.stop,
                        "target": sig.target, "qty": qty, "actionable": False,
                        "ts": datetime.now(KST).isoformat(timespec="seconds")}
-                # 승인대기 주문은 '계좌 잔고를 참고'해 실제 매수 가능할 때만 만든다.
-                # qty 는 position_size 가 floor(예탁자산/진입가)로 이미 잔고를 반영한다.
                 # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
                 # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
                 if settings.RISK.get("long_only", False) and sig.side != "long":
                     rec["note"] = "롱 전용 모드 — 숏 미발주(현물 계좌 개별주 공매도 불가)"
                 elif qty < 1:
-                    rec["note"] = (f"잔고 부족 — 1주 ≈ {int(sig.entry):,}원 / "
-                                   f"자산 {int(self.equity):,}원 (승인대기 미생성)")
+                    # qty=0 원인 구분: (1) 매수여력 부족(진입가>자산) vs
+                    # (2) 리스크 한도 — 손절폭이 거래당 리스크%보다 넓어 0주.
+                    dist = abs(sig.entry - sig.stop)
+                    affordable = int(self.equity // sig.entry) if sig.entry > 0 else 0
+                    budget = self.equity * risk_pct / 100
+                    if affordable < 1:
+                        rec["note"] = (f"잔고 부족 — 1주 ≈ {int(sig.entry):,}원 > "
+                                       f"자산 {int(self.equity):,}원")
+                    else:
+                        stop_pct = (dist / sig.entry * 100) if sig.entry else 0
+                        rec["note"] = (
+                            f"리스크 한도 — 손절폭 {stop_pct:.1f}%(≈{int(dist):,}원)가 "
+                            f"거래당 {risk_pct:g}% 한도(≈{int(budget):,}원)를 초과해 0주 "
+                            f"(매수여력은 {affordable}주). 리스크%를 올리면 매매 가능")
                 else:
                     ok, why = self.state.can_open()
                     if ok:
