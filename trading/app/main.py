@@ -277,12 +277,13 @@ async def api_rules(_=Depends(require_auth)):
     from .signals.rules import REGISTRY
 
     out = []
-    for name, (fn, _needs) in REGISTRY.items():
+    for name, (fn, _needs, side) in REGISTRY.items():
         cfg = settings.RULES.get(name, {})
         doc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
         out.append({"name": name, "enabled": bool(cfg.get("enabled")),
-                    "desc": doc, "config": {k: v for k, v in cfg.items()
-                                            if not k.startswith("_")}})
+                    "side": side, "desc": doc,
+                    "config": {k: v for k, v in cfg.items()
+                               if not k.startswith("_")}})
     return {"rules": out, "max_stop_pct": settings.RULES.get("max_stop_pct"),
             "long_only": settings.RISK.get("long_only", False)}
 
