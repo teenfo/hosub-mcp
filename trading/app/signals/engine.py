@@ -1,6 +1,7 @@
 """신호 평가 루프. 1분 주기로 감시 종목의 오늘 분봉을 평가해 승인 큐에 올린다."""
 import asyncio
 import logging
+import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -25,6 +26,32 @@ class SignalEngine:
         self.last_run: str = ""
         self.last_signals: list[dict] = []
         self.guard: dict = {}          # 일일 목표·손실 가드 상태 (대시보드 노출)
+        self.equity_synced = False     # 실계좌 잔고로 자산을 동기화했는가
+        self._equity_synced_at = 0.0
+
+    async def _sync_equity(self) -> None:
+        """포지션 사이징 전에 실계좌 예탁자산으로 self.equity 를 맞춘다.
+        대시보드 호출에 의존하지 않고 엔진이 직접 조회한다(5분 스로틀).
+        동기화 실패 시 equity_synced=False 로 남겨 신규 사이징을 보류시킨다."""
+        now = time.monotonic()
+        if self.equity_synced and now - self._equity_synced_at < 300:
+            return
+        if not settings.KIWOOM_APP_KEY:
+            return
+        try:
+            from ..kiwoom.account import parse_balance
+            from ..kiwoom.client import client
+
+            data = parse_balance(await client.balance())
+        except Exception:  # noqa: BLE001
+            log.warning("잔고 동기화 실패 — 이전 자산값 유지")
+            return
+        if data.get("ok"):
+            eq = data.get("deposit_est") or data.get("total_eval") or 0
+            if eq > 0:
+                self.equity = self.state.equity = float(eq)
+                self.equity_synced = True
+                self._equity_synced_at = now
 
     def day_guard_status(self) -> dict:
         """당일 실현손익 + 목표/한도 대비 신규 진입 중단 여부."""
@@ -83,6 +110,12 @@ class SignalEngine:
     async def run_once(self) -> list[dict]:
         found: list[dict] = []
         day = datetime.now(KST).date().isoformat()
+        # 실계좌 자산 동기화 — 포지션 사이징이 가짜 기본값(1천만원)으로 계산되는 것 방지
+        await self._sync_equity()
+        if not self.equity_synced:
+            self.last_run = datetime.now(KST).isoformat(timespec="seconds")
+            log.warning("실계좌 자산 미확인 — 신규 신호 보류(포지션 사이징 불가)")
+            return found
         # 일일 목표·손실 가드: 목표 도달(이익 확정) 또는 손실 한도 도달 시 신규 진입 중단
         self.guard = self.day_guard_status()
         if self.guard["halted"]:
