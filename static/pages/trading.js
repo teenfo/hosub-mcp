@@ -22,6 +22,19 @@ async function postJSON(path, body) {
 }
 
 const fmt = (n) => Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 0 });
+// 생성 시각 → "N분 전" / 만료 시각 → "만료 M분" (staleness 표시)
+const agoStr = (iso) => {
+  if (!iso) return "";
+  const m = Math.round((Date.now() - new Date(iso)) / 60000);
+  if (m < 1) return "방금";
+  if (m < 60) return m + "분 전";
+  return Math.floor(m / 60) + "시간 " + (m % 60) + "분 전";
+};
+const leftStr = (iso) => {
+  if (!iso) return "";
+  const m = Math.round((new Date(iso) - Date.now()) / 60000);
+  return m <= 0 ? "만료됨" : "만료까지 " + m + "분";
+};
 const sideBadge = (side) =>
   badge(side === "short" ? "숏" : "롱", side === "short" ? "danger" : "success");
 
@@ -949,7 +962,7 @@ export default {
         return;
       }
       const tbl = el("table", { class: "table table-sm align-middle mb-0" });
-      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량</th><th>사유</th><th></th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량</th><th>경과·현재가 괴리</th><th></th></tr>" }));
       const tb = el("tbody");
       for (const o of orders) {
         const isExit = o.kind === "exit";
@@ -969,13 +982,21 @@ export default {
           try { await postJSON(`/api/trading/orders/${o.id}/reject`); } catch (e) {}
           loadOrders();
         };
+        // 신호 진입가 대비 현재가 괴리 (이미 멀어진 신호를 걸러내게)
+        const gap = (o.cur_price && o.entry) ? (o.cur_price - o.entry) / o.entry * 100 : null;
+        const gapEl = gap == null ? null : el("div", { class: Math.abs(gap) >= 0.5 ? "text-danger" : "text-secondary" },
+          `현재 ${fmt(o.cur_price)} (${gap >= 0 ? "+" : ""}${gap.toFixed(2)}%)`);
         tb.appendChild(el("tr", {}, [
           el("td", {}, o.symbol),
           el("td", {}, o.rule),
           el("td", {}, isExit ? badge("청산", "warning") : sideBadge(o.side)),
           el("td", {}, `${fmt(o.entry)} / ${fmt(o.stop)} / ${fmt(o.target)}`),
           el("td", {}, String(o.qty)),
-          el("td", { class: "small text-secondary" }, o.reason || ""),
+          el("td", { class: "small text-secondary text-nowrap" }, [
+            el("div", {}, agoStr(o.created)),
+            el("div", {}, leftStr(o.expires)),
+            gapEl,
+          ]),
           el("td", {}, [approve, rejectB]),
         ]));
       }
@@ -994,14 +1015,18 @@ export default {
         signals.body.appendChild(el("div", { class: "text-secondary small" }, "오늘 신호 없음"));
         return;
       }
+      signals.body.appendChild(el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-info-circle"></i> 엔진이 감지한 신호 <b>로그(감사용)</b> · 실제 발주는 “승인 대기 주문”에서 · 진입가는 <b>감지 시점 기준</b>' })));
       const tbl = el("table", { class: "table table-sm mb-0" });
-      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>사유</th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>사유</th></tr>" }));
       const tb = el("tbody");
       for (const s of sigs.slice(0, 15)) {
         tb.appendChild(el("tr", {}, [
+          el("td", { class: "small text-secondary text-nowrap" }, agoStr(s.ts)),
           el("td", {}, `${s.name} (${s.symbol})`),
           el("td", {}, s.rule),
           el("td", {}, sideBadge(s.side)),
+          el("td", { class: "small" }, s.entry ? `${fmt(s.entry)} / ${fmt(s.stop)} / ${fmt(s.target)}` : "—"),
           el("td", { class: "small text-secondary" }, s.reason),
         ]));
       }
