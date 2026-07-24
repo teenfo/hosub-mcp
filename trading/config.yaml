@@ -67,6 +67,13 @@ execution:
   #   qty:    "911"             # 체결량
   #   ts:     "908"             # 체결시간
 
+# 수집 로스터 — 감시목록에서 빠져도 유예기간 동안 분봉 백필을 이어가 축적
+# 흐름이 끊기지 않게 한다(트레이딩 감시목록과 분리된 '수집 대상' 집합).
+collection:
+  roster_enabled: true
+  roster_retention_days: 30     # 마지막 감시 후 이 기간까지 계속 수집(초과 시 중단)
+  roster_backfill_max: 200      # 이탈 종목 1회 백필 상한(레이트리밋 방어)
+
 # 분봉 축적분 주기 백테스트 리포트 (평일 장 마감 후 1회, 결과 스냅샷 보관)
 backtest:
   report_enabled: true

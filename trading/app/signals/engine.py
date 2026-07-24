@@ -110,6 +110,10 @@ class SignalEngine:
     async def run_once(self) -> list[dict]:
         found: list[dict] = []
         day = datetime.now(KST).date().isoformat()
+        # 수집 로스터 갱신 — 현재 감시목록 종목의 '마지막 감시 시각'을 기록해
+        # 나중에 목록에서 빠져도 유예기간 동안 백필을 이어가게 한다.
+        from ..data import roster
+        roster.touch(settings.WATCHLIST)
         # 실계좌 자산 동기화 — 포지션 사이징이 가짜 기본값(1천만원)으로 계산되는 것 방지
         await self._sync_equity()
         if not self.equity_synced:
@@ -183,4 +187,47 @@ class SignalEngine:
                     await self.run_once()
             except Exception:  # noqa: BLE001
                 log.exception("엔진 루프 오류")
+            await asyncio.sleep(interval_sec)
+
+    async def collect_roster_once(self) -> int:
+        """감시목록에서 이탈했지만 유예기간 내인 종목의 분봉을 백필한다.
+        현재 감시목록은 run_once 가 매 사이클 백필하므로 여기선 '이탈 종목'만
+        처리해 API 호출을 아낀다. 반환: 백필 시도한 이탈 종목 수."""
+        from ..data import roster
+
+        cfg = settings.CONFIG.get("collection", {})
+        days = int(cfg.get("roster_retention_days", 30))
+        roster.touch(settings.WATCHLIST)
+        roster.prune(days)
+        dropped = [c for c in roster.active(days) if c not in settings.WATCHLIST]
+        cap = int(cfg.get("roster_backfill_max", 200))
+        if len(dropped) > cap:
+            log.warning("로스터 이탈 종목 %d개 > 상한 %d — 최신순 %d개만 수집",
+                        len(dropped), cap, cap)
+            dropped = dropped[:cap]
+        for code in dropped:
+            try:
+                await collector.backfill_minutes(code)
+            except Exception:  # noqa: BLE001 - 개별 실패는 다음 주기에 재시도
+                log.warning("로스터 백필 실패 %s", code)
+        return len(dropped)
+
+    async def roster_loop(self, interval_sec: int = 900) -> None:
+        """이탈 종목 수집 루프(느린 주기, 기본 15분). 장중에만 분봉이 갱신되므로
+        장 시간에만 돈다. run_once(60초)와 분리해 레이트리밋을 아낀다."""
+        if not settings.CONFIG.get("collection", {}).get("roster_enabled", True):
+            return
+        while True:
+            try:
+                now = datetime.now(KST)
+                if (
+                    settings.KIWOOM_APP_KEY
+                    and now.weekday() < 5
+                    and "09:00" <= now.strftime("%H:%M") <= "15:40"
+                ):
+                    cnt = await self.collect_roster_once()
+                    if cnt:
+                        log.info("로스터 수집: 감시목록 이탈 %d종목 백필", cnt)
+            except Exception:  # noqa: BLE001
+                log.exception("로스터 루프 오류")
             await asyncio.sleep(interval_sec)
