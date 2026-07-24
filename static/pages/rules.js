@@ -10,6 +10,7 @@ const RULE_LABEL = {
   gap: "갭 플레이",
   momentum: "모멘텀 돌파",
   pullback: "눌림목",
+  gap_fill: "갭필 평균회귀",
   vwap_reclaim: "VWAP 되찾기",
   range_break_retest: "박스 돌파 리테스트",
   bounce_fade: "반등 페이드",
@@ -28,6 +29,9 @@ const PARAM_LABEL = {
   vol_confirm_ratio: "거래량 배수", min_bars: "최소 봉수",
   below_lookback: "VWAP 하회 관찰 봉수", min_below_bars: "하회 체류 최소 봉수",
   vol_ratio: "거래량 배수(0=끔)", range_lookback: "박스 산출 봉수",
+  regimes: "활성 국면(자동 연동)", min_gap_pct: "갭하락 최소 %",
+  confirm_bars: "반전 확인 봉수", min_rr: "최소 손익비", max_range_pct: "범위 상한 %",
+  min_range_pct: "범위 하한 %",
 };
 const sideBadgeOf = (side) =>
   side === "long" ? badge("롱 전용", "success")
@@ -103,7 +107,11 @@ export default {
           el("span", { class: "fw-semibold" }, RULE_LABEL[rule.name] || rule.name),
           el("code", { class: "small" }, rule.name),
           sideBadgeOf(rule.side),
-          rule.enabled ? badge("가동 중", "success") : badge("비활성", "secondary"),
+          rule.enabled
+            ? (rule.regime_blocked
+                ? badge(`국면 대기 (현재 ${rule.cur_regime})`, "warning")
+                : badge("가동 중", "success"))
+            : badge("비활성", "secondary"),
           tgl,
         ]));
         const body = el("div", { class: "card-body small" });
