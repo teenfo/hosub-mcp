@@ -127,3 +127,35 @@ def build_app(
     app.state.ctx = ctx
     app.state.oauth_store = store
     return app
+
+
+def build_dash_app(
+    *,
+    registry: Registry,
+    runner: CommandRunner,
+    audit: AuditLog,
+    dash_password: str,
+    session_secret: str,
+    jobs: JobManager | None = None,
+) -> Starlette:
+    """대시보드 전용 앱(웹 UI·정적 자산·트레이딩 프록시, 세션 인증).
+
+    MCP(:8700)와 별도 프로세스(:8701)로 띄워 대시보드 배포·재시작이
+    MCP 세션을 끊지 않게 한다. 잡 목록은 프로세스별이므로 이 앱의
+    /api/jobs 에는 MCP 쪽에서 시작한 잡이 보이지 않는다.
+    """
+    ctx = build_context(registry, runner, audit, jobs=jobs)
+    app = Starlette(
+        routes=dashboard.build_routes(ctx, dash_password),
+        middleware=[
+            Middleware(
+                SessionMiddleware,
+                secret_key=session_secret,
+                same_site="lax",
+                https_only=False,
+                session_cookie="hosub_dash",
+            )
+        ],
+    )
+    app.state.ctx = ctx
+    return app

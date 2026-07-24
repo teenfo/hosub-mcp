@@ -1,0 +1,22 @@
+# /etc/systemd/system/hosub-dash.service
+# 대시보드 전용 프로세스 — MCP(hosub-mcp.service, :8700)와 분리해
+# 대시보드 배포·재시작이 MCP 세션을 끊지 않게 한다. 설치: docs/SETUP.md 참고.
+[Unit]
+Description=Hosub Dashboard (web UI + trading proxy)
+After=network.target
+
+[Service]
+Type=simple
+User=hosub
+Group=hosub
+WorkingDirectory=/opt/hosub-mcp
+EnvironmentFile=/opt/hosub-mcp/.env
+ExecStart=/opt/hosub-mcp/.venv/bin/uvicorn src.asgi_dash:app --host 127.0.0.1 --port 8701
+Restart=on-failure
+RestartSec=3
+
+# 주의: 대시보드의 서비스 배포/재시작 버튼도 sudo 를 사용하므로
+# NoNewPrivileges=true 를 설정하면 안 된다 (hosub-mcp.service 와 동일).
+
+[Install]
+WantedBy=multi-user.target

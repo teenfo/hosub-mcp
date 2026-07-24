@@ -22,6 +22,15 @@ services:
         - ["trading/.venv/bin/pip", "install", "-q", "-r", "trading/requirements.txt"]
       restart_after: true
       timeout_seconds: 600
+  dash:
+    unit: hosub-dash.service
+    description: "hosub 대시보드 (웹 UI·트레이딩 프록시, 127.0.0.1:8701 — MCP 와 분리)"
+    deploy:
+      workdir: /opt/hosub-mcp
+      steps:
+        - ["git", "pull", "--ff-only"]
+      restart_after: true
+      timeout_seconds: 300
   # 예시) 서비스를 올린 뒤 아래 형태로 추가:
   # bcl-portal:
   #   unit: bcl-portal.service
