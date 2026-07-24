@@ -237,47 +237,51 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
             (order["qty"], order["exec_qty"], order_id),
         )
         _audit(conn, order_id, "approved", f"qty={order['exec_qty']}")
+    # 발주 — 매수증거금 부족이면 키움이 알려준 '매수가능 수량'으로 자동 재발주(최대 3회).
+    # 키움은 HTTP 200 으로 거부 응답을 주기도 한다(증거금 부족 return_code 20).
+    # return_code 0 만 성공으로 보고, 아니면 유령 포지션 방지를 위해 거부로 처리한다.
+    auto_adjusted = 0
     try:
-        result = await client.order(
-            order["exec_side"], order["exec_symbol"], order["exec_qty"], price=0
-        )
-        # 키움이 HTTP 200 으로 거부 응답을 주기도 한다(예: 증거금 부족 return_code 20).
-        # return_code 0 만 성공으로 보고, 아니면 거부로 처리한다(유령 포지션 방지).
-        rc = result.get("return_code") if isinstance(result, dict) else 0
-        if rc in (0, "0", None):
-            status = "sent"
-        elif _margin_shortfall(result) is not None:
-            # 매수증거금 부족 → 버리지 않고 대기열에 유지(수량 줄여 재시도 가능)
-            status = "pending"
+        for _ in range(3):
+            result = await client.order(
+                order["exec_side"], order["exec_symbol"], order["exec_qty"], price=0
+            )
+            rc = result.get("return_code") if isinstance(result, dict) else 0
+            if rc in (0, "0", None):
+                status = "sent"
+                break
+            buyable = _margin_shortfall(result)
+            if (buyable is not None and buyable >= 1
+                    and buyable < int(order["exec_qty"])
+                    and order.get("kind") != "exit"):
+                # 증거금 부족 → 매수가능 수량으로 줄여 즉시 자동 재발주
+                order["qty"] = order["exec_qty"] = buyable
+                auto_adjusted = buyable
+                continue
+            # 재시도 불가: 증거금 부족(1주도 불가 등)은 대기열 유지, 그 외는 거부
+            status = "pending" if buyable is not None else "rejected"
+            break
         else:
-            status = "rejected"
+            status = "pending"  # 재시도 소진 — 대기열 유지
         detail = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # noqa: BLE001 - 발주 실패는 기록하고 사용자에게 보여준다
         status, detail = "error", str(e)
         result = {"error": str(e)}
     with _conn() as conn:
         if status == "pending":
-            # 증거금 부족 재시도용: 만료시간을 새 TTL 로 갱신하고, 키움이 알려준
-            # '매수가능 수량'으로 발주 수량을 자동 조정한다(진입 주문에 한함).
+            # 증거금 부족 재시도용: 만료시간을 새 TTL 로 갱신(바로 사라지지 않게).
             ttl_min = settings.RISK.get("signal_ttl_min", 10)
             new_expires = (datetime.now(UTC) + timedelta(minutes=ttl_min)).isoformat()
-            buyable = _margin_shortfall(result) or 0
-            if buyable >= 1 and order.get("kind") != "exit":
-                order["qty"] = order["exec_qty"] = buyable
-                conn.execute(
-                    "UPDATE orders SET status='pending', result=?, expires=?, "
-                    "qty=?, exec_qty=? WHERE id=?",
-                    (detail, new_expires, buyable, buyable, order_id),
-                )
-            else:
-                conn.execute(
-                    "UPDATE orders SET status='pending', result=?, expires=? WHERE id=?",
-                    (detail, new_expires, order_id),
-                )
+            conn.execute(
+                "UPDATE orders SET status='pending', result=?, expires=?, "
+                "qty=?, exec_qty=? WHERE id=?",
+                (detail, new_expires, order["qty"], order["exec_qty"], order_id),
+            )
             _audit(conn, order_id, "margin_reject_retry", detail)
         else:
             conn.execute(
-                "UPDATE orders SET status=?, result=? WHERE id=?", (status, detail, order_id)
+                "UPDATE orders SET status=?, result=?, qty=?, exec_qty=? WHERE id=?",
+                (status, detail, order["qty"], order["exec_qty"], order_id),
             )
             _audit(conn, order_id, status, detail)
     if status == "sent":
@@ -302,17 +306,14 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
                 pass
     # 사용자에게 보여줄 한 줄 메시지 (성공=주문번호 / 증거금부족=재시도 안내 / 실패=키움 사유)
     if isinstance(result, dict) and status == "sent":
-        message = "발주 접수" + (f" · 주문번호 {result['ord_no']}" if result.get("ord_no") else "")
+        base = "발주 접수" + (f" · 주문번호 {result['ord_no']}" if result.get("ord_no") else "")
+        message = base + (f" · 증거금 맞춰 {auto_adjusted}주로 자동 조정 발주" if auto_adjusted else "")
     elif status == "pending":
-        buyable = _margin_shortfall(result)
-        if buyable:
-            message = (f"매수증거금 부족 — 매수가능 {buyable}주로 자동 조정했습니다. "
-                       "다시 승인하세요")
-        else:
-            message = "매수증거금 부족 — 대기열 유지, 수량을 줄여 다시 승인하세요"
+        message = "매수증거금 부족 — 현재 자산으로 1주도 매수 불가. 대기열 유지"
     elif isinstance(result, dict):
         message = result.get("return_msg") or result.get("error") or "발주 거부"
     else:
         message = status
     return {"ok": status == "sent", "status": status, "result": result,
-            "message": message, "retryable": status == "pending"}
+            "message": message, "retryable": status == "pending",
+            "auto_adjusted": auto_adjusted or None}

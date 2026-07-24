@@ -1013,7 +1013,8 @@ export default {
     };
 
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadPerformance(), loadRisk()]);
-    ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); loadWatch(); }, 10_000));
+    ctx.addTimer(setInterval(() => { loadWatch(); loadSignals(); }, 2_000));   // 현재가 실시간(2초)
+    ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadScanner(); }, 10_000));
     ctx.addTimer(setInterval(() => { loadDiscovery(); loadPerformance(); loadRisk(); }, 30_000));
     ctx.addTimer(setInterval(() => { loadReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
