@@ -307,6 +307,7 @@ export default {
     // --- 일일 목표·가드 (목표값 설정 가능) ---
     const gTarget = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
     const gLoss = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
+    const gRisk = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", max: "50", style: "max-width:88px" });
     const gSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "저장");
     const gStatus = el("div", { class: "mt-2 small" });
     const saveRisk = async () => {
@@ -315,6 +316,7 @@ export default {
         await postJSON("/api/trading/risk", {
           daily_target_pct: parseFloat(gTarget.value),
           daily_loss_limit_pct: parseFloat(gLoss.value),
+          risk_per_trade_pct: parseFloat(gRisk.value),
         });
         _memo["risk"] = undefined;
         await loadRisk();
@@ -325,9 +327,11 @@ export default {
     const fld = (lbl, input) => el("div", {}, [el("label", { class: "form-label small text-secondary mb-0" }, lbl), input]);
     guardC.body.append(
       el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-shield-check"></i> 당일 실현손익이 <b>목표</b> 도달 시 이익 확정, <b>손실한도</b> 도달 시 손실 차단 — 그날 신규 진입을 멈춥니다. (실거래 성과 로그 기준)' })),
+        el("span", { html: '<i class="bi bi-shield-check"></i> <b>거래당 리스크</b> = 1회 손절 시 계좌 대비 최대 손실 %(주문 수량을 정함). <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춤. (실거래 성과 로그 기준)' })),
       el("div", { class: "d-flex gap-3 flex-wrap align-items-end" },
-        [fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss), el("div", {}, gSave)]),
+        [fld("거래당 리스크 %", gRisk), fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss), el("div", {}, gSave)]),
+      el("div", { class: "small text-secondary mt-1" },
+        "팁: 거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 소액 계좌는 절대금액이 작아 대부분 1~2주로 잡힙니다."),
       gStatus,
     );
     const loadRisk = async () => {
@@ -336,6 +340,7 @@ export default {
       if (!changed("risk", r)) return;
       if (document.activeElement !== gTarget) gTarget.value = r.daily_target_pct;
       if (document.activeElement !== gLoss) gLoss.value = r.daily_loss_limit_pct;
+      if (document.activeElement !== gRisk) gRisk.value = r.risk_per_trade_pct;
       gStatus.innerHTML = "";
       const cls = r.pct >= 0 ? "text-danger" : "text-primary";
       gStatus.append(el("div", {}, [
