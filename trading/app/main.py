@@ -210,10 +210,8 @@ async def api_orders(status: str | None = None, _=Depends(require_auth)):
 
 @app.post("/api/orders/{order_id}/approve")
 async def api_approve(order_id: str, _=Depends(require_auth)):
-    result = await orders.approve_and_send(order_id)
-    if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
-    return result
+    # 항상 200 으로 결과를 돌려준다 — 발주 성공/거부(키움 사유) 모두 화면에 표시하기 위해.
+    return await orders.approve_and_send(order_id)
 
 
 @app.post("/api/orders/{order_id}/reject")
