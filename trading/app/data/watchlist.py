@@ -122,6 +122,27 @@ def replace_auto(picks: list[dict]) -> None:
     log.info("발굴 자동 편입: %s", codes)
 
 
+def replace_gainers(picks: list[dict]) -> None:
+    """KOSPI 급등주 자동편입 — source='gainer' 항목을 새 목록으로 교체한다.
+    seed/manual/auto 로 이미 감시 중인 종목은 건드리지 않는다(중복 편입 방지).
+    각 pick 의 collect_only 로 매매/수집전용 tier 를 지정(고가주는 수집전용)."""
+    now = datetime.now(UTC).isoformat()
+    with _conn() as conn:
+        conn.execute("DELETE FROM watchlist WHERE source='gainer'")   # 전량 교체
+        existing = {r["code"] for r in conn.execute("SELECT code FROM watchlist")}
+        for p in picks:
+            if p["code"] in existing:
+                continue   # 이미 다른 소스로 감시 중 → 유지
+            conn.execute(
+                "INSERT INTO watchlist (code, name, source, added, collect_only) "
+                "VALUES (?,?,?,?,?)",
+                (p["code"], p.get("name") or p["code"], "gainer", now,
+                 1 if p.get("collect_only") else 0),
+            )
+        _rebuild_runtime(conn)
+    log.info("급등주 자동편입: %d종목", len(picks))
+
+
 async def notify() -> None:
     if notifier is not None:
         try:

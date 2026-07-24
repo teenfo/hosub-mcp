@@ -718,6 +718,24 @@ export default {
         };
         return add;
       };
+      // --- KOSPI 급등률 상위 (자동 감시편입) ---
+      if ((sc.gainers || []).length) {
+        scannerC.body.appendChild(el("div", { class: "small fw-bold text-danger" }, "🚀 KOSPI 급등률 상위 — 저가주는 매매, 고가주는 수집전용으로 자동 편입"));
+        const gtbl = el("table", { class: "table table-sm align-middle mb-2" });
+        gtbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>현재가</th><th>급등률</th><th>편입</th><th></th></tr>" }));
+        const gtb = el("tbody");
+        for (const r of sc.gainers) {
+          gtb.appendChild(el("tr", {}, [
+            el("td", {}, `${r.name} (${r.code})`),
+            el("td", {}, fmt(r.price)),
+            el("td", { class: "text-danger fw-semibold" }, `+${r.change_pct.toFixed(1)}%`),
+            el("td", {}, r.collect_only ? badge("수집전용", "secondary") : badge("매매", "success")),
+            el("td", {}, watch[r.code] ? badge("감시중", "success") : watchBtn(r)),
+          ]));
+        }
+        gtbl.appendChild(gtb);
+        scannerC.body.appendChild(el("div", { class: "table-responsive" }, gtbl));
+      }
       // --- 급등 조짐 (거래량 선행) ---
       if ((sc.presurge || []).length) {
         scannerC.body.appendChild(el("div", { class: "small fw-bold text-warning" }, "⚡ 급등 조짐 — 거래량 급증, 가격은 아직"));

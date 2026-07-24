@@ -99,10 +99,43 @@ def filter_candidates(items: list[dict], cfg: dict) -> list[dict]:
     return picked[:top_n]
 
 
+# ETF·ETN·리츠·스팩 등 비보통주 제외(급등 자동편입 시 잡ETF 유입 방지)
+_EXCL_KW = ("KODEX", "TIGER", "KOSEF", "ARIRANG", "HANARO", "PLUS", "RISE", "ACE",
+            "SOL", "KBSTAR", "TIMEFOLIO", "ETN", "레버리지", "인버스", "선물",
+            "리츠", "스팩", "채권", "국채", "커버드콜", "배당", "TR")
+
+
+def _is_excluded(name: str) -> bool:
+    return any(k in (name or "") for k in _EXCL_KW)
+
+
+def filter_gainers(items: list[dict], cfg: dict) -> list[dict]:
+    """급등률 상위에서 유동성·저가·비ETF 필터 후 상위 N. collect_only tier 부여
+    (매매가능 저가주 = trade_max_price 이하 → 매매, 그 외 → 수집전용)."""
+    min_price = cfg.get("min_price", 1_000)
+    min_val = cfg.get("min_trade_value", 5_000)
+    tmax = cfg.get("trade_max_price", 30_000)
+    top_n = cfg.get("top_n", 15)
+    picked = [
+        it for it in items
+        if it["change_pct"] > 0
+        and it["price"] >= min_price
+        and it["trade_value"] >= min_val
+        and not _is_excluded(it["name"])
+        and it["code"] not in settings.WATCHLIST
+    ]
+    picked.sort(key=lambda x: x["change_pct"], reverse=True)
+    picked = picked[:top_n]
+    for p in picked:
+        p["collect_only"] = p["price"] > tmax   # 고가주는 수집전용
+    return picked
+
+
 class Scanner:
     def __init__(self) -> None:
         self.results: list[dict] = []       # 이미 급등 중 (편승 후보)
         self.presurge: list[dict] = []      # 급등 조짐 (거래량 선행)
+        self.gainers: list[dict] = []       # KOSPI 급등률 상위 (자동편입 대상)
         self.last_scan: str = ""
 
     async def scan_once(self) -> list[dict]:
@@ -116,8 +149,27 @@ class Scanner:
             self.presurge = filter_presurge(parse_surge(surge_raw), cfg)
         except Exception as e:  # noqa: BLE001 - 조짐 스캔 실패는 비치명적
             log.warning("거래량급증 스캔 실패: %s", e)
+        try:
+            await self.scan_gainers()
+        except Exception as e:  # noqa: BLE001 - 급등률 스캔 실패는 비치명적
+            log.warning("급등률 상위 스캔 실패: %s", e)
         self.last_scan = datetime.now(KST).isoformat(timespec="seconds")
         return self.results
+
+    async def scan_gainers(self) -> list[dict]:
+        """KOSPI 등락률 상위(ka10027) 조회 → 필터 → (옵션) 감시목록 자동편입."""
+        from ..data import watchlist
+        from ..kiwoom.client import client
+
+        cfg = settings.CONFIG.get("gainers", {})
+        if not cfg.get("enabled", True):
+            return []
+        raw = await client.change_rate_rank(cfg.get("market", "001"))
+        self.gainers = filter_gainers(parse_rank(raw), cfg)
+        if cfg.get("auto_watch", True) and self.gainers:
+            watchlist.replace_gainers(self.gainers)
+            await watchlist.notify()
+        return self.gainers
 
     async def loop(self, interval_sec: int = 60) -> None:
         while True:
