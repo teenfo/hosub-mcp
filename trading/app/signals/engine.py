@@ -132,27 +132,36 @@ class SignalEngine:
                 key = (day, symbol, sig.rule)
                 if key in self._fired:
                     continue
-                ok, why = self.state.can_open()
-                if not ok:
-                    log.info("신호 차단 %s %s: %s", symbol, sig.rule, why)
-                    continue
                 sig.symbol = symbol
+                # 감시목록 신호는 '금액 제한 없이' 산출한다 — 계좌가 못 사는 종목
+                # (예: 고가주)도 최근 신호에 기록해 감사·검증에 쓴다.
                 qty = risk.position_size(
                     self.equity, settings.RISK.get("risk_per_trade_pct", 0.5),
                     sig.entry, sig.stop,
                 )
-                if qty <= 0:
-                    continue
-                order_id = orders.propose(sig, qty)
+                rec = {"symbol": symbol, "name": name, "rule": sig.rule,
+                       "side": sig.side, "reason": sig.reason,
+                       "entry": sig.entry, "stop": sig.stop,
+                       "target": sig.target, "qty": qty, "actionable": False,
+                       "ts": datetime.now(KST).isoformat(timespec="seconds")}
+                # 승인대기 주문은 '계좌 잔고를 참고'해 실제 매수 가능할 때만 만든다.
+                # qty 는 position_size 가 floor(예탁자산/진입가)로 이미 잔고를 반영한다.
+                if qty < 1:
+                    rec["note"] = (f"잔고 부족 — 1주 ≈ {int(sig.entry):,}원 / "
+                                   f"자산 {int(self.equity):,}원 (승인대기 미생성)")
+                else:
+                    ok, why = self.state.can_open()
+                    if ok:
+                        rec["order_id"] = orders.propose(sig, qty)
+                        rec["actionable"] = True
+                    else:
+                        rec["note"] = f"진입 보류 — {why}"
+                        log.info("신호 차단 %s %s: %s", symbol, sig.rule, why)
                 self._fired.add(key)
-                found.append(
-                    {"order_id": order_id, "symbol": symbol, "name": name,
-                     "rule": sig.rule, "side": sig.side, "reason": sig.reason,
-                     "entry": sig.entry, "stop": sig.stop, "target": sig.target,
-                     "qty": qty,
-                     "ts": datetime.now(KST).isoformat(timespec="seconds")}
-                )
-                log.info("신호 등록 %s(%s) %s %s", name, symbol, sig.rule, sig.side)
+                found.append(rec)
+                log.info("신호 등록 %s(%s) %s %s qty=%d%s", name, symbol,
+                         sig.rule, sig.side, qty,
+                         "" if rec["actionable"] else " · 승인대기 미생성")
         self.last_run = datetime.now(KST).isoformat(timespec="seconds")
         if found:
             self.last_signals = (found + self.last_signals)[:50]

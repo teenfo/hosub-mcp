@@ -1087,18 +1087,23 @@ export default {
         return;
       }
       signals.body.appendChild(el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-info-circle"></i> 엔진이 감지한 신호 <b>로그(감사용)</b> · 실제 발주는 “승인 대기 주문”에서 · 진입가는 <b>감지 시점 기준</b>' })));
+        el("span", { html: '<i class="bi bi-info-circle"></i> 감시 신호는 <b>금액 제한 없이</b> 산출(감사용) · 실제 발주는 잔고를 반영한 “승인 대기 주문”에서 · 진입가는 <b>감지 시점 기준</b>' })));
       const tbl = el("table", { class: "table table-sm mb-0" });
-      tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>사유</th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량·상태</th><th>사유</th></tr>" }));
       const tb = el("tbody");
       for (const s of sigs.slice(0, 15)) {
+        const statusEl = s.actionable
+          ? badge(`승인대기 ${s.qty}주`, "success")
+          : el("span", { class: "small text-secondary", title: s.note || "" },
+              s.qty >= 1 ? badge("보류", "secondary") : badge("잔고 부족", "warning"));
         tb.appendChild(el("tr", {}, [
           el("td", { class: "small text-secondary text-nowrap" }, agoStr(s.ts)),
           el("td", {}, `${s.name} (${s.symbol})`),
           el("td", {}, s.rule),
           el("td", {}, sideBadge(s.side)),
           el("td", { class: "small" }, s.entry ? `${fmt(s.entry)} / ${fmt(s.stop)} / ${fmt(s.target)}` : "—"),
-          el("td", { class: "small text-secondary" }, s.reason),
+          el("td", { class: "small text-nowrap" }, statusEl),
+          el("td", { class: "small text-secondary" }, s.note || s.reason),
         ]));
       }
       tbl.appendChild(tb);
