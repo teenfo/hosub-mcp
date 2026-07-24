@@ -33,6 +33,7 @@ const PARAM_LABEL = {
   regimes: "활성 국면(자동 연동)", min_gap_pct: "갭하락 최소 %",
   confirm_bars: "반전 확인 봉수", min_rr: "최소 손익비", max_range_pct: "범위 상한 %",
   min_range_pct: "범위 하한 %", rsi_period: "RSI 기간", oversold: "과매도 기준",
+  entry_before: "진입 마감시각(시간대 필터)",
 };
 const sideBadgeOf = (side) =>
   side === "long" ? badge("롱 전용", "success")

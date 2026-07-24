@@ -83,7 +83,8 @@ class BacktestReporter:
                 df = store.load_bars(symbol, "1m", limit=200000)
                 if df.empty:
                     continue
-                st = runner.run(symbol, df).stats()
+                sides = ("long",) if settings.RISK.get("long_only") else None
+                st = runner.run(symbol, df, sides=sides).stats()
                 rows.append({"symbol": symbol, "days": days, **st})
             with _conn() as conn:
                 conn.executemany(

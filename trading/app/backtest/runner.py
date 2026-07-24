@@ -96,8 +96,10 @@ class Result:
         }
 
 
-def run(symbol: str, df: pd.DataFrame, rules_cfg: dict | None = None) -> Result:
-    """df: 여러 날짜의 1분봉 전체. 하루 1규칙 1회 진입, 동시 1포지션."""
+def run(symbol: str, df: pd.DataFrame, rules_cfg: dict | None = None,
+        sides: tuple[str, ...] | None = None) -> Result:
+    """df: 여러 날짜의 1분봉 전체. 하루 1규칙 1회 진입, 동시 1포지션.
+    sides: 체결할 방향 제한(예: ("long",) — 롱 전용 실전과 정합). None=제한 없음."""
     rules_cfg = rules_cfg or settings.RULES
     slip = settings.COSTS.get("slippage_bp", 5) / 10000
     result = Result()
@@ -129,6 +131,8 @@ def run(symbol: str, df: pd.DataFrame, rules_cfg: dict | None = None) -> Result:
             for sig in rules.evaluate_all(window, rules_cfg, prev_close):
                 if sig.rule in fired or i + 1 >= len(bars):
                     continue
+                if sides and sig.side not in sides:
+                    continue   # 실전에서 집행 불가한 방향(예: 롱 전용의 숏)은 미체결
                 fired.add(sig.rule)
                 nxt = bars[i + 1]
                 fill = nxt.open * (1 + slip if sig.side == "long" else 1 - slip)
