@@ -1,7 +1,7 @@
 # 트레이딩 시스템 아키텍처 & 기능 인벤토리
 
 > 반자동 한국주식 트레이딩 시스템(키움 REST, 실계좌)의 단일 정리 문서.
-> 코드 위치: `trading/`(백엔드, systemd `trading.service`, :8600) + `src/dashboard.py`(프록시) + `static/pages/trading.js`·`backtest.js`(UI).
+> 코드 위치: `trading/`(백엔드, systemd `trading.service`, :8600) + `src/dashboard.py`(프록시) + UI 3페이지(`static/pages/trading.js`=매매 데스크 · `discover.js`=발굴·감시 · `backtest.js`=성과·백테스트, 공용 헬퍼 `tradelib.js`).
 > 스키마·규칙·경로가 바뀌면 이 문서와 Notion "야간 종목 분석 리포트 작성 룰"을 함께 갱신한다.
 
 ## 전체 데이터 흐름
