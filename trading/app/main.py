@@ -416,7 +416,7 @@ async def api_position_close(pos_id: str, _=Depends(require_auth)):
 @app.get("/api/scanner")
 async def api_scanner(_=Depends(require_auth)):
     return {"last_scan": scanner.last_scan, "results": scanner.results,
-            "presurge": scanner.presurge,
+            "presurge": scanner.presurge, "gainers": scanner.gainers,
             "config": settings.CONFIG.get("scanner", {})}
 
 

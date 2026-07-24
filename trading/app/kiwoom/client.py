@@ -22,6 +22,7 @@ TR_ORDER_SELL = "kt10001"     # 주식 매도주문
 TR_ACCOUNT_BALANCE = "kt00018"  # 계좌평가잔고
 TR_TRADE_VALUE_RANK = "ka10032"  # 거래대금상위 (flu_rt/trde_prica 포함)
 TR_VOLUME_SURGE = "ka10023"      # 거래량급증 (sdnin_rt 급증률 포함)
+TR_CHANGE_RATE_RANK = "ka10027"  # 전일대비등락률상위 (급등률 상위)
 TR_STOCK_LIST = "ka10099"        # 종목정보 리스트 (요청 필드 실호출 검증 필요)
 
 PATH_CHART = "/api/dostk/chart"
@@ -119,6 +120,20 @@ class KiwoomClient:
                 "mrkt_tp": market, "sort_tp": sort, "tm_tp": "1", "tm": "",
                 "trde_qty_tp": "50", "stk_cnd": "20",  # 5만주↑, ETF/ETN/스팩 제외
                 "pric_tp": "0", "stex_tp": "1",
+            },
+        )
+
+    async def change_rate_rank(self, market: str = "001", sort: str = "1") -> dict:
+        """전일대비 등락률 상위(ka10027) = 급등률 상위. market: 001 코스피 / 101 코스닥.
+        sort: 1 상승률. 요청 필드는 계정/환경에 따라 다를 수 있어 라이브 호출로
+        검증 후 조정할 것(응답 파싱은 parse_rank 가 stk_cd/flu_rt/cur_prc 로 견고)."""
+        return await self._call(
+            PATH_RANK,
+            TR_CHANGE_RATE_RANK,
+            {
+                "mrkt_tp": market, "sort_tp": sort, "trde_qty_cnd": "0000",
+                "stk_cnd": "0", "crd_cnd": "0", "updown_incls": "1",
+                "pric_cnd": "0", "trde_prica_cnd": "0", "stex_tp": "1",
             },
         )
 

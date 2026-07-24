@@ -26,6 +26,16 @@ scanner:
   change_pct_min: -1.0         # 등락률 범위 — 이미 급등한 종목은 위 스캐너 몫
   change_pct_max: 3.0
 
+# KOSPI 급등률 상위(ka10027) 실시간 조회 + 저가주 자동 감시편입
+gainers:
+  enabled: true
+  market: "001"           # 001 코스피 / 101 코스닥
+  min_price: 1000         # 저가주 하한(동전주 제외)
+  min_trade_value: 5000   # 유동성 필터 (trde_prica 단위)
+  trade_max_price: 30000  # 이하=매매 tier / 초과=수집전용 tier
+  top_n: 15               # 편입 상위 종목 수
+  auto_watch: true        # 급등주를 감시목록에 자동 편입(source=gainer, 다음 스캔때 교체)
+
 # 야간 발굴: 장 마감 후 전종목 일봉 수집·스크리닝 (평일 17:30 KST)
 discovery:
   enabled: true
