@@ -22,14 +22,14 @@ import pandas as pd
 
 from . import indicators as ind
 
-# 규칙 레지스트리: 이름 → (함수, 전일종가 필요 여부). 등록 순서 = 평가 순서.
-REGISTRY: dict[str, tuple[Callable, bool]] = {}
+# 규칙 레지스트리: 이름 → (함수, 전일종가 필요 여부, 방향). 등록 순서 = 평가 순서.
+REGISTRY: dict[str, tuple[Callable, bool, str]] = {}
 
 
-def register(name: str, needs_prev_close: bool = False):
-    """규칙 함수를 레지스트리에 등록하는 데코레이터."""
+def register(name: str, needs_prev_close: bool = False, side: str = "both"):
+    """규칙 함수를 레지스트리에 등록하는 데코레이터. side: long/short/both."""
     def deco(fn):
-        REGISTRY[name] = (fn, needs_prev_close)
+        REGISTRY[name] = (fn, needs_prev_close, side)
         return fn
     return deco
 
@@ -100,7 +100,7 @@ def _downtrend_ok(cfg: dict) -> bool:
     return bool(cfg.get("_daily_downtrend", True))
 
 
-@register("orb")
+@register("orb", side="both")
 def orb(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """시초가 범위 돌파. 범위(09:00~09:15) 형성 후 상/하단 이탈 시 진입.
     손절은 범위 반대쪽 끝(보수적), 목표는 target_r × 손절 거리."""
@@ -124,7 +124,7 @@ def orb(df: pd.DataFrame, cfg: dict) -> Signal | None:
     return None
 
 
-@register("gap", needs_prev_close=True)
+@register("gap", needs_prev_close=True, side="both")
 def gap(df: pd.DataFrame, cfg: dict, prev_close: float | None) -> Signal | None:
     """갭 매매. 시가 갭 ≥ min_gap_pct 인 날, 첫 1시간(range_wait_until까지) 범위를
     기다린 뒤 범위 이탈 방향으로 진입. 손절은 범위 반대쪽 끝."""
@@ -154,7 +154,7 @@ def gap(df: pd.DataFrame, cfg: dict, prev_close: float | None) -> Signal | None:
     return None
 
 
-@register("momentum")
+@register("momentum", side="long")
 def momentum_breakout(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """장중 모멘텀 돌파(롱). 상승 강세(현재가 > VWAP)에서 직전 N봉 고가를 종가가
     돌파하고 마지막 봉이 양봉일 때 진입. 손절은 최근 stop_lookback 봉 저점 - ATR
@@ -179,7 +179,7 @@ def momentum_breakout(df: pd.DataFrame, cfg: dict) -> Signal | None:
                   f"{look}봉 고가 {prior_high:,.0f} 돌파", ts=df.index[-1])
 
 
-@register("pullback")
+@register("pullback", side="long")
 def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """눌림목 롱. 상승 추세(현재가 > 초반 평균 & VWAP 근처/위)에서 20봉 이평으로
     되돌린 뒤(near_pct 이내) 반등 양봉이 나오면 진입. 손절은 눌림 저점 - ATR 여유."""
@@ -205,7 +205,7 @@ def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
                   "상승추세 20MA 눌림 반등", ts=df.index[-1])
 
 
-@register("bounce_fade")
+@register("bounce_fade", side="short")
 def bounce_fade(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """반등 페이드. 조건:
     1) 하락 구조: 현재가가 세션 VWAP 아래 + 세션 저점이 초반 저점보다 낮음(저점 갱신)
@@ -256,7 +256,7 @@ def bounce_fade(df: pd.DataFrame, cfg: dict) -> Signal | None:
                   f"VWAP/20MA 반등 소진 (RSI {r:.0f})", ts=df.index[-1])
 
 
-@register("breakdown_retest")
+@register("breakdown_retest", side="short")
 def breakdown_retest(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """지지 붕괴 후 리테스트 실패. 조건:
     1) 지지선: 최근 support_lookback 봉(최근 10봉 제외)의 최저가
@@ -294,7 +294,7 @@ def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
     out: list[Signal] = []
     if df.empty:
         return out
-    for name, (fn, needs_prev) in REGISTRY.items():
+    for name, (fn, needs_prev, _side) in REGISTRY.items():
         cfg = rules_cfg.get(name, {})
         if not cfg.get("enabled"):
             continue
