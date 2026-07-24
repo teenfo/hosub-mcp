@@ -92,7 +92,7 @@ for (const p of PAGES) {
   if (p.group && p.group !== lastGroup) {
     nav.appendChild(
       el("li", { class: "nav-item mt-2" },
-        el("span", { class: "nav-group-header d-block small text-secondary text-uppercase px-3 mb-1",
+        el("span", { class: "nav-group-header",
           html: `<i class="bi bi-collection"></i> ${p.group}` }))
     );
   }
