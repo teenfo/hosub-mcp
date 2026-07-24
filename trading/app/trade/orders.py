@@ -214,7 +214,14 @@ async def approve_and_send(order_id: str) -> dict:
         result = await client.order(
             order["exec_side"], order["exec_symbol"], order["exec_qty"], price=0
         )
-        status, detail = "sent", json.dumps(result, ensure_ascii=False)[:2000]
+        # 키움이 HTTP 200 으로 거부 응답을 주기도 한다(예: 증거금 부족 return_code 20).
+        # return_code 0 만 성공으로 보고, 아니면 거부로 처리한다(유령 포지션 방지).
+        rc = result.get("return_code") if isinstance(result, dict) else 0
+        if rc in (0, "0", None):
+            status = "sent"
+        else:
+            status = "rejected"
+        detail = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # noqa: BLE001 - 발주 실패는 기록하고 사용자에게 보여준다
         status, detail = "error", str(e)
         result = {"error": str(e)}
@@ -243,4 +250,12 @@ async def approve_and_send(order_id: str) -> dict:
                 ledger.open_position(order, ord_no=ord_no or None)
             except Exception:  # noqa: BLE001 - 로그 실패가 발주를 되돌리지 않는다
                 pass
-    return {"ok": status == "sent", "status": status, "result": result}
+    # 사용자에게 보여줄 한 줄 메시지 (성공=주문번호 / 실패=키움 사유)
+    if isinstance(result, dict) and status == "sent":
+        message = "발주 접수" + (f" · 주문번호 {result['ord_no']}" if result.get("ord_no") else "")
+    elif isinstance(result, dict):
+        message = result.get("return_msg") or result.get("error") or "발주 거부"
+    else:
+        message = status
+    return {"ok": status == "sent", "status": status, "result": result,
+            "message": message}

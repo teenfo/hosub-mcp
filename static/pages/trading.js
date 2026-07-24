@@ -954,17 +954,30 @@ export default {
       discoveryC.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
-    const loadOrders = async () => {
-      let orders;
+    const ORDER_STATUS = {
+      pending: ["대기", "secondary"], approved: ["승인", "info"],
+      sent: ["발주됨", "success"], rejected: ["거부됨", "danger"],
+      error: ["오류", "danger"], expired: ["만료", "secondary"],
+    };
+    const orderMsg = (o) => {
       try {
-        orders = await fetchJSON("/api/trading/orders?status=pending");
+        const r = JSON.parse(o.result || "{}");
+        if (o.status === "sent") return r.ord_no ? "주문번호 " + r.ord_no : "발주 접수";
+        return r.return_msg || r.error || "";
+      } catch (e) { return ""; }
+    };
+    const loadOrders = async () => {
+      let all;
+      try {
+        all = await fetchJSON("/api/trading/orders");
       } catch (e) { return; }
-      if (!changed("orders", orders)) return;
+      if (!changed("orders", all)) return;
+      const orders = all.filter((o) => o.status === "pending");
+      const history = all.filter((o) => o.status !== "pending").slice(0, 8);
       pending.body.innerHTML = "";
       if (!orders.length) {
-        pending.body.appendChild(el("div", { class: "text-secondary small" }, "대기 중인 주문 없음"));
-        return;
-      }
+        pending.body.appendChild(el("div", { class: "text-secondary small mb-2" }, "대기 중인 주문 없음"));
+      } else {
       const tbl = el("table", { class: "table table-sm align-middle mb-0" });
       tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량</th><th>경과·현재가 괴리</th><th></th></tr>" }));
       const tb = el("tbody");
@@ -978,9 +991,11 @@ export default {
             : `[${o.symbol}] ${o.rule} ${o.side} ${o.qty}주 — 실제로 발주할까요?`;
           if (!confirm(msg)) return;
           approve.disabled = true;
-          try { await postJSON(`/api/trading/orders/${o.id}/approve`); }
-          catch (e) { alert("발주 실패: " + e.message); }
-          loadOrders();
+          try {
+            const r = await postJSON(`/api/trading/orders/${o.id}/approve`);
+            alert(r.ok ? ("✅ 발주 접수됨\n" + (r.message || "")) : ("❌ 발주 거부/실패\n" + (r.message || r.error || "")));
+          } catch (e) { alert("발주 오류: " + e.message); }
+          loadOrders(); loadPerformance();
         };
         rejectB.onclick = async () => {
           try { await postJSON(`/api/trading/orders/${o.id}/reject`); } catch (e) {}
@@ -1006,6 +1021,32 @@ export default {
       }
       tbl.appendChild(tb);
       pending.body.appendChild(el("div", { class: "table-responsive" }, tbl));
+      }
+
+      // 최근 주문 결과 — 승인 후 실제 발주/거부 이력 (사용자가 결과를 확인)
+      const histWrap = el("div", { class: "mt-3" });
+      histWrap.appendChild(el("div", { class: "small text-secondary mb-1" }, "최근 주문 결과"));
+      if (!history.length) {
+        histWrap.appendChild(el("div", { class: "text-secondary small" }, "아직 발주 이력 없음"));
+      } else {
+        const htbl = el("table", { class: "table table-sm align-middle mb-0" });
+        htbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>방향</th><th>수량</th><th>상태</th><th>결과</th></tr>" }));
+        const htb = el("tbody");
+        for (const o of history) {
+          const [label, color] = ORDER_STATUS[o.status] || [o.status, "secondary"];
+          htb.appendChild(el("tr", {}, [
+            el("td", { class: "small text-nowrap" }, agoStr(o.created)),
+            el("td", {}, o.name && o.name !== o.symbol ? `${o.name} (${o.symbol})` : o.symbol),
+            el("td", {}, o.kind === "exit" ? badge("청산", "warning") : sideBadge(o.side)),
+            el("td", {}, String(o.exec_qty ?? o.qty)),
+            el("td", {}, badge(label, color)),
+            el("td", { class: "small" }, orderMsg(o)),
+          ]));
+        }
+        htbl.appendChild(htb);
+        histWrap.appendChild(el("div", { class: "table-responsive" }, htbl));
+      }
+      pending.body.appendChild(histWrap);
     };
 
     const loadSignals = async () => {
