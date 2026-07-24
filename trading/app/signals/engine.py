@@ -23,11 +23,39 @@ class SignalEngine:
             max_positions=settings.RISK.get("max_positions", 3),
         )
         self._fired: set[tuple[str, str, str]] = set()  # (day, symbol, rule)
+        self._fired_restored = False   # 재시작 후 오늘 발사분 복원 여부
         self.last_run: str = ""
         self.last_signals: list[dict] = []
         self.guard: dict = {}          # 일일 목표·손실 가드 상태 (대시보드 노출)
         self.equity_synced = False     # 실계좌 잔고로 자산을 동기화했는가
         self._equity_synced_at = 0.0
+
+    def _restore_fired(self) -> None:
+        """재시작·재배포 후 '오늘 이미 발사한 신호'를 주문 이력에서 복원한다.
+        _fired 는 인메모리라 재시작하면 비어, 같은 신호가 다시 승인대기로
+        올라와 중복 발주될 수 있다. 오늘(KST) 생성된 진입 주문의 (symbol, rule)
+        을 dedup 집합에 재적용해 재시작을 안전하게 만든다."""
+        from ..trade import orders
+
+        today = datetime.now(KST).date()
+        restored = 0
+        for o in orders.list_orders(limit=300):
+            if o.get("kind") not in (None, "entry"):
+                continue  # 청산(exit) 주문은 신호 dedup 대상이 아니다
+            created = o.get("created")
+            symbol, rule = o.get("symbol"), o.get("rule")
+            if not (created and symbol and rule):
+                continue
+            try:
+                d = datetime.fromisoformat(created).astimezone(KST).date()
+            except ValueError:
+                continue
+            if d == today:
+                self._fired.add((today.isoformat(), symbol, rule))
+                restored += 1
+        if restored:
+            log.info("재시작 복원: 오늘 발사 신호 %d건 dedup 재적용(중복 발주 방지)",
+                     restored)
 
     async def _sync_equity(self) -> None:
         """포지션 사이징 전에 실계좌 예탁자산으로 self.equity 를 맞춘다.
@@ -114,6 +142,10 @@ class SignalEngine:
         # 나중에 목록에서 빠져도 유예기간 동안 백필을 이어가게 한다.
         from ..data import roster
         roster.touch(settings.WATCHLIST)
+        # 재시작 후 첫 사이클: 오늘 이미 발사한 신호를 복원해 중복 발주 방지
+        if not self._fired_restored:
+            self._restore_fired()
+            self._fired_restored = True
         # 실계좌 자산 동기화 — 포지션 사이징이 가짜 기본값(1천만원)으로 계산되는 것 방지
         await self._sync_equity()
         if not self.equity_synced:
