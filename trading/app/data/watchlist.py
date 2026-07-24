@@ -30,13 +30,22 @@ def _conn() -> sqlite3.Connection:
             code TEXT PRIMARY KEY, name TEXT, source TEXT, added TEXT
         )"""
     )
+    # 수집전용 플래그(기존 DB 호환 — 없을 때만 추가). 1이면 데이터만 모으고 매매 제외.
+    try:
+        conn.execute("ALTER TABLE watchlist ADD COLUMN collect_only INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
 def _rebuild_runtime(conn: sqlite3.Connection) -> None:
-    rows = conn.execute("SELECT code, name FROM watchlist ORDER BY added").fetchall()
+    rows = conn.execute(
+        "SELECT code, name, collect_only FROM watchlist ORDER BY added"
+    ).fetchall()
     settings.WATCHLIST.clear()
     settings.WATCHLIST.update({r["code"]: r["name"] for r in rows})
+    settings.COLLECT_ONLY.clear()
+    settings.COLLECT_ONLY.update(r["code"] for r in rows if r["collect_only"])
 
 
 def init() -> None:
@@ -47,7 +56,8 @@ def init() -> None:
         if count == 0 and settings.WATCHLIST:
             now = datetime.now(UTC).isoformat()
             conn.executemany(
-                "INSERT OR IGNORE INTO watchlist VALUES (?,?,?,?)",
+                "INSERT OR IGNORE INTO watchlist (code, name, source, added) "
+                "VALUES (?,?,?,?)",
                 [(c, n, "seed", now) for c, n in settings.WATCHLIST.items()],
             )
         _rebuild_runtime(conn)
@@ -65,11 +75,22 @@ def add(code: str, name: str, source: str = "manual") -> None:
     now = datetime.now(UTC).isoformat()
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO watchlist VALUES (?,?,?,?) "
+            "INSERT INTO watchlist (code, name, source, added) VALUES (?,?,?,?) "
             "ON CONFLICT(code) DO UPDATE SET name=excluded.name",
             (code, name or code, source, now),
         )
         _rebuild_runtime(conn)
+
+
+def set_mode(code: str, collect_only: bool) -> bool:
+    """종목의 매매/수집전용 모드 전환. collect_only=True 면 데이터만 수집(매매 제외)."""
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE watchlist SET collect_only=? WHERE code=?",
+            (1 if collect_only else 0, code),
+        )
+        _rebuild_runtime(conn)
+    return bool(cur.rowcount)
 
 
 def remove(code: str) -> bool:
@@ -93,7 +114,8 @@ def replace_auto(picks: list[dict]) -> None:
         else:
             conn.execute("DELETE FROM watchlist WHERE source='auto'")
         conn.executemany(
-            "INSERT OR IGNORE INTO watchlist VALUES (?,?,?,?)",
+            "INSERT OR IGNORE INTO watchlist (code, name, source, added) "
+            "VALUES (?,?,?,?)",
             [(p["code"], p.get("name") or p["code"], "auto", now) for p in picks],
         )
         _rebuild_runtime(conn)

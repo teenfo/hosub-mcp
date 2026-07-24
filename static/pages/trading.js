@@ -522,16 +522,29 @@ export default {
       try { w = await fetchJSON("/api/trading/watchlist"); } catch (e) { return; }
       if (!changed("watch", w)) return;
       wTblWrap.innerHTML = "";
+      const nTrade = w.entries.filter((e) => !e.collect_only).length;
+      const nCollect = w.entries.length - nTrade;
+      wTblWrap.appendChild(el("div", { class: "small text-secondary mb-2" },
+        `매매 ${nTrade} · 수집전용 ${nCollect} — 수집전용은 데이터만 모으고 신호·주문은 만들지 않음`));
       const tbl = el("table", { class: "table table-sm align-middle mb-0 small" });
-      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>출처</th><th></th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>출처</th><th>모드</th><th></th></tr>" }));
       const tb = el("tbody");
       for (const it of w.entries) {
         const [label, tone] = SOURCE_BADGE[it.source] || [it.source, "secondary"];
+        const modeBadge = it.collect_only ? badge("수집전용", "secondary") : badge("매매", "success");
         const btBtn = el("button", { class: "btn btn-sm btn-outline-secondary py-0 me-1", title: "규칙 백테스트로 보내기" }, "백테스트");
         btBtn.onclick = () => {
           btInput.value = it.code;
           runBacktest();   // 규칙 백테스트 카드에서 이 종목으로 즉시 실행
           backtestC.body.closest(".card").scrollIntoView({ behavior: "smooth", block: "center" });
+        };
+        const modeBtn = el("button", { class: "btn btn-sm btn-outline-primary py-0 me-1",
+          title: it.collect_only ? "매매 대상으로 전환" : "수집전용으로 전환(매매 제외)" },
+          it.collect_only ? "매매로" : "수집전용");
+        modeBtn.onclick = async () => {
+          try { await postJSON("/api/trading/watchlist/mode", { code: it.code, collect_only: !it.collect_only }); }
+          catch (e) { alert("실패: " + e.message); }
+          loadWatch(); loadStatus();
         };
         const rm = el("button", { class: "btn btn-sm btn-outline-danger py-0" }, "제거");
         rm.onclick = async () => {
@@ -543,7 +556,8 @@ export default {
         tb.appendChild(el("tr", {}, [
           el("td", {}, `${it.name} (${it.code})`),
           el("td", {}, badge(label, tone)),
-          el("td", { class: "text-nowrap" }, [btBtn, rm]),
+          el("td", {}, modeBadge),
+          el("td", { class: "text-nowrap" }, [btBtn, modeBtn, rm]),
         ]));
       }
       tbl.appendChild(tb);

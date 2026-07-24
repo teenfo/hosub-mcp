@@ -491,6 +491,18 @@ async def api_watchlist_remove(payload: dict, _=Depends(require_auth)):
     return {"ok": ok, "watchlist": settings.WATCHLIST}
 
 
+@app.post("/api/watchlist/mode")
+async def api_watchlist_mode(payload: dict, _=Depends(require_auth)):
+    """종목 매매/수집전용 전환. collect_only=true 면 데이터만 수집(신호·주문 제외)."""
+    code = str(payload.get("code", "")).strip()
+    collect_only = bool(payload.get("collect_only"))
+    ok = watchlist.set_mode(code, collect_only)
+    log.info("감시목록 모드 변경: %s → %s", code,
+             "수집전용" if collect_only else "매매")
+    return {"ok": ok, "code": code, "collect_only": collect_only,
+            "collect_only_set": sorted(settings.COLLECT_ONLY)}
+
+
 @app.get("/api/settings")
 async def api_settings(_=Depends(require_auth)):
     return settings.masked()
