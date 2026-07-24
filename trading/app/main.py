@@ -271,6 +271,22 @@ async def api_prices(_=Depends(require_auth)):
     return {"prices": {code: _price_of(code) for code in settings.WATCHLIST}}
 
 
+@app.get("/api/rules")
+async def api_rules(_=Depends(require_auth)):
+    """등록된 매매 규칙(테크닉) 목록 + 활성 여부 — 기법 점검/관리용."""
+    from .signals.rules import REGISTRY
+
+    out = []
+    for name, (fn, _needs) in REGISTRY.items():
+        cfg = settings.RULES.get(name, {})
+        doc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
+        out.append({"name": name, "enabled": bool(cfg.get("enabled")),
+                    "desc": doc, "config": {k: v for k, v in cfg.items()
+                                            if not k.startswith("_")}})
+    return {"rules": out, "max_stop_pct": settings.RULES.get("max_stop_pct"),
+            "long_only": settings.RISK.get("long_only", False)}
+
+
 @app.get("/api/backtest/coverage")
 async def api_backtest_coverage(_=Depends(require_auth)):
     """감시목록 종목별 분봉 축적 일수(백테스트 표본 크기 확인용).
