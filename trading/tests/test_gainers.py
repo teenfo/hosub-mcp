@@ -6,15 +6,18 @@ from app.signals import scanner
 
 def test_filter_gainers_tiers_and_excludes(monkeypatch):
     monkeypatch.setattr(settings, "WATCHLIST", {"000660": "SK하이닉스"})
+    V = 100_000   # 넉넉한 거래량(거래대금 근사 통과용)
     items = [
-        {"code": "010140", "name": "삼성중공업", "price": 23_000, "change_pct": 8.0, "trade_value": 90_000},
-        {"code": "005930", "name": "삼성전자", "price": 270_000, "change_pct": 5.0, "trade_value": 90_000},
-        {"code": "069500", "name": "KODEX 200", "price": 30_000, "change_pct": 6.0, "trade_value": 90_000},  # ETF 제외
-        {"code": "000001", "name": "동전주", "price": 500, "change_pct": 12.0, "trade_value": 90_000},        # min_price 미달
-        {"code": "000660", "name": "SK하이닉스", "price": 20_000, "change_pct": 9.0, "trade_value": 90_000},  # 이미 감시중
-        {"code": "111111", "name": "하락주", "price": 10_000, "change_pct": -2.0, "trade_value": 90_000},     # 하락 제외
+        {"code": "010140", "name": "삼성중공업", "price": 23_000, "change_pct": 8.0, "volume": V},
+        {"code": "005930", "name": "삼성전자", "price": 270_000, "change_pct": 5.0, "volume": V},
+        {"code": "069500", "name": "KODEX 200", "price": 30_000, "change_pct": 6.0, "volume": V},   # ETF 제외
+        {"code": "011155", "name": "CJ씨푸드1우", "price": 6_780, "change_pct": 29.9, "volume": V},  # 우선주 제외
+        {"code": "000001", "name": "동전주", "price": 500, "change_pct": 12.0, "volume": V},         # min_price 미달
+        {"code": "222222", "name": "저유동주", "price": 10_000, "change_pct": 15.0, "volume": 10},   # 거래대금 근사 미달
+        {"code": "000660", "name": "SK하이닉스", "price": 20_000, "change_pct": 9.0, "volume": V},   # 이미 감시중
+        {"code": "111111", "name": "하락주", "price": 10_000, "change_pct": -2.0, "volume": V},      # 하락 제외
     ]
-    cfg = {"min_price": 1000, "min_trade_value": 5000, "trade_max_price": 30_000, "top_n": 15}
+    cfg = {"min_price": 1000, "min_trade_value_krw": 100_000_000, "trade_max_price": 30_000, "top_n": 15}
     out = scanner.filter_gainers(items, cfg)
     codes = [g["code"] for g in out]
     assert codes == ["010140", "005930"]                 # 급등률 순, 필터 통과분만
