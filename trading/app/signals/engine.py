@@ -29,6 +29,32 @@ class SignalEngine:
         self.guard: dict = {}          # 일일 목표·손실 가드 상태 (대시보드 노출)
         self.equity_synced = False     # 실계좌 잔고로 자산을 동기화했는가
         self._equity_synced_at = 0.0
+        self.regime = "중립"           # 시장 국면(강세/약세/중립) — 야간 발굴 breadth 기반
+        self._regime_at = 0.0
+
+    def _market_regime(self) -> str:
+        """최근 야간 발굴이 계산한 시장 국면(강세/약세/중립)을 읽는다(10분 캐시).
+        전일 전종목 breadth(60일선 상회 비율) 기반이라 '오늘 방향'의 확률적 편향."""
+        now = time.monotonic()
+        if now - self._regime_at < 600 and self._regime_at:
+            return self.regime
+        try:
+            from .. import export
+            m = (export.latest_manifest() or {}).get("market", {})
+            self.regime = m.get("regime") or "중립"
+        except Exception:  # noqa: BLE001
+            self.regime = self.regime or "중립"
+        self._regime_at = now
+        return self.regime
+
+    def _inverse_blocked(self, symbol: str) -> bool:
+        """국면 게이트: 인버스 ETF 는 강세장(=지수 상승 예상)에서 매수 보류."""
+        gate = settings.CONFIG.get("regime_gate", {})
+        if not gate.get("enabled", True):
+            return False
+        if symbol not in set(settings.CONFIG.get("inverse_etfs", [])):
+            return False
+        return self.regime == gate.get("inverse_block_regime", "강세")
 
     def _restore_fired(self) -> None:
         """재시작·재배포 후 '오늘 이미 발사한 신호'를 주문 이력에서 복원한다.
@@ -90,7 +116,8 @@ class SignalEngine:
         loss = float(settings.RISK.get("daily_loss_limit_pct", 0) or 0)
         halted, why = risk.day_guard(today["pct"], target, loss)
         return {**today, "daily_target_pct": target, "daily_loss_limit_pct": loss,
-                "equity": self.equity, "halted": halted, "reason": why}
+                "equity": self.equity, "halted": halted, "reason": why,
+                "regime": self._market_regime()}
 
     def _today_df(self, symbol: str):
         df = store.load_bars(symbol, "1m", limit=800)
@@ -142,6 +169,7 @@ class SignalEngine:
         # 나중에 목록에서 빠져도 유예기간 동안 백필을 이어가게 한다.
         from ..data import roster
         roster.touch(settings.WATCHLIST)
+        self._market_regime()   # 시장 국면 갱신(인버스 게이트·대시보드 노출용)
         # 재시작 후 첫 사이클: 오늘 이미 발사한 신호를 복원해 중복 발주 방지
         if not self._fired_restored:
             self._restore_fired()
@@ -183,9 +211,12 @@ class SignalEngine:
                        "entry": sig.entry, "stop": sig.stop,
                        "target": sig.target, "qty": qty, "actionable": False,
                        "ts": datetime.now(KST).isoformat(timespec="seconds")}
+                # 국면 게이트: 인버스 ETF 는 강세장에서 매수 보류(지수 상승 시 인버스 하락).
+                if self._inverse_blocked(symbol):
+                    rec["note"] = f"국면 게이트 — {self.regime}장이라 인버스 매수 보류"
                 # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
                 # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
-                if settings.RISK.get("long_only", False) and sig.side != "long":
+                elif settings.RISK.get("long_only", False) and sig.side != "long":
                     rec["note"] = "롱 전용 모드 — 숏 미발주(현물 계좌 개별주 공매도 불가)"
                 elif qty < 1:
                     # qty=0 원인 구분: (1) 매수여력 부족(진입가>자산) vs

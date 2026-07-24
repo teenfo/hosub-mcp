@@ -236,9 +236,12 @@ export default {
       const frac = hi > 0 ? Math.max(0, Math.min(100, r.pct / hi * 100)) : 0;
       bar.appendChild(el("div", { class: "progress-bar " + (r.pct >= 0 ? "bg-danger" : "bg-primary"), style: `width:${r.pct >= 0 ? frac : 0}%` }));
       gStatus.appendChild(bar);
-      gStatus.appendChild(el("div", { class: "mt-2" },
+      gStatus.appendChild(el("div", { class: "mt-2 d-flex gap-2 align-items-center flex-wrap" }, [
         r.halted ? el("span", { class: "badge text-bg-warning" }, r.reason)
-          : el("span", { class: "badge text-bg-success" }, "정상 — 진입 허용")));
+          : el("span", { class: "badge text-bg-success" }, "정상 — 진입 허용"),
+        r.regime ? el("span", { class: "badge text-bg-" + (r.regime === "강세" ? "danger" : r.regime === "약세" ? "primary" : "secondary") },
+          `시장 ${r.regime}${r.regime === "강세" ? " · 인버스 매수 보류" : r.regime === "약세" ? " · 인버스 매수 허용" : ""}`) : null,
+      ]));
       if (!r.halted && hi > 0 && r.pct < hi) {
         gStatus.appendChild(el("div", { class: "text-secondary mt-1" }, `목표까지 ${(hi - r.pct).toFixed(2)}% 남음`));
       }
