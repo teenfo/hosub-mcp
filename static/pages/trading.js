@@ -909,7 +909,9 @@ export default {
           approve.disabled = true;
           try {
             const r = await postJSON(`/api/trading/orders/${o.id}/approve`, isExit ? undefined : { qty });
-            alert(r.ok ? ("✅ 발주 접수됨\n" + (r.message || "")) : ("❌ 발주 거부/실패\n" + (r.message || r.error || "")));
+            if (r.ok) alert("✅ 발주 접수됨\n" + (r.message || ""));
+            else if (r.retryable) alert("⚠️ " + (r.message || "증거금 부족 — 대기열에 유지됨"));
+            else alert("❌ 발주 거부/실패\n" + (r.message || r.error || ""));
           } catch (e) { alert("발주 오류: " + e.message); }
           loadOrders(); loadPerformance();
         };
