@@ -195,8 +195,9 @@ def reject(order_id: str) -> bool:
     return bool(cur.rowcount)
 
 
-async def approve_and_send(order_id: str) -> dict:
-    """승인 → 키움 발주. 반드시 사용자 액션(대시보드 버튼)에서만 호출할 것."""
+async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
+    """승인 → 키움 발주. 반드시 사용자 액션(대시보드 버튼)에서만 호출할 것.
+    qty 를 지정하면 발주 수량을 그 값으로 조정한다(진입 주문에 한함)."""
     from ..kiwoom.client import client  # 지연 임포트 (테스트에서 네트워크 불필요)
 
     order = get(order_id)
@@ -207,9 +208,21 @@ async def approve_and_send(order_id: str) -> dict:
     if datetime.fromisoformat(order["expires"]) < datetime.now(UTC):
         expire_stale()
         return {"ok": False, "error": "신호 만료됨"}
+    # 사용자가 발주 수량을 조정한 경우 반영 (청산 주문은 포지션 전량 매도라 고정)
+    if qty is not None and order.get("kind") != "exit":
+        try:
+            qty = int(qty)
+        except (TypeError, ValueError):
+            qty = 0
+        if qty <= 0:
+            return {"ok": False, "error": "발주 수량은 1주 이상이어야 합니다"}
+        order["qty"] = order["exec_qty"] = qty
     with _conn() as conn:
-        conn.execute("UPDATE orders SET status='approved' WHERE id=?", (order_id,))
-        _audit(conn, order_id, "approved")
+        conn.execute(
+            "UPDATE orders SET status='approved', qty=?, exec_qty=? WHERE id=?",
+            (order["qty"], order["exec_qty"], order_id),
+        )
+        _audit(conn, order_id, "approved", f"qty={order['exec_qty']}")
     try:
         result = await client.order(
             order["exec_side"], order["exec_symbol"], order["exec_qty"], price=0

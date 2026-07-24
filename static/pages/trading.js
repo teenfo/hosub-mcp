@@ -971,6 +971,9 @@ export default {
       try {
         all = await fetchJSON("/api/trading/orders");
       } catch (e) { return; }
+      // 사용자가 발주 수량/금액을 편집 중이면 새로고침으로 입력값을 덮어쓰지 않는다.
+      const act = document.activeElement;
+      if (act && act.tagName === "INPUT" && pending.body.contains(act)) return;
       if (!changed("orders", all)) return;
       const orders = all.filter((o) => o.status === "pending");
       const history = all.filter((o) => o.status !== "pending").slice(0, 8);
@@ -979,20 +982,43 @@ export default {
         pending.body.appendChild(el("div", { class: "text-secondary small mb-2" }, "대기 중인 주문 없음"));
       } else {
       const tbl = el("table", { class: "table table-sm align-middle mb-0" });
-      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량</th><th>경과·현재가 괴리</th><th></th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량 / 발주금액</th><th>경과·현재가 괴리</th><th></th></tr>" }));
       const tb = el("tbody");
       for (const o of orders) {
         const isExit = o.kind === "exit";
         const approve = el("button", { class: "btn btn-sm " + (isExit ? "btn-warning" : "btn-success") + " me-1" }, isExit ? "청산 승인" : "승인");
         const rejectB = el("button", { class: "btn btn-sm btn-outline-danger" }, isExit ? "보류" : "거부");
+        // 발주 수량·금액 — 사용자가 승인 전 조정 가능(진입 주문). 금액은 현재가/진입가 기준 예상치.
+        const baseQty = o.exec_qty ?? o.qty;
+        const px = Number(o.cur_price) || Number(o.entry) || 0;
+        let qtyCell;
+        const readQty = () => Math.max(0, Math.floor(Number(o.qty) || 0));
+        if (isExit) {
+          qtyCell = el("td", {}, `${String(baseQty)}주`);
+        } else {
+          const qtyIn = el("input", { type: "number", min: "1", step: "1", value: String(baseQty),
+            class: "form-control form-control-sm text-end", style: "width:5rem" });
+          const amtIn = el("input", { type: "number", min: "0", step: "100", value: px ? String(Math.round(baseQty * px)) : "",
+            class: "form-control form-control-sm text-end", style: "width:8rem", disabled: px ? null : "" });
+          qtyIn.oninput = () => { if (px) amtIn.value = String(Math.round((Number(qtyIn.value) || 0) * px)); };
+          amtIn.oninput = () => { if (px) qtyIn.value = String(Math.floor((Number(amtIn.value) || 0) / px)); };
+          o._qtyIn = qtyIn;   // approve 핸들러에서 읽음
+          qtyCell = el("td", {}, el("div", { class: "d-flex flex-column gap-1" }, [
+            el("div", { class: "input-group input-group-sm", style: "width:6.5rem" }, [qtyIn, el("span", { class: "input-group-text" }, "주")]),
+            el("div", { class: "input-group input-group-sm", style: "width:9.5rem" }, [amtIn, el("span", { class: "input-group-text" }, "원")]),
+          ]));
+        }
         approve.onclick = async () => {
+          const qty = isExit ? Number(baseQty) : (o._qtyIn ? Math.floor(Number(o._qtyIn.value) || 0) : readQty());
+          if (!isExit && qty < 1) { alert("발주 수량은 1주 이상이어야 합니다"); return; }
+          const amtStr = px ? ` (약 ${fmt(qty * px)}원)` : "";
           const msg = isExit
-            ? `[${o.symbol}] 목표 도달 — ${o.qty}주 시장가 매도(청산)할까요?`
-            : `[${o.symbol}] ${o.rule} ${o.side} ${o.qty}주 — 실제로 발주할까요?`;
+            ? `[${o.symbol}] 목표 도달 — ${qty}주 시장가 매도(청산)할까요?`
+            : `[${o.symbol}] ${o.rule} ${o.side} ${qty}주${amtStr} — 실제로 발주할까요?`;
           if (!confirm(msg)) return;
           approve.disabled = true;
           try {
-            const r = await postJSON(`/api/trading/orders/${o.id}/approve`);
+            const r = await postJSON(`/api/trading/orders/${o.id}/approve`, isExit ? undefined : { qty });
             alert(r.ok ? ("✅ 발주 접수됨\n" + (r.message || "")) : ("❌ 발주 거부/실패\n" + (r.message || r.error || "")));
           } catch (e) { alert("발주 오류: " + e.message); }
           loadOrders(); loadPerformance();
@@ -1010,7 +1036,7 @@ export default {
           el("td", {}, o.rule),
           el("td", {}, isExit ? badge("청산", "warning") : sideBadge(o.side)),
           el("td", {}, `${fmt(o.entry)} / ${fmt(o.stop)} / ${fmt(o.target)}`),
-          el("td", {}, String(o.qty)),
+          qtyCell,
           el("td", { class: "small text-secondary text-nowrap" }, [
             el("div", {}, agoStr(o.created)),
             el("div", {}, leftStr(o.expires)),

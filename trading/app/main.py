@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from itsdangerous import BadSignature, URLSafeSerializer
 
@@ -209,9 +209,17 @@ async def api_orders(status: str | None = None, _=Depends(require_auth)):
 
 
 @app.post("/api/orders/{order_id}/approve")
-async def api_approve(order_id: str, _=Depends(require_auth)):
+async def api_approve(order_id: str, payload: dict | None = Body(None),
+                      _=Depends(require_auth)):
     # 항상 200 으로 결과를 돌려준다 — 발주 성공/거부(키움 사유) 모두 화면에 표시하기 위해.
-    return await orders.approve_and_send(order_id)
+    # payload.qty 가 오면 발주 수량을 사용자 지정값으로 조정.
+    qty = None
+    if isinstance(payload, dict) and payload.get("qty") is not None:
+        try:
+            qty = int(payload["qty"])
+        except (TypeError, ValueError):
+            qty = None
+    return await orders.approve_and_send(order_id, qty=qty)
 
 
 @app.post("/api/orders/{order_id}/reject")
