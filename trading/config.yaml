@@ -20,7 +20,11 @@ inverse_etfs: ["114800", "251340", "252670"]
 # 국면은 야간 발굴의 전일 breadth(60일선 상회 비율)로 계산됨(강세/약세/중립).
 regime_gate:
   enabled: true
-  inverse_block_regime: "강세"   # 이 국면일 때 인버스 매수 차단
+  inverse_block_regime: "강세"   # 이 (유효)국면일 때 인버스 매수 차단
+  # 유효 국면 = 전일 breadth(기준) + 당일 시가갭 보정 + 야간리포트(미국장) 편향
+  use_open_gap: true             # 당일 시가 갭 방향으로 ±1 보정
+  open_gap_th: 0.5               # 감시목록 시가갭 중앙값 임계(%)
+  use_night_bias: true           # 야간 리포트가 남긴 익일 편향(night_bias.json) 반영
 
 # 급등주 스캐너: 거래대금상위(ka10032)에서 등락률·거래대금·가격 필터 교차
 scanner:

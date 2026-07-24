@@ -23,6 +23,21 @@ def test_inverse_blocked_only_in_block_regime(monkeypatch):
     assert eng._inverse_blocked("114800") is False    # 중립 → 허용
 
 
+def test_effective_regime_blends_base_gap_night(tmp_path, monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        {"enabled": True, "use_open_gap": True, "open_gap_th": 0.5,
+                         "use_night_bias": True})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_base_regime", lambda: "강세")   # 전일 breadth 강세
+    # 시가 갭 하락(약세) → 강세 base 를 한 단계 낮춰 중립
+    monkeypatch.setattr(eng, "_open_gap_bias", lambda: "약세")
+    monkeypatch.setattr(eng, "_read_night_bias", lambda: "중립")
+    assert eng._effective_regime() == "중립"
+    # 야간리포트(미국장) 약세면 그것을 기준으로, 갭까지 약세면 약세 유지
+    monkeypatch.setattr(eng, "_read_night_bias", lambda: "약세")
+    assert eng._effective_regime() == "약세"
+
+
 @pytest.mark.asyncio
 async def test_run_once_gates_inverse_in_bull(monkeypatch):
     monkeypatch.setitem(settings.CONFIG, "regime_gate",
@@ -37,7 +52,7 @@ async def test_run_once_gates_inverse_in_bull(monkeypatch):
         return None
 
     monkeypatch.setattr(eng, "_sync_equity", _noop)
-    monkeypatch.setattr(eng, "_market_regime", lambda: "강세")
+    monkeypatch.setattr(eng, "_effective_regime", lambda: "강세")
     monkeypatch.setattr(eng, "day_guard_status",
                         lambda: {"halted": False, "reason": "", "pct": 0.0})
     monkeypatch.setattr(eng, "_today_df",

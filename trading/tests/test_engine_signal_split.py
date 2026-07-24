@@ -79,6 +79,7 @@ async def test_collect_only_skipped_but_backfilled(monkeypatch):
         backfilled.append(sym)
 
     monkeypatch.setattr(eng, "_sync_equity", _noop_sync)
+    monkeypatch.setattr(eng, "_effective_regime", lambda: "중립")  # 갭바이어스가 _today_df 안 부르게
     monkeypatch.setattr(eng, "day_guard_status",
                         lambda: {"halted": False, "reason": "", "pct": 0.0})
     monkeypatch.setattr(eng, "_today_df",
