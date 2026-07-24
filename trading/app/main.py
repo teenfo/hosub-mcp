@@ -92,11 +92,14 @@ async def _ledger_loop() -> None:
             if cfg.get("auto_exit", True) and now.weekday() < 5:
                 stop_mode = cfg.get("stop_mode", "auto")   # auto(B) / approve(A)
                 if "09:00" <= hhmm <= "15:30":
+                    auto_all = settings.RISK.get("auto_approve", False)
                     for ex in await asyncio.to_thread(ledger.due_exits, _price_of):
-                        if ex["reason"] == "stop" and stop_mode == "auto":
-                            r = await orders.execute_exit(ex, "stop", ex["exit_px"])
-                            log.info("손절 자동청산 %s: %s", ex["symbol"], r.get("status"))
-                        else:  # 목표 도달, 또는 손절 승인모드(A)
+                        # 완전 자동 모드면 목표 도달 청산도 승인 없이 즉시 실행
+                        if (ex["reason"] == "stop" and stop_mode == "auto") or auto_all:
+                            r = await orders.execute_exit(ex, ex["reason"], ex["exit_px"])
+                            log.info("%s 자동청산 %s: %s", ex["reason"],
+                                     ex["symbol"], r.get("status"))
+                        else:  # 승인 모드: 목표 도달, 또는 손절 승인모드(A)
                             await asyncio.to_thread(orders.propose_exit, ex,
                                                     ex["reason"], ex["exit_px"])
                             log.info("청산 승인 대기 %s (%s)", ex["symbol"], ex["reason"])
@@ -433,6 +436,7 @@ async def api_risk(_=Depends(require_auth)):
     return engine.day_guard_status() | {
         "risk_per_trade_pct": settings.RISK.get("risk_per_trade_pct", 0),
         "max_positions": settings.RISK.get("max_positions", 3),
+        "auto_approve": bool(settings.RISK.get("auto_approve", False)),
     }
 
 
@@ -444,6 +448,7 @@ async def api_risk_save(payload: dict, _=Depends(require_auth)):
             daily_target_pct=payload.get("daily_target_pct"),
             daily_loss_limit_pct=payload.get("daily_loss_limit_pct"),
             risk_per_trade_pct=payload.get("risk_per_trade_pct"),
+            auto_approve=payload.get("auto_approve"),
         )
     except (OSError, ValueError, TypeError) as e:
         return JSONResponse({"ok": False, "error": str(e)}, 400)

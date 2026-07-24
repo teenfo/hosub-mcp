@@ -331,6 +331,18 @@ class SignalEngine:
                 if actionable:
                     rec["order_id"] = orders.propose(sig, qty)
                     rec["actionable"] = True
+                    # 완전 자동 발주: 승인 없이 즉시 발주(소액 계좌 + 안전장치 전제).
+                    # 실패해도 주문은 대기열에 남아 수동 승인 가능(약속: 재시도 경로 유지).
+                    if settings.RISK.get("auto_approve"):
+                        try:
+                            res = await orders.approve_and_send(rec["order_id"])
+                            rec["auto_status"] = res.get("status")
+                            rec["auto_message"] = res.get("message")
+                            log.info("자동 발주 %s(%s) %s → %s: %s", name, symbol,
+                                     sig.rule, res.get("status"), res.get("message"))
+                        except Exception:  # noqa: BLE001 - 자동발주 실패는 대기열에 남는다
+                            log.exception("자동 발주 실패 %s %s", symbol, sig.rule)
+                            rec["auto_status"] = "error"
                 self._fired[key] = actionable
                 found.append(rec)
                 log.info("신호 등록 %s(%s) %s %s qty=%d%s", name, symbol,

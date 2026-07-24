@@ -134,8 +134,8 @@ def _load_risk_overrides() -> None:
 
 
 def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
-              risk_per_trade_pct=None) -> None:
-    """일일 목표·손실한도·거래당 리스크를 갱신하고 risk.json 에 영속화."""
+              risk_per_trade_pct=None, auto_approve=None) -> None:
+    """일일 목표·손실한도·거래당 리스크·자동발주를 갱신하고 risk.json 에 영속화."""
     import json
     ov: dict = {}
     if RISK_FILE.exists():
@@ -153,6 +153,9 @@ def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
             raise ValueError(f"{key} 는 0~50% 범위여야 합니다")
         ov[key] = f
         RISK[key] = f
+    if auto_approve is not None:
+        ov["auto_approve"] = bool(auto_approve)
+        RISK["auto_approve"] = bool(auto_approve)
     RISK_FILE.write_text(json.dumps(ov, ensure_ascii=False))
 
 
