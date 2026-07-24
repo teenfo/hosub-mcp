@@ -194,7 +194,10 @@ async def api_status(_=Depends(require_auth)):
 
 @app.get("/api/orders")
 async def api_orders(status: str | None = None, _=Depends(require_auth)):
-    return orders.list_orders(status=status)
+    rows = orders.list_orders(status=status)
+    for o in rows:                       # 신호 진입가 대비 현재가 괴리 표시용
+        o["cur_price"] = _price_of(o.get("symbol", ""))
+    return rows
 
 
 @app.post("/api/orders/{order_id}/approve")

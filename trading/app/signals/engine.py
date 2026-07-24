@@ -116,7 +116,8 @@ class SignalEngine:
                     {"order_id": order_id, "symbol": symbol, "name": name,
                      "rule": sig.rule, "side": sig.side, "reason": sig.reason,
                      "entry": sig.entry, "stop": sig.stop, "target": sig.target,
-                     "qty": qty}
+                     "qty": qty,
+                     "ts": datetime.now(KST).isoformat(timespec="seconds")}
                 )
                 log.info("신호 등록 %s(%s) %s %s", name, symbol, sig.rule, sig.side)
         self.last_run = datetime.now(KST).isoformat(timespec="seconds")
