@@ -7,6 +7,7 @@
 """
 import asyncio
 import logging
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,8 @@ def parse_rank(raw: dict) -> list[dict]:
                 # 거래대금 단위는 TR 문서상 명시가 없어 원 단위로 정규화하지 않는다.
                 # 필터 기준(min_trade_value)과 같은 단위로만 쓰이므로 상대 비교는 유효.
                 "trade_value": _num(it.get("trde_prica"), int),
+                # 현재 거래량(주) — ka10027 은 거래대금 필드가 없어 거래량×현재가로 근사.
+                "volume": _num(it.get("now_trde_qty"), int),
             }
         )
     return out
@@ -106,21 +109,26 @@ _EXCL_KW = ("KODEX", "TIGER", "KOSEF", "ARIRANG", "HANARO", "PLUS", "RISE", "ACE
 
 
 def _is_excluded(name: str) -> bool:
-    return any(k in (name or "") for k in _EXCL_KW)
+    n = name or ""
+    if any(k in n for k in _EXCL_KW):
+        return True
+    # 우선주 제외(등락률 상위엔 저유동 우선주가 잘 걸린다): 이름이 우/우B/N우B 로 끝남
+    return bool(re.search(r"우[0-9]?B?$", n)) or "우선" in n
 
 
 def filter_gainers(items: list[dict], cfg: dict) -> list[dict]:
-    """급등률 상위에서 유동성·저가·비ETF 필터 후 상위 N. collect_only tier 부여
-    (매매가능 저가주 = trade_max_price 이하 → 매매, 그 외 → 수집전용)."""
+    """급등률 상위에서 유동성·저가·비ETF·우선주 제외 후 상위 N. collect_only tier 부여
+    (매매가능 저가주 = trade_max_price 이하 → 매매, 그 외 → 수집전용).
+    ka10027 은 거래대금 필드가 없어 '거래량×현재가(원)' 로 유동성을 근사한다."""
     min_price = cfg.get("min_price", 1_000)
-    min_val = cfg.get("min_trade_value", 5_000)
+    min_tv = cfg.get("min_trade_value_krw", 100_000_000)   # 거래대금 근사 하한(원)
     tmax = cfg.get("trade_max_price", 30_000)
     top_n = cfg.get("top_n", 15)
     picked = [
         it for it in items
         if it["change_pct"] > 0
         and it["price"] >= min_price
-        and it["trade_value"] >= min_val
+        and it["price"] * it.get("volume", 0) >= min_tv
         and not _is_excluded(it["name"])
         and it["code"] not in settings.WATCHLIST
     ]

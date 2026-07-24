@@ -30,9 +30,9 @@ scanner:
 gainers:
   enabled: true
   market: "001"           # 001 코스피 / 101 코스닥
-  min_price: 1000         # 저가주 하한(동전주 제외)
-  min_trade_value: 5000   # 유동성 필터 (trde_prica 단위)
-  trade_max_price: 30000  # 이하=매매 tier / 초과=수집전용 tier
+  min_price: 1000              # 저가주 하한(동전주 제외)
+  min_trade_value_krw: 100000000  # 유동성 하한 — 거래량×현재가 근사(원). 1억
+  trade_max_price: 30000       # 이하=매매 tier / 초과=수집전용 tier
   top_n: 15               # 편입 상위 종목 수
   auto_watch: true        # 급등주를 감시목록에 자동 편입(source=gainer, 다음 스캔때 교체)
 
