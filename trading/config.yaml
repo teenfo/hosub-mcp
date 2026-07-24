@@ -110,10 +110,26 @@ rules:
     target_r: 1.5             # 목표가 = 손절 거리의 1.5배
   gap:
     enabled: true
-    min_gap_pct: 2.0          # 시가 갭 최소 크기
+    min_gap_pct: 1.0          # 시가 갭 최소 크기(2.0→1.0 완화 — 갭 종목 더 포착)
     range_wait_until: "10:00" # 첫 1시간 범위 형성 대기
     trail_long_pct: 8.0
     trail_short_pct: 4.0
+  # 모멘텀 돌파(롱) — VWAP 위에서 직전 N봉 고가 돌파. 장중 상시 롱 셋업.
+  momentum:
+    enabled: true
+    lookback: 20              # 돌파 판단용 직전 봉 수
+    stop_lookback: 5          # 손절용 최근 저점 봉 수(타이트)
+    atr_stop_mult: 0.5
+    atr_period: 14
+    target_r: 1.5
+  # 눌림목(롱) — 상승추세에서 20MA 되돌림 후 반등 양봉.
+  pullback:
+    enabled: true
+    near_pct: 0.4             # 20MA 근접 허용(%)
+    stop_lookback: 5
+    atr_stop_mult: 0.5
+    atr_period: 14
+    target_r: 1.5
   # 반등 페이드 — 딥리서치 검증 결론(하락장 단타의 추세 정렬 방향)을 코드화한 규칙.
   # 숏 전용 규칙 → 롱 전용 모드에선 발주되지 않으므로 비활성(신호 산출도 생략).
   bounce_fade:

@@ -130,6 +130,55 @@ def gap(df: pd.DataFrame, cfg: dict, prev_close: float | None) -> Signal | None:
     return None
 
 
+def momentum_breakout(df: pd.DataFrame, cfg: dict) -> Signal | None:
+    """장중 모멘텀 돌파(롱). 상승 강세(현재가 > VWAP)에서 직전 N봉 고가를 종가가
+    돌파하고 마지막 봉이 양봉일 때 진입. 손절은 최근 stop_lookback 봉 저점 - ATR
+    여유(타이트), 목표 = target_r × 손절 거리. ORB/gap 이 못 잡는 상시 롱 셋업."""
+    look = cfg.get("lookback", 20)
+    if len(df) < look + 5:
+        return None
+    vw = ind.vwap(df)
+    last = df.iloc[-1]
+    if pd.isna(vw.iloc[-1]) or last.close <= vw.iloc[-1]:   # VWAP 위(장중 강세)만
+        return None
+    prior_high = float(df["high"].iloc[-(look + 1):-1].max())  # 현재봉 제외 직전 N봉 고가
+    if not (last.close > prior_high and last.close > last.open):
+        return None
+    stop_low = float(df["low"].iloc[-cfg.get("stop_lookback", 5):].min())
+    stop = stop_low - _atr_buffer(df, cfg, stop_low * 0.001)
+    if stop >= last.close:                                   # 손절이 진입 위면 무효
+        return None
+    r = cfg.get("target_r", 1.5)
+    return Signal("momentum", "long", float(last.close), stop,
+                  _target(float(last.close), stop, "long", r),
+                  f"{look}봉 고가 {prior_high:,.0f} 돌파", ts=df.index[-1])
+
+
+def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
+    """눌림목 롱. 상승 추세(현재가 > 초반 평균 & VWAP 근처/위)에서 20봉 이평으로
+    되돌린 뒤(near_pct 이내) 반등 양봉이 나오면 진입. 손절은 눌림 저점 - ATR 여유."""
+    if len(df) < 40:
+        return None
+    vw = ind.vwap(df)
+    sma20 = ind.sma(df["close"], 20)
+    last = df.iloc[-1]
+    if pd.isna(sma20.iloc[-1]) or pd.isna(vw.iloc[-1]):
+        return None
+    uptrend = (last.close > float(df["close"].iloc[:10].mean())
+               and last.close >= vw.iloc[-1] * 0.999)
+    near_ma = abs(last.close - sma20.iloc[-1]) / sma20.iloc[-1] * 100 <= cfg.get("near_pct", 0.4)
+    if not (uptrend and near_ma and last.close > last.open):
+        return None
+    pull_low = float(df["low"].iloc[-cfg.get("stop_lookback", 5):].min())
+    stop = pull_low - _atr_buffer(df, cfg, pull_low * 0.001)
+    if stop >= last.close:
+        return None
+    r = cfg.get("target_r", 1.5)
+    return Signal("pullback", "long", float(last.close), stop,
+                  _target(float(last.close), stop, "long", r),
+                  "상승추세 20MA 눌림 반등", ts=df.index[-1])
+
+
 def bounce_fade(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """반등 페이드. 조건:
     1) 하락 구조: 현재가가 세션 VWAP 아래 + 세션 저점이 초반 저점보다 낮음(저점 갱신)
@@ -219,6 +268,14 @@ def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
         out.append(s)
     if rules_cfg.get("gap", {}).get("enabled") and (
         s := gap(df, rules_cfg["gap"], prev_close)
+    ):
+        out.append(s)
+    if rules_cfg.get("momentum", {}).get("enabled") and (
+        s := momentum_breakout(df, rules_cfg["momentum"])
+    ):
+        out.append(s)
+    if rules_cfg.get("pullback", {}).get("enabled") and (
+        s := pullback_long(df, rules_cfg["pullback"])
     ):
         out.append(s)
     if rules_cfg.get("bounce_fade", {}).get("enabled") and (
