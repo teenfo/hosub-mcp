@@ -41,11 +41,25 @@ body {
 .hosub-sidebar .nav-link {
   color: rgba(255, 255, 255, 0.75);
   border-radius: 8px;
-  padding: 8px 12px;
+  padding: 7px 12px;
   margin-bottom: 2px;
   display: flex;
   align-items: center;
   gap: 10px;
+  font-size: 0.875rem;   /* 메뉴 폰트 약간 축소 */
+}
+/* 그룹 헤더(예: 트레이딩) — 어두운 사이드바에서 보이도록 전용 색 지정 */
+.hosub-sidebar .nav-group-header {
+  display: block;
+  padding: 10px 12px 3px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.45);
+}
+.hosub-sidebar .nav-group-header i {
+  margin-right: 6px;
 }
 .hosub-sidebar .nav-link:hover {
   color: #fff;
