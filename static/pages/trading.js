@@ -720,10 +720,14 @@ export default {
       if (!changed("status", [s, a])) return;
       status.body.innerHTML = "";
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
+      const clockBadge = s.server_time
+        ? [" ", badge(s.clock_synced ? "동기화 ✓" : "미동기화 ⚠", s.clock_synced ? "success" : "danger")]
+        : [];
       const list = el("ul", { class: "list-unstyled small mb-0" }, [
         el("li", {}, ["환경: ", envB]),
         el("li", {}, "엔진: " + (s.engine_enabled ? "가동" : "꺼짐(API 키 미설정)")),
-        el("li", {}, "마지막 평가: " + (s.last_run || "—")),
+        s.server_time ? el("li", {}, ["서버 시각: " + s.server_time.slice(0, 19).replace("T", " "), ...clockBadge]) : null,
+        el("li", {}, "마지막 평가: " + (s.last_run ? s.last_run.slice(0, 19).replace("T", " ") : "—")),
         el("li", {}, "당일 실현손익: " + fmt(s.daily_pnl) + " 원"),
         s.loss_limit_hit
           ? el("li", { class: "text-danger fw-bold" }, "일일 손실 한도 도달 — 신규 신호 차단 중")
@@ -987,7 +991,7 @@ export default {
         const gapEl = gap == null ? null : el("div", { class: Math.abs(gap) >= 0.5 ? "text-danger" : "text-secondary" },
           `현재 ${fmt(o.cur_price)} (${gap >= 0 ? "+" : ""}${gap.toFixed(2)}%)`);
         tb.appendChild(el("tr", {}, [
-          el("td", {}, o.symbol),
+          el("td", {}, o.name && o.name !== o.symbol ? `${o.name} (${o.symbol})` : o.symbol),
           el("td", {}, o.rule),
           el("td", {}, isExit ? badge("청산", "warning") : sideBadge(o.side)),
           el("td", {}, `${fmt(o.entry)} / ${fmt(o.stop)} / ${fmt(o.target)}`),

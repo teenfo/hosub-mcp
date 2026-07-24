@@ -181,6 +181,8 @@ async def login(password: str = Form(...)):
 
 @app.get("/api/status")
 async def api_status(_=Depends(require_auth)):
+    # 매매 엔진은 서버 시계로 장중을 판단하므로 시각·NTP 동기화를 노출한다.
+    synced = Path("/run/systemd/timesync/synchronized").exists()
     return {
         "env": settings.KIWOOM_ENV,
         "engine_enabled": bool(settings.KIWOOM_APP_KEY),
@@ -189,14 +191,20 @@ async def api_status(_=Depends(require_auth)):
         "risk": settings.RISK,
         "daily_pnl": engine.state.realized_pnl,
         "loss_limit_hit": engine.state.loss_limit_hit,
+        "server_time": datetime.now(KST).isoformat(timespec="seconds"),
+        "clock_synced": synced,
     }
 
 
 @app.get("/api/orders")
 async def api_orders(status: str | None = None, _=Depends(require_auth)):
+    from .data import symbols
+
     rows = orders.list_orders(status=status)
-    for o in rows:                       # 신호 진입가 대비 현재가 괴리 표시용
-        o["cur_price"] = _price_of(o.get("symbol", ""))
+    for o in rows:                       # 종목명 + 신호 진입가 대비 현재가 괴리 표시용
+        sym = o.get("symbol", "")
+        o["cur_price"] = _price_of(sym)
+        o["name"] = settings.WATCHLIST.get(sym) or symbols.name_of(sym) or sym
     return rows
 
 
