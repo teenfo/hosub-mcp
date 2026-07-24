@@ -257,13 +257,23 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
         result = {"error": str(e)}
     with _conn() as conn:
         if status == "pending":
-            # 증거금 부족 재시도용: 만료시간을 새 TTL 로 갱신해 바로 사라지지 않게 한다.
+            # 증거금 부족 재시도용: 만료시간을 새 TTL 로 갱신하고, 키움이 알려준
+            # '매수가능 수량'으로 발주 수량을 자동 조정한다(진입 주문에 한함).
             ttl_min = settings.RISK.get("signal_ttl_min", 10)
             new_expires = (datetime.now(UTC) + timedelta(minutes=ttl_min)).isoformat()
-            conn.execute(
-                "UPDATE orders SET status='pending', result=?, expires=? WHERE id=?",
-                (detail, new_expires, order_id),
-            )
+            buyable = _margin_shortfall(result) or 0
+            if buyable >= 1 and order.get("kind") != "exit":
+                order["qty"] = order["exec_qty"] = buyable
+                conn.execute(
+                    "UPDATE orders SET status='pending', result=?, expires=?, "
+                    "qty=?, exec_qty=? WHERE id=?",
+                    (detail, new_expires, buyable, buyable, order_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE orders SET status='pending', result=?, expires=? WHERE id=?",
+                    (detail, new_expires, order_id),
+                )
             _audit(conn, order_id, "margin_reject_retry", detail)
         else:
             conn.execute(
@@ -295,8 +305,11 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
         message = "발주 접수" + (f" · 주문번호 {result['ord_no']}" if result.get("ord_no") else "")
     elif status == "pending":
         buyable = _margin_shortfall(result)
-        hint = f" · 최대 {buyable}주 매수 가능" if buyable else ""
-        message = "매수증거금 부족 — 대기열 유지, 수량을 줄여 다시 승인하세요" + hint
+        if buyable:
+            message = (f"매수증거금 부족 — 매수가능 {buyable}주로 자동 조정했습니다. "
+                       "다시 승인하세요")
+        else:
+            message = "매수증거금 부족 — 대기열 유지, 수량을 줄여 다시 승인하세요"
     elif isinstance(result, dict):
         message = result.get("return_msg") or result.get("error") or "발주 거부"
     else:

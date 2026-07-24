@@ -32,13 +32,14 @@ async def test_margin_shortfall_keeps_order_pending(tmp_path, monkeypatch):
 
     monkeypatch.setattr("app.kiwoom.client.client.order", fake_order)
     res = await orders.approve_and_send(oid)
-    # 거부됐지만 대기열에 유지 + 재시도 안내(최대 2주)
+    # 거부됐지만 대기열에 유지 + 매수가능 수량(2주)으로 자동 조정
     assert res["ok"] is False and res["retryable"] is True
     assert res["status"] == "pending"
     assert "2주" in res["message"]
-    assert orders.get(oid)["status"] == "pending"          # 대기중 유지
+    row = orders.get(oid)
+    assert row["status"] == "pending"                       # 대기중 유지
+    assert row["qty"] == 2 and row["exec_qty"] == 2         # 매수가능 수량으로 자동 조정
     assert ledger.positions(status="open") == []            # 유령 포지션 없음
-    # 만료시간이 미래로 갱신돼 바로 사라지지 않는다
     assert oid in {o["id"] for o in orders.list_orders(status="pending")}
 
 
@@ -58,9 +59,10 @@ async def test_margin_retry_with_reduced_qty_succeeds(tmp_path, monkeypatch):
     monkeypatch.setattr("app.kiwoom.client.client.order", fake_order)
     r1 = await orders.approve_and_send(oid)                 # 47주 → 증거금 부족
     assert r1["retryable"] and orders.get(oid)["status"] == "pending"
-    r2 = await orders.approve_and_send(oid, qty=2)          # 2주로 재시도 → 성공
+    assert orders.get(oid)["exec_qty"] == 2                 # 매수가능 수량으로 자동 조정됨
+    r2 = await orders.approve_and_send(oid)                 # 재승인(자동 조정된 2주) → 성공
     assert r2["ok"] and r2["status"] == "sent"
-    assert calls == [47, 2]
+    assert calls == [47, 2]                                 # 두 번째는 조정된 2주로 발주
     assert orders.get(oid)["status"] == "sent"
 
 
