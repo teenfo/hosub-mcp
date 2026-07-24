@@ -23,6 +23,27 @@ def test_inverse_blocked_only_in_block_regime(monkeypatch):
     assert eng._inverse_blocked("114800") is False    # 중립 → 허용
 
 
+def test_rules_for_regime_linked_activation(monkeypatch):
+    # momentum(regimes=[강세,중립])은 약세 유효국면에서 자동 비활성, 강세에선 활성.
+    monkeypatch.setattr(settings, "RULES", {
+        "momentum": {"enabled": True, "regimes": ["강세", "중립"]},
+        "orb": {"enabled": True},                       # regimes 미지정 → 항상 가동
+        "max_stop_pct": 4.0,
+    })
+    eng = SignalEngine()
+    eng.regime = "약세"
+    cfg = eng._rules_for("005930")
+    assert cfg["momentum"]["enabled"] is False           # 약세장 → 자동 OFF
+    assert cfg["orb"]["enabled"] is True                 # 무관 규칙은 그대로
+    eng.regime = "강세"
+    cfg = eng._rules_for("005930")
+    assert cfg["momentum"]["enabled"] is True            # 강세장 → 자동 ON
+    eng.regime = "중립"
+    assert eng._rules_for("005930")["momentum"]["enabled"] is True
+    # 원본 settings.RULES 는 오염되지 않는다
+    assert settings.RULES["momentum"]["enabled"] is True
+
+
 def test_effective_regime_blends_base_gap_night(tmp_path, monkeypatch):
     monkeypatch.setitem(settings.CONFIG, "regime_gate",
                         {"enabled": True, "use_open_gap": True, "open_gap_th": 0.5,

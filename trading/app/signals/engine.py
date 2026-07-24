@@ -199,18 +199,36 @@ class SignalEngine:
         return bool(below_long or aligned_down)
 
     def _rules_for(self, symbol: str) -> dict:
-        """추세 게이트가 켜진 하락 규칙에 일봉 추세 플래그를 주입한 규칙 설정."""
+        """심볼별 규칙 설정 구성: ① 규칙 config 의 regimes(활성 국면 목록)와 현재
+        유효 국면이 안 맞으면 그 규칙을 자동 비활성(국면 연동 활성) ② 추세 게이트가
+        켜진 하락 규칙에 일봉 추세 플래그를 주입."""
         rules_cfg = settings.RULES
+        merged = None
+
+        # ① 국면 연동: regimes 가 지정된 규칙은 현재 유효 국면이 목록에 있을 때만 켠다.
+        #    (예: momentum 에 regimes:[강세,중립] → 약세장에선 자동 OFF)
+        for name, cfg in rules_cfg.items():
+            if not isinstance(cfg, dict):
+                continue
+            regimes = cfg.get("regimes")
+            if regimes and cfg.get("enabled") and self.regime not in regimes:
+                if merged is None:
+                    merged = dict(rules_cfg)
+                merged[name] = {**cfg, "enabled": False,
+                                "_regime_blocked": self.regime}
+        base = merged if merged is not None else rules_cfg
+
+        # ② 일봉 하락 추세 게이트 주입 (숏 규칙용)
         needs = any(
-            rules_cfg.get(k, {}).get("require_downtrend")
+            base.get(k, {}).get("require_downtrend") and base.get(k, {}).get("enabled")
             for k in ("bounce_fade", "breakdown_retest")
         )
         if not needs:
-            return rules_cfg
+            return base
         dt = self._daily_downtrend(symbol)
         if dt is None:
-            return rules_cfg  # 판단 보류 → 원본대로(게이트 통과)
-        merged = dict(rules_cfg)
+            return base  # 판단 보류 → 원본대로(게이트 통과)
+        merged = dict(base)
         for k in ("bounce_fade", "breakdown_retest"):
             if k in merged:
                 merged[k] = {**merged[k], "_daily_downtrend": dt}

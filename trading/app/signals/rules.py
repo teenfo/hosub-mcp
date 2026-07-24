@@ -112,6 +112,15 @@ def orb(df: pd.DataFrame, cfg: dict) -> Signal | None:
         return None
     hi, lo = rng["high"].max(), rng["low"].min()
     last = after.iloc[-1]
+    # 선택 필터 — 문헌 근거: ORB 원신호는 약하고 거래량·범위 필터로 유의하게 강화됨.
+    if cfg.get("vol_ratio", 0):        # 돌파봉 거래량 ≥ 세션 평균 × 배수
+        if last.volume < df["volume"].mean() * cfg["vol_ratio"]:
+            return None
+    range_pct = (hi - lo) / lo * 100 if lo else 0
+    if cfg.get("min_range_pct", 0) and range_pct < cfg["min_range_pct"]:
+        return None                     # 너무 좁은 시초 범위(노이즈 돌파) 배제
+    if cfg.get("max_range_pct", 0) and range_pct > cfg["max_range_pct"]:
+        return None                     # 너무 넓은 범위(손절 과대) 배제
     r = cfg.get("target_r", 1.5)
     if last.close > hi:
         return Signal("orb", "long", float(last.close), float(lo),
@@ -203,6 +212,37 @@ def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
     return Signal("pullback", "long", float(last.close), stop,
                   _target(float(last.close), stop, "long", r),
                   "상승추세 20MA 눌림 반등", ts=df.index[-1])
+
+
+@register("gap_fill", needs_prev_close=True, side="long")
+def gap_fill(df: pd.DataFrame, cfg: dict, prev_close: float | None) -> Signal | None:
+    """갭필 평균회귀(롱). 갭하락(-min_gap_pct 이상)으로 시작한 날, 세션 초반 고가를
+    양봉으로 돌파(반전 확인)하면 진입 — 목표는 전일 종가(갭 메우기), 손절은 세션
+    저점 - ATR. 문헌 근거: 지수·대형주 갭하락 되메우기는 건당 ~0.5% 수준의
+    검증된 평균회귀 엣지(추세·거래량 필터 결합 시). RR < min_rr 이면 폐기."""
+    if not prev_close or len(df) < cfg.get("min_bars", 10):
+        return None
+    open_px = float(df.iloc[0].open)
+    gap_pct = (open_px - prev_close) / prev_close * 100
+    if gap_pct > -cfg.get("min_gap_pct", 1.0):
+        return None                     # 충분한 갭하락만 대상
+    last = df.iloc[-1]
+    if last.close >= prev_close:
+        return None                     # 이미 갭을 메움 → 기회 소멸
+    first_high = float(df["high"].iloc[:cfg.get("confirm_bars", 5)].max())
+    if not (last.close > first_high and last.close > last.open):
+        return None                     # 초반 고가 탈환 + 양봉 = 반전 확인
+    session_low = float(df["low"].min())
+    stop = session_low - _atr_buffer(df, cfg, session_low * 0.001)
+    if stop >= last.close:
+        return None
+    target = float(prev_close)
+    rr = (target - last.close) / (last.close - stop)
+    if rr < cfg.get("min_rr", 1.0):
+        return None                     # 남은 갭이 손절 대비 작으면 폐기
+    return Signal("gap_fill", "long", float(last.close), stop, target,
+                  f"갭하락 {gap_pct:.1f}% 메우기 (목표 전일종가 {prev_close:,.0f})",
+                  ts=df.index[-1])
 
 
 @register("vwap_reclaim", side="long")
