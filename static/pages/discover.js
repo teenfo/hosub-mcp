@@ -56,7 +56,14 @@ export default {
     const loadWatch = async () => {
       let w;
       try { w = await fetchJSON("/api/trading/watchlist"); } catch (e) { return; }
+      const codesKey = w.entries.map((e) => e.code).sort().join(",");
       watch = Object.fromEntries(w.entries.map((e) => [e.code, e.name]));
+      // 감시 코드 집합이 바뀌면(외부 변경 포함) 스캐너·발굴의 '감시중' 표시를 재렌더
+      if (changed("watchCodes", codesKey)) {
+        changed.invalidate("scanner");
+        changed.invalidate("discovery");
+        loadScanner(); loadDiscovery();
+      }
       // 가격은 refreshPrices 가 셀만 갱신하므로, 표 재렌더는 '구조 변경'일 때만.
       const wKey = w.entries.map((e) => `${e.code}:${e.name}:${e.source}:${e.collect_only ? 1 : 0}`).join("|");
       if (!changed("watch", wKey)) return;

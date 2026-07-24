@@ -25,7 +25,7 @@ def test_restore_fired_dedups_todays_signal(tmp_path, monkeypatch):
     orders.propose(sig, qty=5)                    # 오늘 진입 주문 생성
 
     eng = SignalEngine()                          # 재시작 상황(빈 _fired)
-    assert eng._fired == set()
+    assert eng._fired == {}
     eng._restore_fired()
     today = datetime.now(KST).date().isoformat()
     assert (today, "005930", "orb") in eng._fired  # 이력에서 복원됨

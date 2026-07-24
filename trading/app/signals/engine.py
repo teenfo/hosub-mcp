@@ -29,7 +29,9 @@ class SignalEngine:
             daily_loss_limit_pct=settings.RISK.get("daily_loss_limit_pct", 2.0),
             max_positions=settings.RISK.get("max_positions", 3),
         )
-        self._fired: set[tuple[str, str, str]] = set()  # (day, symbol, rule)
+        # (day, symbol, rule) → 발주 여부. True=이미 발주(재발주 금지),
+        # False=기록만 됨(차단 해제 시 재평가해 발주 가능)
+        self._fired: dict[tuple[str, str, str], bool] = {}
         self._fired_restored = False   # 재시작 후 오늘 발사분 복원 여부
         self.last_run: str = ""
         self.last_signals: list[dict] = []
@@ -99,12 +101,20 @@ class SignalEngine:
         self.regime = _ORDER_REGIME[score]
         return self.regime
 
-    def _inverse_blocked(self, symbol: str) -> bool:
-        """국면 게이트: 인버스 ETF 는 강세 유효국면(=지수 상승 예상)에서 매수 보류."""
+    def _inverse_blocked(self, symbol: str, side: str = "long") -> bool:
+        """국면 게이트: 인버스 ETF 는 강세 유효국면(=지수 상승 예상)에서 매수 보류.
+        숏 신호가 인버스 ETF '매수'로 매핑되는 경우(long_only 해제 시)도 동일하게
+        게이트한다 — 매핑 우회로 강세장 인버스 매수가 생기는 것 방지."""
         gate = settings.CONFIG.get("regime_gate", {})
         if not gate.get("enabled", True):
             return False
-        if symbol not in set(settings.CONFIG.get("inverse_etfs", [])):
+        inverse_set = set(settings.CONFIG.get("inverse_etfs", []))
+        is_inverse_buy = symbol in inverse_set or (
+            side == "short"
+            and not settings.RISK.get("long_only", False)
+            and settings.INVERSE_ETF                       # 숏 → 인버스 매수 매핑
+        )
+        if not is_inverse_buy:
             return False
         return self.regime == gate.get("inverse_block_regime", "강세")
 
@@ -129,7 +139,7 @@ class SignalEngine:
             except ValueError:
                 continue
             if d == today:
-                self._fired.add((today.isoformat(), symbol, rule))
+                self._fired[(today.isoformat(), symbol, rule)] = True
                 restored += 1
         if restored:
             log.info("재시작 복원: 오늘 발사 신호 %d건 dedup 재적용(중복 발주 방지)",
@@ -241,7 +251,6 @@ class SignalEngine:
         # 나중에 목록에서 빠져도 유예기간 동안 백필을 이어가게 한다.
         from ..data import roster
         roster.touch(settings.WATCHLIST)
-        self._effective_regime()   # 유효 국면 갱신(인버스 게이트·대시보드 노출용)
         # 재시작 후 첫 사이클: 오늘 이미 발사한 신호를 복원해 중복 발주 방지
         if not self._fired_restored:
             self._restore_fired()
@@ -262,6 +271,8 @@ class SignalEngine:
         # 수집: 전체 감시목록 백필(매매·수집전용 공통). 수집전용 종목도 데이터는 모은다.
         for symbol in settings.WATCHLIST:
             await collector.backfill_minutes(symbol)
+        # 유효 국면 갱신 — 백필 뒤에 계산해야 첫 사이클에도 '오늘 시가갭'이 반영된다.
+        self._effective_regime()
         # 매매: 수집전용(COLLECT_ONLY)을 제외한 트레이딩 대상만 규칙 평가·주문 제안.
         risk_pct = settings.RISK.get("risk_per_trade_pct", 0.5)
         for symbol, name in settings.WATCHLIST.items():
@@ -272,8 +283,6 @@ class SignalEngine:
                 continue
             for sig in rules.evaluate_all(df, self._rules_for(symbol), prev_close):
                 key = (day, symbol, sig.rule)
-                if key in self._fired:
-                    continue
                 sig.symbol = symbol
                 # 감시 신호는 금액 제한 없이 산출(최근 신호 기록). 승인대기 주문은
                 # position_size(매수여력 + 거래당 리스크 반영)가 1주 이상일 때만.
@@ -283,8 +292,9 @@ class SignalEngine:
                        "entry": sig.entry, "stop": sig.stop,
                        "target": sig.target, "qty": qty, "actionable": False,
                        "ts": datetime.now(KST).isoformat(timespec="seconds")}
-                # 국면 게이트: 인버스 ETF 는 강세장에서 매수 보류(지수 상승 시 인버스 하락).
-                if self._inverse_blocked(symbol):
+                actionable = False
+                # 국면 게이트: 인버스 ETF(직접 또는 숏→인버스 매핑)는 강세장 매수 보류.
+                if self._inverse_blocked(symbol, sig.side):
                     rec["note"] = f"국면 게이트 — {self.regime}장이라 인버스 매수 보류"
                 # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
                 # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
@@ -308,12 +318,20 @@ class SignalEngine:
                 else:
                     ok, why = self.state.can_open()
                     if ok:
-                        rec["order_id"] = orders.propose(sig, qty)
-                        rec["actionable"] = True
+                        actionable = True
                     else:
                         rec["note"] = f"진입 보류 — {why}"
                         log.info("신호 차단 %s %s: %s", symbol, sig.rule, why)
-                self._fired.add(key)
+                # 중복 처리: 이미 발주된 신호는 재발주하지 않고, 비발주 상태가
+                # 그대로면 기록도 반복하지 않는다. 단 '차단→해제'(입금·포지션 정리·
+                # 국면 전환 등)로 발주 가능해진 신호는 다시 살아난다.
+                prev = self._fired.get(key)
+                if prev is True or (prev is not None and not actionable):
+                    continue
+                if actionable:
+                    rec["order_id"] = orders.propose(sig, qty)
+                    rec["actionable"] = True
+                self._fired[key] = actionable
                 found.append(rec)
                 log.info("신호 등록 %s(%s) %s %s qty=%d%s", name, symbol,
                          sig.rule, sig.side, qty,

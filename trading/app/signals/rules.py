@@ -433,8 +433,14 @@ def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
             import logging
             logging.getLogger(__name__).exception("규칙 %s 평가 오류", name)
             continue
-        if s:
-            out.append(s)
+        if not s:
+            continue
+        # 시간대 필터(공통) — 자체 데이터 검증: 첫 시간 진입만 엣지가 있는 기법이
+        # 많다(orb 9시 +0.58R vs 11시 이후 전패). entry_before 이후 신호는 폐기.
+        eb = cfg.get("entry_before")
+        if eb and s.ts is not None and s.ts.time() >= _hhmm(eb):
+            continue
+        out.append(s)
     # 손절폭 상한 필터: 손절 거리가 과도한(고변동성·와이드스탑) 신호는 버린다.
     # OCI 사례처럼 손절이 6% 떨어진 곳에 잡히는 저품질·휩쏘 거래를 애초에 차단.
     max_stop = rules_cfg.get("max_stop_pct", 0)

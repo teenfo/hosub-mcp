@@ -216,12 +216,14 @@ async def api_approve(order_id: str, payload: dict | None = Body(None),
                       _=Depends(require_auth)):
     # 항상 200 으로 결과를 돌려준다 — 발주 성공/거부(키움 사유) 모두 화면에 표시하기 위해.
     # payload.qty 가 오면 발주 수량을 사용자 지정값으로 조정.
+    # 파싱 불가한 qty 는 '원 수량으로 발주'가 아니라 400 으로 거부한다(안전).
     qty = None
     if isinstance(payload, dict) and payload.get("qty") is not None:
         try:
             qty = int(payload["qty"])
         except (TypeError, ValueError):
-            qty = None
+            return JSONResponse(
+                {"ok": False, "error": f"잘못된 수량: {payload['qty']!r}"}, 400)
     return await orders.approve_and_send(order_id, qty=qty)
 
 
@@ -334,7 +336,9 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
     if df.empty:
         return {"ok": False, "symbol": symbol, "error": "저장된 봉이 없습니다"}
     days = int(df.index.normalize().nunique())
-    result = runner.run(symbol, df)
+    # 롱 전용 실전과 정합: 집행 불가한 숏은 백테스트에서도 미체결 처리
+    sides = ("long",) if settings.RISK.get("long_only") else None
+    result = runner.run(symbol, df, sides=sides)
     trades = [
         {"rule": t.rule, "side": t.side, "entry": round(t.entry, 2),
          "exit": None if t.exit is None else round(t.exit, 2),
@@ -386,6 +390,8 @@ async def api_sweep_run(_=Depends(require_auth)):
     """기법 스윕 수동 실행(수 분 소요, 조회성 — 주문 없음). 백그라운드 시작."""
     from .backtest import sweep
 
+    if sweep.running:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
     asyncio.create_task(asyncio.to_thread(sweep.run_sweep))
     return {"ok": True, "message": "스윕 시작 — 수 분 후 결과가 갱신됩니다"}
 

@@ -112,14 +112,17 @@ def _is_excluded(name: str) -> bool:
     n = name or ""
     if any(k in n for k in _EXCL_KW):
         return True
-    # 우선주 제외(등락률 상위엔 저유동 우선주가 잘 걸린다): 이름이 우/우B/N우B 로 끝남
-    return bool(re.search(r"우[0-9]?B?$", n)) or "우선" in n
+    # 우선주 제외(등락률 상위엔 저유동 우선주가 잘 걸린다). '3우B'·'우(전환)' 등
+    # 접미 변형까지 커버: 숫자?우숫자?B?(괄호 주석)? 로 끝나는 이름.
+    return bool(re.search(r"[0-9]?우[0-9]?B?(\([^)]*\))?$", n)) or "우선" in n
 
 
-def filter_gainers(items: list[dict], cfg: dict) -> list[dict]:
+def filter_gainers(items: list[dict], cfg: dict,
+                   keep: frozenset = frozenset()) -> list[dict]:
     """급등률 상위에서 유동성·저가·비ETF·우선주 제외 후 상위 N. collect_only tier 부여
     (매매가능 저가주 = trade_max_price 이하 → 매매, 그 외 → 수집전용).
-    ka10027 은 거래대금 필드가 없어 '거래량×현재가(원)' 로 유동성을 근사한다."""
+    ka10027 은 거래대금 필드가 없어 '거래량×현재가(원)' 로 유동성을 근사한다.
+    keep: 기존 gainer 소스 코드 — 이미 감시 중이어도 유지(교체 시 탈락 방지)."""
     min_price = cfg.get("min_price", 1_000)
     min_tv = cfg.get("min_trade_value_krw", 100_000_000)   # 거래대금 근사 하한(원)
     tmax = cfg.get("trade_max_price", 30_000)
@@ -130,7 +133,8 @@ def filter_gainers(items: list[dict], cfg: dict) -> list[dict]:
         and it["price"] >= min_price
         and it["price"] * it.get("volume", 0) >= min_tv
         and not _is_excluded(it["name"])
-        and it["code"] not in settings.WATCHLIST
+        # seed/manual/auto 로 이미 감시 중이면 제외하되, 기존 gainer 는 유지
+        and (it["code"] not in settings.WATCHLIST or it["code"] in keep)
     ]
     picked.sort(key=lambda x: x["change_pct"], reverse=True)
     picked = picked[:top_n]
@@ -173,8 +177,12 @@ class Scanner:
         if not cfg.get("enabled", True):
             return []
         raw = await client.change_rate_rank(cfg.get("market", "001"))
-        self.gainers = filter_gainers(parse_rank(raw), cfg)
-        if cfg.get("auto_watch", True) and self.gainers:
+        # 기존 gainer 소스 코드는 이미 감시 중이어도 후보 유지(교체 시 탈락 방지)
+        keep = frozenset(e["code"] for e in watchlist.entries()
+                         if e.get("source") == "gainer")
+        self.gainers = filter_gainers(parse_rank(raw), cfg, keep=keep)
+        if cfg.get("auto_watch", True):
+            # 성공한 스캔은 빈 결과라도 반영 — 더 이상 급등이 아닌 종목을 정리
             watchlist.replace_gainers(self.gainers)
             await watchlist.notify()
         return self.gainers

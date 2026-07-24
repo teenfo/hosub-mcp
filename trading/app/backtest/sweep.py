@@ -17,19 +17,33 @@ from . import runner
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 OUT_FILE = Path(settings.DATA_DIR) / "rule_sweep.json"
+running = False   # 중복 실행 방지(수동 버튼 연타·토요일 자동과 겹침)
 
 
 def run_sweep() -> dict:
     """전 감시목록 분봉 × 레지스트리 전 규칙(각각 단독 활성) 백테스트."""
+    global running
+    if running:
+        return latest()
+    running = True
+    try:
+        return _run_sweep()
+    finally:
+        running = False
+
+
+def _run_sweep() -> dict:
     from ..data import store
     from ..signals.rules import REGISTRY
 
     risk_pct = settings.RISK.get("risk_per_trade_pct", 0.8)
     costs = settings.COSTS
     max_stop = settings.RULES.get("max_stop_pct", 0)
+    # 보관 중인 분봉 전체를 대상으로 한다(keep_days 120일 ≈ 4.8만봉 여유 상한).
+    bars_limit = settings.CONFIG.get("sweep", {}).get("bars_limit", 100_000)
     dfs = {}
     for sym in list(settings.WATCHLIST):
-        df = store.load_bars(sym, "1m", limit=5000)
+        df = store.load_bars(sym, "1m", limit=bars_limit)
         if len(df) >= 200:
             dfs[sym] = df
     results: dict = {}

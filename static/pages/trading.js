@@ -329,15 +329,19 @@ export default {
       } catch (e) { return ""; }
     };
     const loadOrders = async () => {
-      let all;
+      let all, pendingRows;
       try {
-        all = await fetchJSON("/api/trading/orders");
+        // pending 은 별도 조회 — 최근 이력 50건에 밀려 대기 주문이 안 보이는 것 방지
+        [pendingRows, all] = await Promise.all([
+          fetchJSON("/api/trading/orders?status=pending"),
+          fetchJSON("/api/trading/orders"),
+        ]);
       } catch (e) { return; }
       // 사용자가 발주 수량/금액을 편집 중이면 새로고침으로 입력값을 덮어쓰지 않는다.
       const act = document.activeElement;
       if (act && act.tagName === "INPUT" && pending.body.contains(act)) return;
-      if (!changed("orders", all)) return;
-      const orders = all.filter((o) => o.status === "pending");
+      if (!changed("orders", [pendingRows, all])) return;
+      const orders = pendingRows;
       const history = all.filter((o) => o.status !== "pending").slice(0, 8);
       pending.body.innerHTML = "";
       if (!orders.length) {
@@ -458,10 +462,19 @@ export default {
       tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>현재가</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량·상태</th><th>사유</th></tr>" }));
       const tb = el("tbody");
       for (const s of sigs.slice(0, 15)) {
+        // 비발주 사유를 note 로 구분 표시(잔고 부족/리스크 한도/국면/롱전용/보류)
+        const noteLabel = (n) => {
+          if (!n) return ["보류", "secondary"];
+          if (n.startsWith("잔고 부족")) return ["잔고 부족", "warning"];
+          if (n.startsWith("리스크 한도")) return ["리스크 한도", "warning"];
+          if (n.startsWith("국면 게이트")) return ["국면 보류", "info"];
+          if (n.startsWith("롱 전용")) return ["숏 미발주", "secondary"];
+          return ["보류", "secondary"];
+        };
         const statusEl = s.actionable
           ? badge(`승인대기 ${s.qty}주`, "success")
           : el("span", { class: "small text-secondary", title: s.note || "" },
-              s.qty >= 1 ? badge("보류", "secondary") : badge("잔고 부족", "warning"));
+              badge(...noteLabel(s.note)));
         // 현재가 셀 — data-px/data-entry 로 태깅해 refreshPrices 가 값만 갱신한다.
         const curTd = el("td", { class: "small text-end text-nowrap", "data-px": s.symbol,
           "data-entry": s.entry || "" }, s.cur_price ? fmt(s.cur_price) : "—");

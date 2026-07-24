@@ -224,6 +224,11 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
         return {"ok": False, "error": "신호 만료됨"}
     # 사용자가 발주 수량을 조정한 경우 반영 (청산 주문은 포지션 전량 매도라 고정)
     if qty is not None and order.get("kind") != "exit":
+        # 인버스 ETF 매핑 주문(신호 종목 ≠ 집행 종목)은 qty(신호 수량)와
+        # exec_qty(ETF 수량)가 다른 값이라 단순 덮어쓰기가 둘을 붕괴시킨다 → 미지원.
+        if order.get("exec_symbol") and order["exec_symbol"] != order["symbol"]:
+            return {"ok": False,
+                    "error": "인버스 매핑 주문은 수량 조정을 지원하지 않습니다"}
         try:
             qty = int(qty)
         except (TypeError, ValueError):
@@ -265,7 +270,10 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
             status = "pending"  # 재시도 소진 — 대기열 유지
         detail = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # noqa: BLE001 - 발주 실패는 기록하고 사용자에게 보여준다
-        status, detail = "error", str(e)
+        # 자동 재발주 중 일시 오류(타임아웃 등)면 조정 수량으로 대기열에 남겨
+        # 수동 재승인이 가능하게 한다. 첫 발주부터 실패한 경우만 error 처리.
+        status = "pending" if auto_adjusted else "error"
+        detail = str(e)
         result = {"error": str(e)}
     with _conn() as conn:
         if status == "pending":
@@ -284,6 +292,14 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
                 (status, detail, order["qty"], order["exec_qty"], order_id),
             )
             _audit(conn, order_id, status, detail)
+    # 청산 주문이 브로커 거부/오류로 끝나면 exit_pending 을 풀어 재제안 가능하게 한다
+    # (수동 거부·만료 경로와 동일 — 안 풀면 그 포지션은 다시는 청산 제안이 안 뜬다).
+    if status != "sent" and order.get("kind") == "exit" and order.get("link_pos"):
+        from . import ledger
+        try:
+            ledger.set_exit_pending(order["link_pos"], 0)
+        except Exception:  # noqa: BLE001
+            pass
     if status == "sent":
         from . import ledger
 
@@ -309,7 +325,11 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
         base = "발주 접수" + (f" · 주문번호 {result['ord_no']}" if result.get("ord_no") else "")
         message = base + (f" · 증거금 맞춰 {auto_adjusted}주로 자동 조정 발주" if auto_adjusted else "")
     elif status == "pending":
-        message = "매수증거금 부족 — 현재 자산으로 1주도 매수 불가. 대기열 유지"
+        if auto_adjusted:
+            message = (f"자동 조정({auto_adjusted}주) 발주 중 일시 오류 — "
+                       "대기열 유지, 다시 승인하세요")
+        else:
+            message = "매수증거금 부족 — 현재 자산으로 1주도 매수 불가. 대기열 유지"
     elif isinstance(result, dict):
         message = result.get("return_msg") or result.get("error") or "발주 거부"
     else:
