@@ -1,8 +1,11 @@
 """신호 평가 루프. 1분 주기로 감시 종목의 오늘 분봉을 평가해 승인 큐에 올린다."""
 import asyncio
+import json
 import logging
+import statistics
 import time
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import settings
@@ -12,6 +15,10 @@ from . import rules
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
+_REGIME_ORDER = {"약세": -1, "중립": 0, "강세": 1}
+_ORDER_REGIME = {-1: "약세", 0: "중립", 1: "강세"}
+# 야간 리포트(미국장 분석 등)가 남기는 익일 시장 편향 파일
+NIGHT_BIAS_FILE = Path(settings.DATA_DIR) / "night_bias.json"
 
 
 class SignalEngine:
@@ -29,26 +36,71 @@ class SignalEngine:
         self.guard: dict = {}          # 일일 목표·손실 가드 상태 (대시보드 노출)
         self.equity_synced = False     # 실계좌 잔고로 자산을 동기화했는가
         self._equity_synced_at = 0.0
-        self.regime = "중립"           # 시장 국면(강세/약세/중립) — 야간 발굴 breadth 기반
-        self._regime_at = 0.0
+        self.base_regime = "중립"      # 전일 breadth 기반 국면(야간 발굴)
+        self._base_regime_at = 0.0
+        self.gap_bias = "중립"         # 당일 시가 갭 방향
+        self.night_bias = "중립"       # 야간 리포트(미국장 등) 익일 편향
+        self.regime = "중립"           # 유효 국면 = base + 시가갭 + 야간리포트 결합
 
-    def _market_regime(self) -> str:
-        """최근 야간 발굴이 계산한 시장 국면(강세/약세/중립)을 읽는다(10분 캐시).
-        전일 전종목 breadth(60일선 상회 비율) 기반이라 '오늘 방향'의 확률적 편향."""
+    def _base_regime(self) -> str:
+        """야간 발굴이 계산한 전일 breadth 국면(강세/약세/중립). 10분 캐시."""
         now = time.monotonic()
-        if now - self._regime_at < 600 and self._regime_at:
-            return self.regime
+        if now - self._base_regime_at < 600 and self._base_regime_at:
+            return self.base_regime
         try:
             from .. import export
             m = (export.latest_manifest() or {}).get("market", {})
-            self.regime = m.get("regime") or "중립"
+            self.base_regime = m.get("regime") or "중립"
         except Exception:  # noqa: BLE001
-            self.regime = self.regime or "중립"
-        self._regime_at = now
+            self.base_regime = self.base_regime or "중립"
+        self._base_regime_at = now
+        return self.base_regime
+
+    def _open_gap_bias(self) -> str:
+        """당일 '시가 갭 방향' — 감시목록 종목들의 시가 갭 중앙값(전일 종가 대비).
+        갭하락(음수) 다수면 약세, 갭상승 다수면 강세. 표본 부족하면 중립."""
+        gate = settings.CONFIG.get("regime_gate", {})
+        if not gate.get("use_open_gap", True):
+            return "중립"
+        gaps = []
+        for sym in list(settings.WATCHLIST):
+            df, prev = self._today_df(sym)
+            if prev and df is not None and not df.empty:
+                gaps.append((float(df["open"].iloc[0]) - prev) / prev * 100)
+        if len(gaps) < 5:
+            return "중립"
+        med = statistics.median(gaps)
+        th = float(gate.get("open_gap_th", 0.5))
+        return "약세" if med <= -th else ("강세" if med >= th else "중립")
+
+    def _read_night_bias(self) -> str:
+        """야간 리포트가 남긴 익일 시장 편향(오늘 날짜일 때만 반영)."""
+        gate = settings.CONFIG.get("regime_gate", {})
+        if not gate.get("use_night_bias", True):
+            return "중립"
+        try:
+            d = json.loads(NIGHT_BIAS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "중립"
+        if d.get("date") != datetime.now(KST).date().isoformat():
+            return "중립"     # 오래된 편향은 무시
+        r = d.get("regime")
+        return r if r in _REGIME_ORDER else "중립"
+
+    def _effective_regime(self) -> str:
+        """유효 국면 = 전일 breadth(기준)에 당일 시가갭·야간리포트 편향을 합성.
+        야간리포트(미국장 반영)가 있으면 기준을 그 값으로 두고, 시가갭으로 ±1 보정."""
+        base = self._base_regime()
+        self.night_bias = self._read_night_bias()
+        anchor = self.night_bias if self.night_bias != "중립" else base
+        self.gap_bias = self._open_gap_bias()
+        score = _REGIME_ORDER[anchor] + _REGIME_ORDER[self.gap_bias]
+        score = max(-1, min(1, score))
+        self.regime = _ORDER_REGIME[score]
         return self.regime
 
     def _inverse_blocked(self, symbol: str) -> bool:
-        """국면 게이트: 인버스 ETF 는 강세장(=지수 상승 예상)에서 매수 보류."""
+        """국면 게이트: 인버스 ETF 는 강세 유효국면(=지수 상승 예상)에서 매수 보류."""
         gate = settings.CONFIG.get("regime_gate", {})
         if not gate.get("enabled", True):
             return False
@@ -111,13 +163,15 @@ class SignalEngine:
         """당일 실현손익 + 목표/한도 대비 신규 진입 중단 여부."""
         from ..trade import ledger
 
+        self._effective_regime()   # 대시보드 표시용으로 유효 국면 최신화
         today = ledger.realized_today(self.equity)
         target = float(settings.RISK.get("daily_target_pct", 0) or 0)
         loss = float(settings.RISK.get("daily_loss_limit_pct", 0) or 0)
         halted, why = risk.day_guard(today["pct"], target, loss)
         return {**today, "daily_target_pct": target, "daily_loss_limit_pct": loss,
                 "equity": self.equity, "halted": halted, "reason": why,
-                "regime": self._market_regime()}
+                "regime": self.regime, "base_regime": self.base_regime,
+                "gap_bias": self.gap_bias, "night_bias": self.night_bias}
 
     def _today_df(self, symbol: str):
         df = store.load_bars(symbol, "1m", limit=800)
@@ -169,7 +223,7 @@ class SignalEngine:
         # 나중에 목록에서 빠져도 유예기간 동안 백필을 이어가게 한다.
         from ..data import roster
         roster.touch(settings.WATCHLIST)
-        self._market_regime()   # 시장 국면 갱신(인버스 게이트·대시보드 노출용)
+        self._effective_regime()   # 유효 국면 갱신(인버스 게이트·대시보드 노출용)
         # 재시작 후 첫 사이클: 오늘 이미 발사한 신호를 복원해 중복 발주 방지
         if not self._fired_restored:
             self._restore_fired()

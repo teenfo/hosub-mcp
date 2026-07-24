@@ -239,8 +239,10 @@ export default {
       gStatus.appendChild(el("div", { class: "mt-2 d-flex gap-2 align-items-center flex-wrap" }, [
         r.halted ? el("span", { class: "badge text-bg-warning" }, r.reason)
           : el("span", { class: "badge text-bg-success" }, "정상 — 진입 허용"),
-        r.regime ? el("span", { class: "badge text-bg-" + (r.regime === "강세" ? "danger" : r.regime === "약세" ? "primary" : "secondary") },
-          `시장 ${r.regime}${r.regime === "강세" ? " · 인버스 매수 보류" : r.regime === "약세" ? " · 인버스 매수 허용" : ""}`) : null,
+        r.regime ? el("span", {
+          class: "badge text-bg-" + (r.regime === "강세" ? "danger" : r.regime === "약세" ? "primary" : "secondary"),
+          title: `전일 breadth ${r.base_regime || "-"} · 당일 시가갭 ${r.gap_bias || "-"} · 야간리포트 ${r.night_bias || "-"}` },
+          `시장 ${r.regime}${r.regime === "강세" ? " · 인버스 매수 보류" : " · 인버스 매수 허용"}`) : null,
       ]));
       if (!r.halted && hi > 0 && r.pct < hi) {
         gStatus.appendChild(el("div", { class: "text-secondary mt-1" }, `목표까지 ${(hi - r.pct).toFixed(2)}% 남음`));
