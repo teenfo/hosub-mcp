@@ -265,6 +265,12 @@ async def api_signals(_=Depends(require_auth)):
             for s in engine.last_signals]
 
 
+@app.get("/api/prices")
+async def api_prices(_=Depends(require_auth)):
+    """감시목록 종목의 현재가 맵 — 프론트가 가격 셀만 2초 주기로 부분 갱신."""
+    return {"prices": {code: _price_of(code) for code in settings.WATCHLIST}}
+
+
 @app.get("/api/backtest/coverage")
 async def api_backtest_coverage(_=Depends(require_auth)):
     """감시목록 종목별 분봉 축적 일수(백테스트 표본 크기 확인용).

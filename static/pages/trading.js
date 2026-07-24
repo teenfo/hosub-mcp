@@ -22,6 +22,18 @@ async function postJSON(path, body) {
 }
 
 const fmt = (n) => Number(n).toLocaleString("ko-KR", { maximumFractionDigits: 0 });
+// 가격 셀 렌더: 현재가 + (진입가 있으면) 괴리%. 초기 렌더·부분 갱신에 공용.
+function priceCellHTML(cell, price, entry) {
+  if (price == null || price === "" || isNaN(Number(price))) { cell.textContent = "—"; return; }
+  entry = Number(entry) || 0;
+  if (entry) {
+    const gap = (price - entry) / entry * 100;
+    cell.innerHTML = `<span class="fw-semibold">${fmt(price)}</span>` +
+      `<span class="small ms-1 ${gap >= 0 ? "text-danger" : "text-primary"}">${gap >= 0 ? "+" : ""}${gap.toFixed(2)}%</span>`;
+  } else {
+    cell.textContent = fmt(price);
+  }
+}
 // 생성 시각 → "N분 전" / 만료 시각 → "만료 M분" (staleness 표시)
 const agoStr = (iso) => {
   if (!iso) return "";
@@ -396,7 +408,9 @@ export default {
     const loadWatch = async () => {
       let w;
       try { w = await fetchJSON("/api/trading/watchlist"); } catch (e) { return; }
-      if (!changed("watch", w)) return;
+      // 가격은 refreshPrices 가 셀만 갱신하므로, 표 재렌더는 '구조 변경'일 때만.
+      const wKey = w.entries.map((e) => `${e.code}:${e.name}:${e.source}:${e.collect_only ? 1 : 0}`).join("|");
+      if (!changed("watch", wKey)) return;
       wTblWrap.innerHTML = "";
       const nTrade = w.entries.filter((e) => !e.collect_only).length;
       const nCollect = w.entries.length - nTrade;
@@ -431,7 +445,7 @@ export default {
         };
         tb.appendChild(el("tr", {}, [
           el("td", {}, `${it.name} (${it.code})`),
-          el("td", { class: "text-end fw-semibold" }, it.cur_price ? fmt(it.cur_price) : "—"),
+          el("td", { class: "text-end fw-semibold", "data-px": it.code }, it.cur_price ? fmt(it.cur_price) : "—"),
           el("td", {}, badge(label, tone)),
           el("td", {}, modeBadge),
           el("td", { class: "text-nowrap" }, [btBtn, modeBtn, rm]),
@@ -973,7 +987,9 @@ export default {
       try {
         sigs = await fetchJSON("/api/trading/signals");
       } catch (e) { return; }
-      if (!changed("signals", sigs)) return;
+      // 가격은 refreshPrices 가 셀만 갱신 — 표 재렌더는 신호 목록이 바뀔 때만.
+      const sKey = sigs.map((s) => `${s.ts}:${s.symbol}:${s.rule}:${s.qty}:${s.actionable ? 1 : 0}`).join("|");
+      if (!changed("signals", sKey)) return;
       signals.body.innerHTML = "";
       if (!sigs.length) {
         signals.body.appendChild(el("div", { class: "text-secondary small" }, "오늘 신호 없음"));
@@ -989,18 +1005,14 @@ export default {
           ? badge(`승인대기 ${s.qty}주`, "success")
           : el("span", { class: "small text-secondary", title: s.note || "" },
               s.qty >= 1 ? badge("보류", "secondary") : badge("잔고 부족", "warning"));
-        // 현재가 + 진입가 대비 괴리(실시간)
-        const gap = (s.cur_price && s.entry) ? (s.cur_price - s.entry) / s.entry * 100 : null;
-        const curEl = !s.cur_price ? el("span", { class: "text-secondary" }, "—")
-          : el("span", { class: "text-nowrap" }, [
-              el("span", { class: "fw-semibold" }, fmt(s.cur_price)),
-              gap == null ? null : el("span", { class: "small ms-1 " + (gap >= 0 ? "text-danger" : "text-primary") },
-                `${gap >= 0 ? "+" : ""}${gap.toFixed(2)}%`),
-            ]);
+        // 현재가 셀 — data-px/data-entry 로 태깅해 refreshPrices 가 값만 갱신한다.
+        const curTd = el("td", { class: "small text-end text-nowrap", "data-px": s.symbol,
+          "data-entry": s.entry || "" }, s.cur_price ? fmt(s.cur_price) : "—");
+        priceCellHTML(curTd, s.cur_price, s.entry);
         tb.appendChild(el("tr", {}, [
           el("td", { class: "small text-secondary text-nowrap" }, agoStr(s.ts)),
           el("td", {}, `${s.name} (${s.symbol})`),
-          el("td", { class: "small text-end" }, curEl),
+          curTd,
           el("td", {}, s.rule),
           el("td", {}, sideBadge(s.side)),
           el("td", { class: "small" }, s.entry ? `${fmt(s.entry)} / ${fmt(s.stop)} / ${fmt(s.target)}` : "—"),
@@ -1012,10 +1024,22 @@ export default {
       signals.body.appendChild(el("div", { class: "table-responsive" }, tbl));
     };
 
+    // 현재가만 2초 주기로 셀 부분 갱신(표 재렌더 없이 → 버튼 안 흔들림)
+    const refreshPrices = async () => {
+      let m;
+      try { m = await fetchJSON("/api/trading/prices"); } catch (e) { return; }
+      const prices = (m && m.prices) || {};
+      container.querySelectorAll("[data-px]").forEach((cell) => {
+        const p = prices[cell.getAttribute("data-px")];
+        if (p == null) return;   // 값 없으면 직전 표시 유지
+        priceCellHTML(cell, p, cell.getAttribute("data-entry"));
+      });
+    };
+
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadPerformance(), loadRisk()]);
-    ctx.addTimer(setInterval(() => { loadWatch(); loadSignals(); }, 2_000));   // 현재가 실시간(2초)
-    ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadScanner(); }, 10_000));
-    ctx.addTimer(setInterval(() => { loadDiscovery(); loadPerformance(); loadRisk(); }, 30_000));
+    ctx.addTimer(setInterval(refreshPrices, 2_000));   // 현재가 셀만 2초 갱신
+    ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
+    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); loadRisk(); }, 30_000));
     ctx.addTimer(setInterval(() => { loadReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },
