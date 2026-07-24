@@ -115,7 +115,9 @@ export default {
     const runBacktest = async () => {
       const code = btInput.value.trim();
       if (!/^\d{6}$/.test(code)) { btOut.innerHTML = ""; btOut.appendChild(el("div", { class: "text-danger" }, "6자리 종목코드를 입력하세요")); return; }
-      btOut.textContent = "실행 중…";
+      if (btRun.disabled) return; // 실행 중 중복 요청 방지
+      btRun.disabled = true;
+      btOut.textContent = "실행 중… (봉이 많거나 스윕과 겹치면 수십 초 걸릴 수 있음)";
       try {
         const r = await fetchJSON(`/api/trading/backtest/${code}?tf=${btTf.value}`);
         btOut.innerHTML = "";
@@ -143,6 +145,7 @@ export default {
           ]),
         );
       } catch (e) { btOut.innerHTML = ""; btOut.appendChild(el("div", { class: "text-danger" }, "실패: " + e.message)); }
+      finally { btRun.disabled = false; }
     };
     btRun.onclick = runBacktest;
     btInput.addEventListener("keydown", (e) => { if (e.key === "Enter") runBacktest(); });

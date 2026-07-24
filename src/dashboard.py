@@ -76,8 +76,9 @@ _TRADING_POST_RE = re.compile(
     r"|discovery/run|symbols/refresh|backtest/report/run|backtest/sweep/run|risk"
     r"|positions/[0-9a-f]{12}/close)$"
 )
-# 전 종목 백테스트 리포트 재계산은 수십 초 걸린다 — 이 경로만 프록시 타임아웃을 늘린다.
-_TRADING_SLOW_PATHS = {"backtest/report/run"}
+# 백테스트는 오래 걸린다(전 종목 리포트 수십 초, 종목별 재생도 봉이 쌓일수록·
+# 스윕과 겹칠수록 수 초~수십 초) — 이 경로들만 프록시 타임아웃을 늘린다.
+_TRADING_SLOW_RE = re.compile(r"^backtest/(report/run|\d{6})$")
 
 
 def _is_authed(request) -> bool:
@@ -241,7 +242,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
                 headers["Content-Type"] = request.headers.get(
                     "content-type", "application/json"
                 )
-            timeout = 180.0 if path in _TRADING_SLOW_PATHS else 15.0
+            timeout = 180.0 if _TRADING_SLOW_RE.match(path) else 15.0
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.request(
                     request.method,

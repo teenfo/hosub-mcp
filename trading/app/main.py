@@ -335,13 +335,16 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
     tf=1m 분봉(축적분) 또는 1d 일봉. 분봉 다일치 축적 전에는 표본이 얇다."""
     from .backtest import runner
 
-    df = store.load_bars(symbol, tf if tf in ("1m", "1d") else "1m", limit=50000)
+    # pandas 재생은 수 초 걸린다 — 이벤트 루프(신호·주문·시세)를 막지 않도록
+    # 봉 로드부터 재생까지 통째로 워커 스레드에서 실행한다.
+    df = await asyncio.to_thread(
+        store.load_bars, symbol, tf if tf in ("1m", "1d") else "1m", 50000)
     if df.empty:
         return {"ok": False, "symbol": symbol, "error": "저장된 봉이 없습니다"}
     days = int(df.index.normalize().nunique())
     # 롱 전용 실전과 정합: 집행 불가한 숏은 백테스트에서도 미체결 처리
     sides = ("long",) if settings.RISK.get("long_only") else None
-    result = runner.run(symbol, df, sides=sides)
+    result = await asyncio.to_thread(runner.run, symbol, df, sides=sides)
     trades = [
         {"rule": t.rule, "side": t.side, "entry": round(t.entry, 2),
          "exit": None if t.exit is None else round(t.exit, 2),
