@@ -403,7 +403,7 @@ export default {
       wTblWrap.appendChild(el("div", { class: "small text-secondary mb-2" },
         `매매 ${nTrade} · 수집전용 ${nCollect} — 수집전용은 데이터만 모으고 신호·주문은 만들지 않음`));
       const tbl = el("table", { class: "table table-sm align-middle mb-0 small" });
-      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>출처</th><th>모드</th><th></th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>종목</th><th>현재가</th><th>출처</th><th>모드</th><th></th></tr>" }));
       const tb = el("tbody");
       for (const it of w.entries) {
         const [label, tone] = SOURCE_BADGE[it.source] || [it.source, "secondary"];
@@ -431,6 +431,7 @@ export default {
         };
         tb.appendChild(el("tr", {}, [
           el("td", {}, `${it.name} (${it.code})`),
+          el("td", { class: "text-end fw-semibold" }, it.cur_price ? fmt(it.cur_price) : "—"),
           el("td", {}, badge(label, tone)),
           el("td", {}, modeBadge),
           el("td", { class: "text-nowrap" }, [btBtn, modeBtn, rm]),
@@ -981,16 +982,25 @@ export default {
       signals.body.appendChild(el("div", { class: "small text-secondary mb-2" },
         el("span", { html: '<i class="bi bi-info-circle"></i> 감시 신호는 <b>금액 제한 없이</b> 산출(감사용) · 실제 발주는 잔고를 반영한 “승인 대기 주문”에서 · 진입가는 <b>감지 시점 기준</b>' })));
       const tbl = el("table", { class: "table table-sm mb-0" });
-      tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량·상태</th><th>사유</th></tr>" }));
+      tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>현재가</th><th>규칙</th><th>방향</th><th>진입/손절/목표</th><th>수량·상태</th><th>사유</th></tr>" }));
       const tb = el("tbody");
       for (const s of sigs.slice(0, 15)) {
         const statusEl = s.actionable
           ? badge(`승인대기 ${s.qty}주`, "success")
           : el("span", { class: "small text-secondary", title: s.note || "" },
               s.qty >= 1 ? badge("보류", "secondary") : badge("잔고 부족", "warning"));
+        // 현재가 + 진입가 대비 괴리(실시간)
+        const gap = (s.cur_price && s.entry) ? (s.cur_price - s.entry) / s.entry * 100 : null;
+        const curEl = !s.cur_price ? el("span", { class: "text-secondary" }, "—")
+          : el("span", { class: "text-nowrap" }, [
+              el("span", { class: "fw-semibold" }, fmt(s.cur_price)),
+              gap == null ? null : el("span", { class: "small ms-1 " + (gap >= 0 ? "text-danger" : "text-primary") },
+                `${gap >= 0 ? "+" : ""}${gap.toFixed(2)}%`),
+            ]);
         tb.appendChild(el("tr", {}, [
           el("td", { class: "small text-secondary text-nowrap" }, agoStr(s.ts)),
           el("td", {}, `${s.name} (${s.symbol})`),
+          el("td", { class: "small text-end" }, curEl),
           el("td", {}, s.rule),
           el("td", {}, sideBadge(s.side)),
           el("td", { class: "small" }, s.entry ? `${fmt(s.entry)} / ${fmt(s.stop)} / ${fmt(s.target)}` : "—"),
@@ -1003,8 +1013,8 @@ export default {
     };
 
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadScanner(), loadDiscovery(), loadWatch(), loadReport(), loadPerformance(), loadRisk()]);
-    ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); }, 10_000));
-    ctx.addTimer(setInterval(() => { loadDiscovery(); loadWatch(); loadPerformance(); loadRisk(); }, 30_000));
+    ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); loadScanner(); loadWatch(); }, 10_000));
+    ctx.addTimer(setInterval(() => { loadDiscovery(); loadPerformance(); loadRisk(); }, 30_000));
     ctx.addTimer(setInterval(() => { loadReport(); }, 300_000));
     ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
   },

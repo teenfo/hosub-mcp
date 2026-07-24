@@ -260,7 +260,9 @@ async def api_bars(symbol: str, tf: str = "1m", live: int = 0, _=Depends(require
 
 @app.get("/api/signals")
 async def api_signals(_=Depends(require_auth)):
-    return engine.last_signals
+    # 각 신호에 현재가를 실시간으로 덧붙인다(진입가 대비 괴리 표시용).
+    return [{**s, "cur_price": _price_of(s.get("symbol", ""))}
+            for s in engine.last_signals]
 
 
 @app.get("/api/backtest/coverage")
@@ -432,7 +434,10 @@ async def api_discovery_run(_=Depends(require_auth)):
 
 @app.get("/api/watchlist")
 async def api_watchlist(_=Depends(require_auth)):
-    return {"entries": watchlist.entries()}
+    entries = watchlist.entries()
+    for e in entries:                       # 실시간 현재가 덧붙임
+        e["cur_price"] = _price_of(e.get("code", ""))
+    return {"entries": entries}
 
 
 @app.post("/api/watchlist")
