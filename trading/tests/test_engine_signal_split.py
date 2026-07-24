@@ -50,6 +50,40 @@ async def test_affordable_signal_creates_pending_order(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_long_only_blocks_short_orders(monkeypatch):
+    # 롱 전용 모드: 숏 신호는 기록만 하고 발주하지 않는다(잔고 충분해도).
+    monkeypatch.setitem(settings.RISK, "long_only", True)
+    eng = SignalEngine(equity=10_000_000)
+    sig = Signal(rule="orb", side="short", entry=10_000, stop=10_200,
+                 target=9_400, reason="하락 이탈")
+    _prep(monkeypatch, eng, sig)
+    calls = []
+    monkeypatch.setattr(engine_mod.orders, "propose",
+                        lambda s, q: (calls.append(q), "oid")[1])
+
+    found = await eng.run_once()
+    assert len(found) == 1
+    assert found[0]["actionable"] is False
+    assert "롱 전용" in found[0]["note"]
+    assert calls == []                              # 숏은 발주되지 않는다
+
+
+@pytest.mark.asyncio
+async def test_long_only_allows_long_orders(monkeypatch):
+    monkeypatch.setitem(settings.RISK, "long_only", True)
+    eng = SignalEngine(equity=10_000_000)
+    sig = Signal(rule="orb", side="long", entry=10_000, stop=9_800,
+                 target=10_400, reason="롱 신호")
+    _prep(monkeypatch, eng, sig)
+    calls = []
+    monkeypatch.setattr(engine_mod.orders, "propose",
+                        lambda s, q: (calls.append(q), "oidL")[1])
+
+    found = await eng.run_once()
+    assert found[0]["actionable"] is True and calls    # 롱은 정상 발주
+
+
+@pytest.mark.asyncio
 async def test_unaffordable_signal_recorded_but_no_order(monkeypatch):
     # 자산 142,589원으로 44만원짜리 종목 → 1주도 못 산다
     eng = SignalEngine(equity=142_589)

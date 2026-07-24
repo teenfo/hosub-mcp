@@ -9,8 +9,9 @@ watchlist:
   "073240": 금호타이어
   "060250": NHN KCP
   "064260": 다날
-# 숏 신호를 인버스 ETF 매수로 집행할 때 사용할 매핑
-inverse_etf: "114800"   # KODEX 인버스 (지수 하락 베팅용)
+# 숏 신호를 인버스 ETF 매수로 집행할 때 사용할 매핑.
+# 주의: long_only=true(롱 전용) 이면 숏 신호를 아예 발주하지 않으므로 이 값은 미사용.
+inverse_etf: "114800"   # KODEX 인버스 (지수 하락 베팅용 — 롱 전용에선 미사용)
 
 # 급등주 스캐너: 거래대금상위(ka10032)에서 등락률·거래대금·가격 필터 교차
 scanner:
@@ -74,6 +75,7 @@ backtest:
   run_after: "15:40"            # 장 마감 후 실행 시각(KST)
 
 risk:
+  long_only: true             # 롱 전용 — 현물 계좌는 개별주 공매도 불가, 숏 신호 미발주
   risk_per_trade_pct: 0.5     # 1회 손절 시 계좌 대비 최대 손실 %
   daily_target_pct: 1.0       # 일일 목표 % (도달 시 이익 확정·신규 진입 중단) — UI에서 변경
   daily_loss_limit_pct: 2.0   # 일일 누적 손실 한도 % (도달 시 신규 진입 중단) — UI에서 변경
@@ -95,9 +97,10 @@ rules:
     range_wait_until: "10:00" # 첫 1시간 범위 형성 대기
     trail_long_pct: 8.0
     trail_short_pct: 4.0
-  # 반등 페이드 — 딥리서치 검증 결론(하락장 단타의 추세 정렬 방향)을 코드화한 규칙
+  # 반등 페이드 — 딥리서치 검증 결론(하락장 단타의 추세 정렬 방향)을 코드화한 규칙.
+  # 숏 전용 규칙 → 롱 전용 모드에선 발주되지 않으므로 비활성(신호 산출도 생략).
   bounce_fade:
-    enabled: true
+    enabled: false
     rsi_hot: 60               # 반등 과열 하한 (딥리서치: RSI 60~70 도달이 매도 기회)
     rsi_max: 100              # 반등 과열 상한 (필요 시 70 으로 좁힘)
     lookback: 30              # 저점 갱신 구조 확인용 봉 수
@@ -106,8 +109,8 @@ rules:
     atr_period: 14
     require_downtrend: true   # 1단계 추세 게이트: 일봉 하락(역배열/장기선 하회)일 때만
     require_volume_dry: false # 반등 거래량 소진 조건(옵션)
-  breakdown_retest:
-    enabled: true
+  breakdown_retest:              # 숏 전용 규칙 → 롱 전용 모드에선 비활성
+    enabled: false
     support_lookback: 60      # 지지선 산출용 봉 수
     retest_tolerance_pct: 0.3
     atr_stop_mult: 0.5        # 손절 = 지지선 + 0.5×ATR
