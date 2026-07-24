@@ -121,6 +121,7 @@ async def lifespan(app: FastAPI):
     # 키가 입력되는 즉시 다음 주기부터 동작한다.
     tasks = [
         asyncio.create_task(engine.loop()),
+        asyncio.create_task(engine.roster_loop()),   # 감시목록 이탈 종목 수집 연속성
         asyncio.create_task(_feed_starter()),
         asyncio.create_task(scanner.loop()),
         asyncio.create_task(discovery.loop()),
