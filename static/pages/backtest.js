@@ -1,38 +1,110 @@
 import { fetchJSON, el, card } from "../app.js";
+import { postJSON, fmt, won, pct, makeChanged } from "./tradelib.js";
 
-// 규칙 백테스트 페이지 (트레이딩 그룹). 감시목록 카드의 '백테스트' 버튼이
-// sessionStorage("backtest:symbol") 로 종목을 넘겨 이 페이지에서 자동 실행된다.
-
-async function postJSON(path, body) {
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { Accept: "application/json", ...(body ? { "Content-Type": "application/json" } : {}) },
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  if (res.status === 401) { window.location.href = "/login"; throw new Error("unauthorized"); }
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
-  return data;
-}
+// 성과·백테스트 페이지 (트레이딩 그룹): 실거래 성과 로그 + 규칙 백테스트(검증·리뷰).
+// 감시목록 카드의 '백테스트' 버튼이 sessionStorage("backtest:symbol") 로
+// 종목을 넘겨 이 페이지에서 자동 실행된다.
 
 export default {
   id: "backtest",
-  title: "규칙 백테스트",
+  title: "성과·백테스트",
   icon: "bi-clipboard-data",
   group: "트레이딩",
   async render(container, ctx) {
-    const _memo = {};
-    const changed = (key, data) => {
-      const s = JSON.stringify(data);
-      if (_memo[key] === s) return false;
-      _memo[key] = s;
-      return true;
-    };
+    const changed = makeChanged();
     const row = el("div", { class: "row g-3" });
     container.appendChild(row);
+    const perfC = card("실거래 성과 로그", null, { wide: true, icon: "bi-cash-coin" });
+    perfC.col.className = "col-12";
+    row.appendChild(perfC.col);
     const backtestC = card("규칙 백테스트 (내 데이터 검증)", null, { wide: true, icon: "bi-clipboard-data" });
     backtestC.col.className = "col-12";
     row.appendChild(backtestC.col);
+
+    // --- 실거래 성과 로그 (매매 데스크에서 이동 — 검증·리뷰 페이지 소속) ---
+    const perfBody = el("div");
+    perfC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-cash-coin"></i> 승인·발주된 신호의 <b>진입가·청산가·실현손익·슬리피지</b>를 추적. 진입가는 주문체결 실시간 수신 시 <b>실측</b>으로 갱신(미수신분은 <b>근사</b>). 손절/목표 터치는 장중 30초 감시, 미청산분은 장 마감에 종가 정리.' })),
+      perfBody,
+    );
+    const closePosition = async (id) => {
+      if (!confirm("이 추적 포지션을 현재가로 청산 처리할까요? (장부상 기록 — 실제 청산 주문은 별도)")) return;
+      try { await postJSON(`/api/trading/positions/${id}/close`); changed.invalidate("perf"); await loadPerformance(); }
+      catch (e) { alert("실패: " + e.message); }
+    };
+    const loadPerformance = async () => {
+      let d;
+      try { d = await fetchJSON("/api/trading/performance"); } catch (e) { return; }
+      if (!changed("perf", d)) return;
+      perfBody.innerHTML = "";
+      const o = (d.stats && d.stats.overall) || {};
+      if (!o.trades && !(d.open || []).length) {
+        perfBody.appendChild(el("div", { class: "text-secondary small" },
+          "아직 기록 없음 — 승인·발주된 주문이 생기면 여기에 진입/청산/손익이 쌓입니다."));
+        return;
+      }
+      if (o.trades) {
+        const tone = o.total_pnl_krw >= 0 ? "text-danger" : "text-primary"; // 한국식: 이익 빨강
+        const stat = (k, v, cls) => el("div", { class: "col-6 col-md-3 col-xl-2" },
+          el("div", { class: "border rounded p-2" }, [el("div", { class: "text-secondary small" }, k), el("div", { class: "fw-semibold " + (cls || "") }, v)]));
+        perfBody.appendChild(el("div", { class: "row g-2 mb-3" }, [
+          stat("청산", o.trades + "건"), stat("승률", o.win_rate + "%"),
+          stat("건당 기대값", pct(o.expectancy_pct)), stat("실현손익", won(o.total_pnl_krw), tone),
+          stat("손익비(PF)", o.profit_factor == null ? "∞" : o.profit_factor), stat("평균 슬리피지", o.avg_slippage_pct + "%"),
+        ]));
+        const byRule = d.stats.by_rule || {};
+        if (Object.keys(byRule).length) {
+          perfBody.appendChild(el("div", { class: "small text-secondary mb-3" },
+            "규칙별 기대값: " + Object.entries(byRule).map(([k, v]) => `${k} ${pct(v.expectancy_pct)}(${v.trades}건 · 승률 ${v.win_rate}%)`).join(" · ")));
+        }
+      }
+      const opens = d.open || [];
+      perfBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, `보유(추적 중) ${opens.length}건`));
+      if (opens.length) {
+        const t = el("table", { class: "table table-sm align-middle mb-3 small" });
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입</th><th>체결</th><th>손절</th><th>목표</th><th></th></tr>" }));
+        const tb = el("tbody");
+        for (const p of opens) {
+          const fc = p.fill_confirmed
+            ? '<span class="badge text-bg-success">실측</span>'
+            : '<span class="badge text-bg-secondary">근사</span>';
+          const tr = el("tr", {
+            html: `<td>${p.name || p.symbol}</td><td>${p.rule}</td>` +
+              `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)}</td><td>${fc}</td>` +
+              `<td>${fmt(p.stop)}</td><td>${fmt(p.target)}</td>`,
+          });
+          const td = el("td");
+          const b = el("button", { class: "btn btn-sm btn-outline-secondary py-0", type: "button" }, "청산");
+          b.onclick = () => closePosition(p.id);
+          td.appendChild(b); tr.appendChild(td); tb.appendChild(tr);
+        }
+        t.appendChild(tb);
+        perfBody.appendChild(el("div", { class: "table-responsive" }, t));
+      } else {
+        perfBody.appendChild(el("div", { class: "text-secondary small mb-3" }, "보유 포지션 없음"));
+      }
+      const closed = d.closed || [];
+      if (closed.length) {
+        perfBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, "최근 청산"));
+        const t = el("table", { class: "table table-sm align-middle mb-0 small" });
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>방향</th><th>진입→청산</th><th>체결</th><th>사유</th><th>손익%</th><th>손익</th></tr>" }));
+        const tb = el("tbody");
+        for (const p of closed) {
+          const cls = p.pnl_pct >= 0 ? "text-danger" : "text-primary";
+          const fc = p.fill_confirmed ? "실측" : "근사";
+          tb.appendChild(el("tr", {
+            html: `<td>${p.name || p.symbol}</td><td>${p.rule}</td>` +
+              `<td>${p.side === "short" ? "숏" : "롱"}</td><td>${fmt(p.entry)} → ${fmt(p.exit)}</td>` +
+              `<td class="text-secondary">${fc}</td>` +
+              `<td>${p.exit_reason}</td><td class="${cls}">${pct(p.pnl_pct)}</td>` +
+              `<td class="${cls}">${won(p.pnl_krw)}</td>`,
+          }));
+        }
+        t.appendChild(tb);
+        perfBody.appendChild(el("div", { class: "table-responsive" }, t));
+      }
+    };
 
     // --- 규칙 백테스트 (비용 반영, 내 데이터 검증) ---
     const btInput = el("input", { class: "form-control form-control-sm", placeholder: "종목코드 6자리", style: "max-width:150px" });
@@ -149,7 +221,7 @@ export default {
     };
     rptRun.onclick = async () => {
       rptRun.disabled = true; rptOut.textContent = "실행 중… (전 종목 백테스트, 수십 초 소요)";
-      try { await postJSON("/api/trading/backtest/report/run"); _memo["btreport"] = undefined; await loadBacktestReport(); }
+      try { await postJSON("/api/trading/backtest/report/run"); changed.invalidate("btreport"); await loadBacktestReport(); }
       catch (e) { rptOut.textContent = "실패: " + e.message; }
       finally { rptRun.disabled = false; }
     };
@@ -172,8 +244,8 @@ export default {
       runBacktest();
     }
 
-    await Promise.all([loadCoverage(), loadBacktestReport()]);
-    ctx.addTimer(setInterval(loadCoverage, 30_000));
+    await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport()]);
+    ctx.addTimer(setInterval(() => { loadPerformance(); loadCoverage(); }, 30_000));
     ctx.addTimer(setInterval(loadBacktestReport, 300_000));
   },
 };
