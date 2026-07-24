@@ -10,6 +10,7 @@ const RULE_LABEL = {
   gap: "갭 플레이",
   momentum: "모멘텀 돌파",
   pullback: "눌림목",
+  rsi_dip: "RSI 급락 눌림",
   gap_fill: "갭필 평균회귀",
   vwap_reclaim: "VWAP 되찾기",
   range_break_retest: "박스 돌파 리테스트",
@@ -31,7 +32,7 @@ const PARAM_LABEL = {
   vol_ratio: "거래량 배수(0=끔)", range_lookback: "박스 산출 봉수",
   regimes: "활성 국면(자동 연동)", min_gap_pct: "갭하락 최소 %",
   confirm_bars: "반전 확인 봉수", min_rr: "최소 손익비", max_range_pct: "범위 상한 %",
-  min_range_pct: "범위 하한 %",
+  min_range_pct: "범위 하한 %", rsi_period: "RSI 기간", oversold: "과매도 기준",
 };
 const sideBadgeOf = (side) =>
   side === "long" ? badge("롱 전용", "success")
@@ -54,12 +55,13 @@ export default {
     row.appendChild(rulesRow);
 
     const load = async () => {
-      let r, perf, risk, bt;
+      let r, perf, risk, bt, sw;
       try { r = await fetchJSON("/api/trading/rules"); } catch (e) { return; }
       try { perf = await fetchJSON("/api/trading/performance"); } catch (e) { perf = null; }
       try { risk = await fetchJSON("/api/trading/risk"); } catch (e) { risk = null; }
       try { bt = await fetchJSON("/api/trading/backtest/report/latest"); } catch (e) { bt = null; }
-      if (!changed("rules", [r, perf && perf.stats, risk, bt && bt.summary])) return;
+      try { sw = await fetchJSON("/api/trading/backtest/sweep/latest"); } catch (e) { sw = null; }
+      if (!changed("rules", [r, perf && perf.stats, risk, bt && bt.summary, sw && sw.run_ts])) return;
 
       // --- 공통 안전장치 요약 ---
       sumC.body.innerHTML = "";
@@ -133,17 +135,33 @@ export default {
         // 실전/백테스트 성과 (있을 때만)
         const live = perfByRule[rule.name];
         const btr = btByRule[rule.name];
+        const swr = sw && sw.rules && sw.rules[rule.name];
         const perfBits = [];
         if (live) perfBits.push(`실전: ${live.trades}건 · 승률 ${live.win_rate}% · 기대값 ${pct(live.expectancy_pct)}`);
         if (btr != null) perfBits.push(`백테스트 건당손익: ${typeof btr === "object" ? JSON.stringify(btr) : btr}%`);
+        if (swr) perfBits.push(swr.trades
+          ? `주간스윕(${(sw.run_ts || "").slice(5, 10)}): ${swr.trades}건 · 승률 ${swr.win_rate}% · 평균R ${swr.avg_r >= 0 ? "+" : ""}${swr.avg_r}`
+          : `주간스윕: 표본 없음`);
         body.appendChild(el("div", { class: perfBits.length ? "text-body" : "text-secondary" },
           perfBits.length ? "📈 " + perfBits.join(" · ") : "성과 데이터 아직 없음 — 체결이 쌓이면 표시됩니다"));
         cardEl.appendChild(body);
         c.appendChild(cardEl);
         rulesRow.appendChild(c);
       }
+      const swBtn = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "기법 스윕 지금 실행");
+      swBtn.onclick = async () => {
+        if (!confirm("전 기법 격리 백테스트(수 분 소요)를 지금 실행할까요? 주문 없음.")) return;
+        swBtn.disabled = true;
+        try { const res = await postJSON("/api/trading/backtest/sweep/run"); alert(res.message || "시작됨"); }
+        catch (e) { alert("실패: " + e.message); }
+        finally { swBtn.disabled = false; }
+      };
+      rulesRow.appendChild(el("div", { class: "col-12 d-flex gap-2 align-items-center flex-wrap small text-secondary" }, [
+        swBtn,
+        el("span", {}, (sw && sw.run_ts) ? `최근 스윕 ${sw.run_ts.replace("T", " ").slice(0, 16)} · ${sw.symbols}종목 · 매주 토 09시 자동` : "스윕 결과 없음 — 매주 토 09시 자동 실행"),
+      ]));
       rulesRow.appendChild(el("div", { class: "col-12 small text-secondary" },
-        "⚙️ 파라미터 변경: trading/config.yaml rules 섹션 · 새 기법 추가: app/signals/rules.py 레지스트리(@register) — 함수 + 데코레이터 + config 블록이면 끝."));
+        "⚙️ 파라미터 변경: trading/config.yaml rules 섹션 · 새 기법 추가: app/signals/rules.py 레지스트리(@register) — 함수 + 데코레이터 + config 블록이면 끝. 주간 스윕이 매주 성적표를 갱신합니다."));
     };
 
     await load();

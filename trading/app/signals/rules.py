@@ -214,6 +214,37 @@ def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
                   "상승추세 20MA 눌림 반등", ts=df.index[-1])
 
 
+@register("rsi_dip", side="long")
+def rsi_dip(df: pd.DataFrame, cfg: dict) -> Signal | None:
+    """RSI 급락 눌림(롱) — Connors RSI-2 평균회귀의 장중 적응. 세션 상승 구조에서
+    단기 RSI(기본 3)가 과매도로 급락(패닉 딥)한 직후 반등 양봉이 나오면 진입.
+    문헌 근거: 주식 RSI-2 계열은 승률 75%+ 의 검증된 평균회귀 엣지(추세 필터 필수).
+    손절은 눌림 저점 - ATR, 목표 = target_r × 손절 거리."""
+    if len(df) < cfg.get("min_bars", 40):
+        return None
+    rsi = ind.rsi(df["close"], cfg.get("rsi_period", 3))
+    last = df.iloc[-1]
+    if pd.isna(rsi.iloc[-1]) or pd.isna(rsi.iloc[-2]):
+        return None
+    # 추세 필터(Connors 의 200MA 필터를 세션 구조로 적응): 세션 초반 대비 상승 유지
+    uptrend = last.close > float(df["close"].iloc[:10].mean())
+    if not uptrend:
+        return None
+    prev_r, cur_r = float(rsi.iloc[-2]), float(rsi.iloc[-1])
+    dipped = prev_r <= cfg.get("oversold", 15)          # 직전 봉까지 과매도 급락
+    if not (dipped and cur_r > prev_r and last.close > last.open):
+        return None                                      # 반등 양봉으로 확인 후 진입
+    dip_low = float(df["low"].iloc[-cfg.get("stop_lookback", 5):].min())
+    stop = dip_low - _atr_buffer(df, cfg, dip_low * 0.001)
+    if stop >= last.close:
+        return None
+    r = cfg.get("target_r", 1.5)
+    return Signal("rsi_dip", "long", float(last.close), stop,
+                  _target(float(last.close), stop, "long", r),
+                  f"RSI{cfg.get('rsi_period', 3)} 과매도 {prev_r:.0f} 딥 반등",
+                  ts=df.index[-1])
+
+
 @register("gap_fill", needs_prev_close=True, side="long")
 def gap_fill(df: pd.DataFrame, cfg: dict, prev_close: float | None) -> Signal | None:
     """갭필 평균회귀(롱). 갭하락(-min_gap_pct 이상)으로 시작한 날, 세션 초반 고가를
