@@ -67,7 +67,7 @@ TRADING_TOKEN = os.environ.get("HOSUB_TRADING_TOKEN", "")
 
 _TRADING_GET_RE = re.compile(
     r"^(status|signals|orders|settings|account|scanner|discovery|watchlist"
-    r"|performance|risk|bars/\d{6}|backtest/\d{6}"
+    r"|prices|performance|risk|bars/\d{6}|backtest/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history))$"
 )
 _TRADING_POST_RE = re.compile(
