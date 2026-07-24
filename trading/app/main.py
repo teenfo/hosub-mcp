@@ -19,6 +19,7 @@ from .kiwoom.auth import token_manager
 from .kiwoom.ws import RealtimeFeed
 from .signals.engine import SignalEngine
 from .signals.scanner import Scanner
+from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .trade import orders
 
@@ -126,6 +127,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(scanner.loop()),
         asyncio.create_task(discovery.loop()),
         asyncio.create_task(reporter.loop()),
+        asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(_ledger_loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
@@ -369,6 +371,23 @@ async def api_backtest_report_run(_=Depends(require_auth)):
     if reporter.running:
         return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
     return await asyncio.to_thread(reporter.run_once)
+
+
+@app.get("/api/backtest/sweep/latest")
+async def api_sweep_latest(_=Depends(require_auth)):
+    """주간 기법 스윕 최신 성적표(규칙별 격리 백테스트, 롱 방향)."""
+    from .backtest import sweep
+
+    return sweep.latest()
+
+
+@app.post("/api/backtest/sweep/run")
+async def api_sweep_run(_=Depends(require_auth)):
+    """기법 스윕 수동 실행(수 분 소요, 조회성 — 주문 없음). 백그라운드 시작."""
+    from .backtest import sweep
+
+    asyncio.create_task(asyncio.to_thread(sweep.run_sweep))
+    return {"ok": True, "message": "스윕 시작 — 수 분 후 결과가 갱신됩니다"}
 
 
 _account_cache: dict = {"ts": 0.0, "data": None}

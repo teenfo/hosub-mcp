@@ -68,12 +68,12 @@ TRADING_TOKEN = os.environ.get("HOSUB_TRADING_TOKEN", "")
 _TRADING_GET_RE = re.compile(
     r"^(status|signals|orders|settings|account|scanner|discovery|watchlist"
     r"|prices|rules|performance|risk|bars/\d{6}|backtest/\d{6}"
-    r"|backtest/coverage|backtest/report/(latest|history))$"
+    r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
     r"|rules/[a-z_]{1,30}/toggle"
-    r"|discovery/run|symbols/refresh|backtest/report/run|risk"
+    r"|discovery/run|symbols/refresh|backtest/report/run|backtest/sweep/run|risk"
     r"|positions/[0-9a-f]{12}/close)$"
 )
 # 전 종목 백테스트 리포트 재계산은 수십 초 걸린다 — 이 경로만 프록시 타임아웃을 늘린다.

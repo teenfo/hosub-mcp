@@ -97,6 +97,12 @@ collection:
   roster_retention_days: 30     # 마지막 감시 후 이 기간까지 계속 수집(초과 시 중단)
   roster_backfill_max: 200      # 이탈 종목 1회 백필 상한(레이트리밋 방어)
 
+# 주간 기법 스윕 — 매주 토 09시(KST) 전 규칙 격리 백테스트 성적표(rule_sweep.json)
+sweep:
+  enabled: true
+  weekday: 5                  # 0=월 … 5=토
+  hour: 9
+
 # 분봉 축적분 주기 백테스트 리포트 (평일 장 마감 후 1회, 결과 스냅샷 보관)
 backtest:
   report_enabled: true
@@ -146,6 +152,17 @@ rules:
     enabled: true
     regimes: ["강세", "중립"]
     near_pct: 0.4             # 20MA 근접 허용(%)
+    stop_lookback: 5
+    atr_stop_mult: 0.5
+    atr_period: 14
+    target_r: 1.5
+  # RSI 급락 눌림(롱) — Connors RSI-2 계열의 장중 적응(주식 승률 75%+ 문헌 엣지).
+  # 연구 후보(주간 스윕 검증 후 활성).
+  rsi_dip:
+    enabled: false
+    rsi_period: 3
+    oversold: 15              # 직전 봉 RSI 가 이 이하로 급락했을 때
+    min_bars: 40
     stop_lookback: 5
     atr_stop_mult: 0.5
     atr_period: 14
