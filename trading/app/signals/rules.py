@@ -205,6 +205,64 @@ def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
                   "상승추세 20MA 눌림 반등", ts=df.index[-1])
 
 
+@register("vwap_reclaim", side="long")
+def vwap_reclaim(df: pd.DataFrame, cfg: dict) -> Signal | None:
+    """VWAP 되찾기(롱). 세션 중 VWAP 아래로 밀렸던 가격이 VWAP 위로 복귀
+    (직전 봉 이하 → 현재 봉 위) + 양봉 + 거래량 확인 시 진입. 기관 평균단가
+    회복 = 수급 전환 신호라는 정석 인트라데이 셋업. 손절은 최근 저점 - ATR."""
+    if len(df) < cfg.get("min_bars", 30):
+        return None
+    vw = ind.vwap(df)
+    if pd.isna(vw.iloc[-1]) or pd.isna(vw.iloc[-2]):
+        return None
+    prev, last = df.iloc[-2], df.iloc[-1]
+    crossed = prev.close <= vw.iloc[-2] and last.close > vw.iloc[-1]
+    if not (crossed and last.close > last.open):
+        return None
+    # 세션 중 실제로 VWAP 아래에 머문 시간이 있어야(살짝 스친 게 아니라)
+    below_bars = int((df["close"] < vw).iloc[-cfg.get("below_lookback", 15):].sum())
+    if below_bars < cfg.get("min_below_bars", 5):
+        return None
+    if cfg.get("vol_ratio", 0):   # 거래량 확인(옵션): 현재봉 ≥ 세션평균×배수
+        if last.volume < df["volume"].mean() * cfg["vol_ratio"]:
+            return None
+    stop_low = float(df["low"].iloc[-cfg.get("stop_lookback", 5):].min())
+    stop = stop_low - _atr_buffer(df, cfg, stop_low * 0.001)
+    if stop >= last.close:
+        return None
+    r = cfg.get("target_r", 1.5)
+    return Signal("vwap_reclaim", "long", float(last.close), stop,
+                  _target(float(last.close), stop, "long", r),
+                  f"VWAP {vw.iloc[-1]:,.0f} 되찾기 (아래 체류 {below_bars}봉)",
+                  ts=df.index[-1])
+
+
+@register("range_break_retest", side="long")
+def range_break_retest(df: pd.DataFrame, cfg: dict) -> Signal | None:
+    """박스 상단 돌파 후 리테스트 지지(롱). 직전 박스(최근 10봉 제외 N봉) 상단을
+    돌파한 뒤, 상단 근처(tolerance)로 되돌아와 지지 양봉이 나오면 진입 —
+    돌파 추격보다 유리한 진입가 + 명확한 무효화 지점(상단 하회). breakdown_retest
+    의 롱 대칭. 손절은 박스 상단 - ATR 여유."""
+    look = cfg.get("range_lookback", 60)
+    tol = cfg.get("retest_tolerance_pct", 0.3)
+    if len(df) < look + 15:
+        return None
+    base, recent = df.iloc[:-10], df.iloc[-10:]
+    box_top = float(base["high"].iloc[-look:].max())
+    broke = (recent["close"] > box_top * (1 + tol / 100)).any()
+    last = df.iloc[-1]
+    at_top = abs(last.close - box_top) / box_top * 100 <= tol
+    if not (broke and at_top and last.close > last.open):
+        return None
+    stop = box_top - _atr_buffer(df, cfg, box_top * (2 * tol / 100))
+    if stop >= last.close:
+        return None
+    r = cfg.get("target_r", 1.5)
+    return Signal("range_break_retest", "long", float(last.close), stop,
+                  _target(float(last.close), stop, "long", r),
+                  f"박스 상단 {box_top:,.0f} 돌파 후 리테스트 지지", ts=df.index[-1])
+
+
 @register("bounce_fade", side="short")
 def bounce_fade(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """반등 페이드. 조건:

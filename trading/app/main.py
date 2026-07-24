@@ -288,6 +288,24 @@ async def api_rules(_=Depends(require_auth)):
             "long_only": settings.RISK.get("long_only", False)}
 
 
+@app.post("/api/rules/{name}/toggle")
+async def api_rule_toggle(name: str, payload: dict | None = Body(None),
+                          _=Depends(require_auth)):
+    """기법 활성/비활성 토글(영속화). enabled 미지정 시 현재 값 반전."""
+    from .signals.rules import REGISTRY
+
+    if name not in REGISTRY:
+        return JSONResponse({"ok": False, "error": f"알 수 없는 규칙: {name}"}, 404)
+    cur = bool(settings.RULES.get(name, {}).get("enabled"))
+    enabled = bool(payload["enabled"]) if isinstance(payload, dict) and "enabled" in payload else not cur
+    try:
+        settings.save_rule_enabled(name, enabled)
+    except (OSError, ValueError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, 400)
+    log.info("기법 토글: %s → %s", name, "ON" if enabled else "OFF")
+    return {"ok": True, "name": name, "enabled": enabled}
+
+
 @app.get("/api/backtest/coverage")
 async def api_backtest_coverage(_=Depends(require_auth)):
     """감시목록 종목별 분봉 축적 일수(백테스트 표본 크기 확인용).

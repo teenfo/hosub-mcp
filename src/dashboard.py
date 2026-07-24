@@ -72,6 +72,7 @@ _TRADING_GET_RE = re.compile(
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
+    r"|rules/[a-z_]{1,30}/toggle"
     r"|discovery/run|symbols/refresh|backtest/report/run|risk"
     r"|positions/[0-9a-f]{12}/close)$"
 )

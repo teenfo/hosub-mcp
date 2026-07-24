@@ -156,4 +156,38 @@ def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
     RISK_FILE.write_text(json.dumps(ov, ensure_ascii=False))
 
 
+# 규칙(기법) 활성 여부 override — UI 토글로 바꾸면 rules.json 에 영속화되어
+# 재시작·재배포 후에도 유지된다. config.yaml 의 enabled 는 기본값 역할.
+RULES_FILE = DATA_DIR / "rules.json"
+
+
+def _load_rules_overrides() -> None:
+    import json
+    if RULES_FILE.exists():
+        try:
+            ov = json.loads(RULES_FILE.read_text())
+        except (OSError, ValueError):
+            return
+        for name, patch in ov.items():
+            if name in RULES and isinstance(patch, dict) and "enabled" in patch:
+                RULES[name]["enabled"] = bool(patch["enabled"])
+
+
+def save_rule_enabled(name: str, enabled: bool) -> None:
+    """기법 활성 여부를 갱신하고 rules.json 에 영속화."""
+    import json
+    if name not in RULES:
+        raise ValueError(f"알 수 없는 규칙: {name}")
+    ov: dict = {}
+    if RULES_FILE.exists():
+        try:
+            ov = json.loads(RULES_FILE.read_text())
+        except (OSError, ValueError):
+            ov = {}
+    ov.setdefault(name, {})["enabled"] = bool(enabled)
+    RULES[name]["enabled"] = bool(enabled)
+    RULES_FILE.write_text(json.dumps(ov, ensure_ascii=False))
+
+
 _load_risk_overrides()
+_load_rules_overrides()
