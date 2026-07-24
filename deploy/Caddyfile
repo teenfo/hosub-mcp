@@ -18,8 +18,17 @@
 #   - hosub.duckdns.org 가 집 공인 IP를 가리킴 (duckdns-update.timer 로 자동 갱신)
 
 hosub.duckdns.org {
-	# 내부 MCP 서버(+대시보드)로 프록시. /mcp, /, /api, /static 모두 통과.
-	reverse_proxy 127.0.0.1:8700
+	# 대시보드(웹 UI·트레이딩 프록시)는 :8701(hosub-dash.service),
+	# 그 외(/mcp, OAuth /authorize·/token·/register·/.well-known)는
+	# :8700(hosub-mcp.service). 프로세스를 분리해 대시보드 배포·재시작이
+	# MCP 세션을 끊지 않는다.
+	@dash path / /login /logout /favicon.ico /api/* /static/*
+	handle @dash {
+		reverse_proxy 127.0.0.1:8701
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8700
+	}
 
 	# 인증서 발급 알림용 이메일(선택, 권장). 본인 이메일로 교체.
 	# tls your-email@example.com
