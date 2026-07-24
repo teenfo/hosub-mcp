@@ -104,7 +104,8 @@ status · orders(+승인/거부) · signals · prices(2초 폴링용) · **rules
 
 ## 운영 메모
 
-- 배포: PR 머지 → `deploy_service("trading")` + `/opt/hosub-mcp` ff-merge(정적 파일). 재시작 안전(오늘 신호 복원, WS 자동 재구독)
+- 배포: PR 머지 → 백엔드는 `deploy_service("trading")`, 대시보드(프록시·정적)는 `deploy_service("dash")`(= `/opt/hosub-mcp` pull + `hosub-dash.service` 재시작). 재시작 안전(오늘 신호 복원, WS 자동 재구독)
+- 프로세스 분리(:8700 MCP / :8701 대시보드 / :8600 트레이딩): Caddy 가 `/login·/static·/api` 를 :8701 로, `/mcp`·OAuth 를 :8700 으로 라우팅. 대시보드 배포는 MCP 세션을 끊지 않으며, `hosub-mcp.service` 재시작은 MCP 도구·registry 변경 때만 필요
 - DB: `/data/trading/trading.db`(bars/orders/audit/positions/watchlist/roster), `datasets/`(피처·매니페스트)
 - 야간 분석: Cowork 데스크톱 예약 작업 → Notion 룰 문서 기준 → `html/night-report/` + `night_bias.json`
 - 검증 습관: `node --check`, `pytest tests -q`, 배포 후 라이브 스모크(로그·API)
