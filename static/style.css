@@ -138,7 +138,15 @@ body.hosub-party .navbar-brand {
 }
 
 /* --- 카드 레이아웃 편집 --- */
+/* 레이아웃 편집에서 정한 높이로 카드를 '고정'하고, 넘치는 본문은 스크롤한다.
+   카드는 flex 컬럼(헤더+본문)이라 본문에 min-height:0 이 없으면 flex 자식이
+   줄지 않아 스크롤이 안 생기고 밖으로 삐져나온다 — 그 버그를 여기서 막는다. */
+.card-fixed-h {
+  overflow: hidden;
+}
 .card-fixed-h > .card-body {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
 }
 .layout-editing [data-card-id] > .card {
