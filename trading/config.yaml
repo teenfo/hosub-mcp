@@ -143,6 +143,25 @@ rules:
     atr_stop_mult: 0.5
     atr_period: 14
     target_r: 1.5
+  # VWAP 되찾기(롱) — VWAP 아래 체류 후 위로 복귀+양봉. 연구 후보(데이터 검증 후 활성).
+  vwap_reclaim:
+    enabled: false
+    min_bars: 30
+    below_lookback: 15        # 최근 N봉 중
+    min_below_bars: 5         # VWAP 아래 체류 최소 봉수(스침 배제)
+    vol_ratio: 0              # 0=거래량 확인 끔 / 예:1.2 = 세션평균×1.2 이상
+    stop_lookback: 5
+    atr_stop_mult: 0.5
+    atr_period: 14
+    target_r: 1.5
+  # 박스 돌파 리테스트(롱) — 상단 돌파 후 되돌림 지지. 연구 후보(데이터 검증 후 활성).
+  range_break_retest:
+    enabled: false
+    range_lookback: 60
+    retest_tolerance_pct: 0.3
+    atr_stop_mult: 0.5
+    atr_period: 14
+    target_r: 1.5
   # 반등 페이드 — 딥리서치 검증 결론(하락장 단타의 추세 정렬 방향)을 코드화한 규칙.
   # 숏 전용 규칙 → 롱 전용 모드에선 발주되지 않으므로 비활성(신호 산출도 생략).
   bounce_fade:

@@ -1,5 +1,5 @@
 import { fetchJSON, el, card, badge } from "../app.js";
-import { pct, makeChanged } from "./tradelib.js";
+import { postJSON, pct, makeChanged } from "./tradelib.js";
 
 // 매매 기법 페이지 (트레이딩 그룹): 엔진에 등록된 규칙(테크닉)의 셋업·파라미터·
 // 활성 상태를 실전 성과(성과 로그)·백테스트 결과와 함께 보여준다. 읽기 전용 —
@@ -10,6 +10,8 @@ const RULE_LABEL = {
   gap: "갭 플레이",
   momentum: "모멘텀 돌파",
   pullback: "눌림목",
+  vwap_reclaim: "VWAP 되찾기",
+  range_break_retest: "박스 돌파 리테스트",
   bounce_fade: "반등 페이드",
   breakdown_retest: "지지 붕괴 리테스트",
 };
@@ -23,7 +25,9 @@ const PARAM_LABEL = {
   candle_confirm: "캔들 확인", require_downtrend: "일봉 하락 게이트",
   require_volume_dry: "거래량 소진 조건", support_lookback: "지지선 봉수",
   retest_tolerance_pct: "리테스트 허용 %", require_volume: "거래량 확인",
-  vol_confirm_ratio: "거래량 배수",
+  vol_confirm_ratio: "거래량 배수", min_bars: "최소 봉수",
+  below_lookback: "VWAP 하회 관찰 봉수", min_below_bars: "하회 체류 최소 봉수",
+  vol_ratio: "거래량 배수(0=끔)", range_lookback: "박스 산출 봉수",
 };
 const sideBadgeOf = (side) =>
   side === "long" ? badge("롱 전용", "success")
@@ -79,11 +83,28 @@ export default {
       for (const rule of r.rules) {
         const c = el("div", { class: "col-12 col-xl-6" });
         const cardEl = el("div", { class: "card shadow-sm h-100" + (rule.enabled ? "" : " opacity-50") });
+        // ON/OFF 토글 — 서버에 영속화(재시작 유지). 다음 엔진 사이클(60초)부터 반영.
+        const tgl = el("button", {
+          class: "btn btn-sm ms-auto " + (rule.enabled ? "btn-outline-danger" : "btn-outline-success"),
+          type: "button",
+        }, rule.enabled ? "끄기" : "켜기");
+        tgl.onclick = async () => {
+          const onMsg = `[${RULE_LABEL[rule.name] || rule.name}] 기법을 켤까요? 다음 신호 사이클부터 실제 매매 신호를 만듭니다.`;
+          const offMsg = `[${RULE_LABEL[rule.name] || rule.name}] 기법을 끌까요? 신규 신호가 더 이상 생성되지 않습니다(기존 포지션은 유지).`;
+          if (!confirm(rule.enabled ? offMsg : onMsg)) return;
+          tgl.disabled = true;
+          try {
+            await postJSON(`/api/trading/rules/${rule.name}/toggle`, { enabled: !rule.enabled });
+            changed.invalidate("rules");
+            await load();
+          } catch (e) { alert("실패: " + e.message); tgl.disabled = false; }
+        };
         cardEl.appendChild(el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
           el("span", { class: "fw-semibold" }, RULE_LABEL[rule.name] || rule.name),
           el("code", { class: "small" }, rule.name),
           sideBadgeOf(rule.side),
           rule.enabled ? badge("가동 중", "success") : badge("비활성", "secondary"),
+          tgl,
         ]));
         const body = el("div", { class: "card-body small" });
         body.appendChild(el("div", { class: "text-secondary mb-2" }, rule.desc || ""));
