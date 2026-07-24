@@ -146,7 +146,11 @@ class SignalEngine:
                        "ts": datetime.now(KST).isoformat(timespec="seconds")}
                 # 승인대기 주문은 '계좌 잔고를 참고'해 실제 매수 가능할 때만 만든다.
                 # qty 는 position_size 가 floor(예탁자산/진입가)로 이미 잔고를 반영한다.
-                if qty < 1:
+                # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
+                # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
+                if settings.RISK.get("long_only", False) and sig.side != "long":
+                    rec["note"] = "롱 전용 모드 — 숏 미발주(현물 계좌 개별주 공매도 불가)"
+                elif qty < 1:
                     rec["note"] = (f"잔고 부족 — 1주 ≈ {int(sig.entry):,}원 / "
                                    f"자산 {int(self.equity):,}원 (승인대기 미생성)")
                 else:
