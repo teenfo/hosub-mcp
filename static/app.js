@@ -86,10 +86,20 @@ export function mountPanels(container, panels, ctx) {
 
 // --- 사이드바 생성 ---
 const nav = document.getElementById("sidebar-nav");
+let lastGroup = null;
 for (const p of PAGES) {
+  // 그룹이 바뀌면 그룹 헤더를 한 번 넣고, 그룹 소속 페이지는 들여쓴다.
+  if (p.group && p.group !== lastGroup) {
+    nav.appendChild(
+      el("li", { class: "nav-item mt-2" },
+        el("span", { class: "nav-group-header d-block small text-secondary text-uppercase px-3 mb-1",
+          html: `<i class="bi bi-collection"></i> ${p.group}` }))
+    );
+  }
+  lastGroup = p.group || null;
   nav.appendChild(
     el("li", { class: "nav-item" }, [
-      el("a", { class: "nav-link", href: "#/" + p.id, "data-route": p.id },
+      el("a", { class: "nav-link" + (p.group ? " ps-4" : ""), href: "#/" + p.id, "data-route": p.id },
         el("span", { html: `<i class="bi ${p.icon}"></i> ${p.title}` })),
     ])
   );

@@ -3,8 +3,9 @@
 
 import dashboard from "./dashboard.js";
 import trading from "./trading.js";
+import backtest from "./backtest.js";
 import briefing from "./briefing.js";
 import weather from "./weather.js";
 import docker from "./docker.js";
 
-export const PAGES = [dashboard, trading, briefing, weather, docker];
+export const PAGES = [dashboard, trading, backtest, briefing, weather, docker];
