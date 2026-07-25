@@ -141,7 +141,8 @@ export default {
     };
 
     select.addEventListener("change", () => load(select.value));
+    // 주기 폴링 없음 — 페이지를 열 때(및 날짜 변경 시)만 가져온다.
+    // 새 브리핑 확인은 브라우저 새로고침으로 (사용자 요청).
     await load();
-    ctx.addTimer(setInterval(() => load(select.classList.contains("d-none") ? null : select.value), 60000));
   },
 };
