@@ -75,6 +75,11 @@ export default {
       el("span", { html: '<i class="bi bi-journal-text"></i> 데일리 브리핑' }),
       el("select", { class: "form-select form-select-sm w-auto ms-auto d-none", id: "briefing-date" }),
       el("span", { class: "small text-secondary", id: "briefing-time" }),
+      el("button", {
+        class: "btn btn-sm btn-outline-secondary", type: "button",
+        id: "briefing-reload", title: "새로 불러오기",
+        html: '<i class="bi bi-arrow-clockwise"></i>',
+      }),
     ]);
     const bodyEl = el("div", { class: "card-body" });
     cardEl.appendChild(header);
@@ -141,8 +146,21 @@ export default {
     };
 
     select.addEventListener("change", () => load(select.value));
+
     // 주기 폴링 없음 — 페이지를 열 때(및 날짜 변경 시)만 가져온다.
-    // 새 브리핑 확인은 브라우저 새로고침으로 (사용자 요청).
+    // 새 브리핑 확인은 헤더의 새로 불러오기 버튼으로 (사용자 요청).
+    const reloadBtn = header.querySelector("#briefing-reload");
+    reloadBtn.addEventListener("click", async () => {
+      reloadBtn.disabled = true;
+      reloadBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+      try {
+        await load(select.classList.contains("d-none") ? null : select.value);
+      } finally {
+        reloadBtn.disabled = false;
+        reloadBtn.innerHTML = '<i class="bi bi-arrow-clockwise"></i>';
+      }
+    });
+
     await load();
   },
 };
