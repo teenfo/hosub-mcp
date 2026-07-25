@@ -232,6 +232,50 @@ async def fill_corp_codes(mapping: dict[str, str]) -> int:
     return filled
 
 
+# ---------------- 수집 (raw_items · 커서) ----------------
+
+async def active_watch_for_collect() -> list[dict]:
+    """수집 대상 활성 종목 + 소스별 증분 커서."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select id, ticker, name, dart_corp_code, last_collected_at"
+            " from tnm_watchlist where is_active and not is_excluded order by ticker")
+        return [{"id": r[0], "ticker": r[1], "name": r[2], "dart_corp_code": r[3],
+                 "last_collected_at": r[4] or {}} for r in await cur.fetchall()]
+
+
+async def set_cursor(ticker: str, source: str, cursor: str) -> None:
+    """소스별 증분 커서 갱신 — last_collected_at(jsonb) 에 병합."""
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "update tnm_watchlist set last_collected_at ="
+            " last_collected_at || jsonb_build_object(%s::text, %s::text)"
+            " where ticker = %s", (source, cursor, ticker))
+
+
+async def insert_raw_items(watchlist_id: int, source: str, rows: list[dict]) -> int:
+    """원문 적재. rows: [{source_uid,title,body,url,published_at,content_hash,norm_body}].
+
+    멱등성 2중: (source,source_uid) 충돌 무시 + 동일 종목 내 동일 content_hash
+    (완전중복 — FR-04) 기존재 시 스킵. 반환: 실제 삽입 수.
+    """
+    inserted = 0
+    async with _pool.connection() as conn:
+        for d in rows:
+            cur = await conn.execute(
+                "insert into tnm_raw_items (watchlist_id, source, source_uid, title,"
+                " body, url, published_at, content_hash, norm_body)"
+                " select %s, %s, %s, %s, %s, %s, %s, %s, %s"
+                " where not exists (select 1 from tnm_raw_items"
+                "   where watchlist_id = %s and content_hash = %s)"
+                " on conflict (source, source_uid) do nothing",
+                (watchlist_id, source, d["source_uid"], d["title"], d.get("body"),
+                 d["url"], d["published_at"], d["content_hash"], d.get("norm_body"),
+                 watchlist_id, d["content_hash"]))
+            inserted += max(cur.rowcount, 0)
+    return inserted
+
+
 async def queue_stats() -> dict:
     """상태 화면용 큐 적체량."""
     async with _pool.connection() as conn:

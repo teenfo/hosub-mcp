@@ -10,8 +10,10 @@ collect:
   dart:
     market_interval_min: 10    # 장중(09:00-16:00 평일)
     off_interval_min: 60       # 장외
+    initial_days: 30           # 최초 수집 범위 (M2 판정: 30일치 중복 0)
   news:
     interval_min: 30           # 구글 뉴스 RSS(기본) · 네이버 API(키 있을 때만)
+    fetch_body: true           # 기사 링크 본문 추출(trafilatura) — 실패 시 요약 폴백
 
 dedup:
   duplicate_threshold: 0.92    # 이상 → duplicate (LLM 생략)

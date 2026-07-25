@@ -5,3 +5,5 @@ PyYAML>=6.0
 psycopg[binary]>=3.2
 psycopg-pool>=3.2
 pgvector>=0.3
+trafilatura>=1.9
+
