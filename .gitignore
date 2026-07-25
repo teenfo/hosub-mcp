@@ -6,6 +6,7 @@ config/secrets.yaml
 
 # 런타임 데이터 (감사 DB 등)
 /data/
+tnm/data/
 *.db
 *.db-wal
 *.db-shm

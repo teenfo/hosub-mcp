@@ -1,0 +1,21 @@
+# /etc/systemd/system/tnm.service
+# TNM(뉴스·공시 모니터링) — /opt/hosub-mcp 공유 클론에서 tnm/ 만의 venv 로 기동.
+# 배포: deploy_service("tnm") = git pull + pip install + 재시작. 설치: docs/SETUP.md.
+[Unit]
+Description=Hosub TNM (news/disclosure monitor, 127.0.0.1:8602)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hosub
+Group=hosub
+WorkingDirectory=/opt/hosub-mcp/tnm
+EnvironmentFile=/opt/hosub-mcp/tnm/.env
+ExecStart=/opt/hosub-mcp/tnm/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8602
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
