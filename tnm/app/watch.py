@@ -91,6 +91,7 @@ class WatchSync:
         try:
             trading_wl: dict[str, str] = {}
             holdings: dict[str, str] = {}
+            trading_ok = holdings_ok = False   # 소스별 성공 여부 — 실패한 소스는 소멸 판정 제외
             headers = {"X-Internal-Token": settings.TRADING_TOKEN}
             async with httpx.AsyncClient(timeout=10) as client:
                 try:
@@ -98,19 +99,28 @@ class WatchSync:
                                          headers=headers)
                     r.raise_for_status()
                     trading_wl = parse_trading_watchlist(r.json())
+                    trading_ok = True
                 except Exception as e:  # noqa: BLE001 — trading 다운 시 기존 목록 유지
                     log.warning("트레이딩 감시목록 조회 실패(기존 유지): %s", e)
                 try:
                     r = await client.get(f"{settings.TRADING_URL}/api/account",
                                          headers=headers)
                     r.raise_for_status()
-                    holdings = parse_holdings(r.json())
+                    payload = r.json()
+                    # trading 은 키움 장애 시 HTTP 200 + {"ok": false} 를 반환한다
+                    if payload.get("ok") is False:
+                        raise RuntimeError(payload.get("error") or "계좌 조회 실패")
+                    holdings = parse_holdings(payload)
+                    holdings_ok = True
                 except Exception as e:  # noqa: BLE001
                     log.warning("보유계좌 조회 실패(기존 유지): %s", e)
-            if not trading_wl and not holdings:
+            if not trading_ok and not holdings_ok:
                 self.last_error = "trading 응답 없음 — 목록 변경 없이 유지"
                 return {"skipped": self.last_error}
-            result = await db.apply_sync(merge_auto(trading_wl, holdings))
+            ok_origins = (({"trading"} if trading_ok else set())
+                          | ({"holding"} if holdings_ok else set()))
+            result = await db.apply_sync(merge_auto(trading_wl, holdings),
+                                         ok_origins=ok_origins)
             # corp_code 미보유 행 채우기 (DART 키 있을 때만)
             try:
                 mapping = await corp_codes.mapping_for_missing()

@@ -87,7 +87,12 @@ def apply_keys(**kv: str | None) -> None:
         key = name.upper()
         if key not in _SECRET_KEYS:
             raise ValueError(f"허용되지 않은 설정 키: {name}")
-        globals()[key] = val.strip()
+        val = val.strip()
+        # 개행 포함 값은 .env 에 별도 라인으로 기록되어 허용목록 밖 키를
+        # 주입할 수 있으므로 거부한다.
+        if any(c in val for c in "\r\n"):
+            raise ValueError(f"값에 개행을 포함할 수 없습니다: {name}")
+        globals()[key] = val
 
 
 def save_keys(**kv: str | None) -> None:

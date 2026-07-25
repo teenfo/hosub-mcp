@@ -46,6 +46,21 @@ def test_save_keys_rejects_unknown():
     assert raised
 
 
+def test_save_keys_rejects_newline_injection(tmp_path, monkeypatch):
+    """개행 포함 값 거부 — .env 별도 라인 주입(허용목록 우회) 차단."""
+    env = tmp_path / ".env"
+    monkeypatch.setattr(settings, "ENV_FILE", env)
+    monkeypatch.setattr(settings, "DART_API_KEY", "orig")
+    try:
+        settings.save_keys(dart_api_key="legit\nTRADING_TOKEN=stolen")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+    assert settings.DART_API_KEY == "orig"
+    assert not env.exists() or "stolen" not in env.read_text()
+
+
 def test_save_keys_empty_is_noop(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     monkeypatch.setattr(settings, "ENV_FILE", env)

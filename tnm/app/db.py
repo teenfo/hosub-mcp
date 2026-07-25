@@ -46,6 +46,14 @@ async def init_once() -> bool:
     except Exception as e:  # noqa: BLE001 — 다음 주기 재시도
         last_error = str(e)
         log.warning("DB 초기화 실패(재시도 예정): %s", e)
+        # psycopg_pool 은 open 타임아웃 시 풀을 닫아버려 같은 객체 재사용이 불가 —
+        # 실패한 풀은 폐기해 다음 재시도가 새 풀을 만들게 한다.
+        if _pool is not None:
+            try:
+                await _pool.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _pool = None
         return False
 
 
@@ -109,12 +117,16 @@ async def list_watch(include_inactive: bool = True) -> list[dict]:
 
 
 async def add_manual(ticker: str, name: str) -> dict:
-    """수동 등록. 이미 있으면 manual 로 전환하지 않고 활성화만 한다."""
+    """수동 등록. 이미 있으면 활성화·제외해제하고, 소스에서 이미 사라진(비활성)
+    행은 manual 로 승격한다 — 다음 동기화가 사용자의 명시적 등록을 되돌리지 않도록.
+    소스에 살아있는 auto 행은 origin 을 유지한다(자동 추적 계속)."""
     async with _pool.connection() as conn:
         cur = await conn.execute(
             "insert into tnm_watchlist (ticker, name, origin, score_threshold, daily_alert_cap)"
             " values (%s, %s, 'manual', %s, %s)"
-            " on conflict (ticker) do update set is_active = true, is_excluded = false"
+            " on conflict (ticker) do update set is_active = true, is_excluded = false,"
+            " origin = case when tnm_watchlist.is_active and not tnm_watchlist.is_excluded"
+            "               then tnm_watchlist.origin else 'manual' end"
             f" returning {_WATCH_COLS}",
             (ticker, name,
              int(settings.ALERTS.get("default_threshold", 60)),
@@ -147,14 +159,19 @@ async def set_alert_settings(ticker: str, threshold: int | None,
         return cur.rowcount > 0
 
 
-async def apply_sync(auto: dict[str, tuple[str, str]]) -> dict:
+async def apply_sync(auto: dict[str, tuple[str, str]],
+                     ok_origins: set[str] | tuple[str, ...] = ("trading", "holding"),
+                     ) -> dict:
     """자동 동기 반영. auto: ticker -> (name, origin['trading'|'holding']).
 
     병합 규칙 (계획 4절):
     - 신규 코드: insert(origin, active) — 단 기존 행이 있으면 manual/excluded 존중
-    - 기존 auto 행: last_seen_at 갱신·재활성화, 소스에서 사라진 auto 행은 비활성화
+    - 기존 auto 행: last_seen_at·origin 갱신·재활성화, 소스에서 사라진 auto 행은 비활성화
     - origin='manual' 행: 절대 수정하지 않음
-    - is_excluded=true 행: 되살리지 않음
+    - is_excluded=true 행: 되살리지 않음 (UPDATE 의 WHERE 로도 이중 방어 —
+      동기화 도중 사용자가 exclude 해도 덮어쓰지 않는다)
+    - ok_origins: 이번 동기화에서 소스 조회에 성공한 origin 만 소멸 판정 —
+      한쪽 소스(예: 계좌)가 실패하면 그쪽 기존 행은 건드리지 않는다.
     """
     inserted = revived = deactivated = 0
     async with _pool.connection() as conn:
@@ -176,18 +193,23 @@ async def apply_sync(auto: dict[str, tuple[str, str]]) -> dict:
                 continue
             if existing["origin"] == "manual" or existing["is_excluded"]:
                 continue
+            # WHERE 조건이 스냅샷-갱신 경합을 막는다: 동기화 도중 exclude/manual
+            # 전환된 행은 이 UPDATE 가 건드리지 않는다 (0행 갱신).
             await conn.execute(
                 "update tnm_watchlist set last_seen_at = now(), is_active = true,"
-                " name = %s where ticker = %s", (name, ticker))
+                " name = %s, origin = %s"
+                " where ticker = %s and not is_excluded and origin <> 'manual'",
+                (name, origin, ticker))
             if not existing["is_active"]:
                 revived += 1
-        # 소스에서 사라진 auto 행 비활성화 (manual·excluded 제외)
+        # 조회에 성공한 소스(ok_origins)에서 사라진 auto 행만 비활성화
         gone = [t for t, r in rows.items()
-                if r["origin"] in ("trading", "holding") and not r["is_excluded"]
+                if r["origin"] in ok_origins and not r["is_excluded"]
                 and r["is_active"] and t not in auto]
         if gone:
             await conn.execute(
-                "update tnm_watchlist set is_active = false where ticker = any(%s)",
+                "update tnm_watchlist set is_active = false"
+                " where ticker = any(%s) and not is_excluded and origin <> 'manual'",
                 (gone,))
             deactivated = len(gone)
     return {"inserted": inserted, "revived": revived, "deactivated": deactivated,

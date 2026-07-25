@@ -11,7 +11,9 @@ Type=simple
 User=hosub
 Group=hosub
 WorkingDirectory=/opt/hosub-mcp/tnm
-EnvironmentFile=/opt/hosub-mcp/tnm/.env
+# '-' 접두: tnm/.env 미생성 상태(최초 설치)에서도 기동 허용 — settings.py 자체
+# .env 로더가 있어 파일이 생기면 다음 재시작에 반영된다.
+EnvironmentFile=-/opt/hosub-mcp/tnm/.env
 ExecStart=/opt/hosub-mcp/tnm/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8602
 Restart=on-failure
 RestartSec=3

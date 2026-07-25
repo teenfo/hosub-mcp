@@ -72,6 +72,22 @@ def test_watch_settings_validation(client, monkeypatch):
     assert bad.status_code == 400
 
 
+def test_watch_exclude_include_roundtrip(client, monkeypatch):
+    """exclude/include 위임·404. 참고: 복원(include)된 auto 행이 소스에 없으면
+    다음 동기화가 다시 비활성화한다 — 영구 유지가 필요하면 수동 등록(manual 승격)."""
+    calls = []
+
+    async def fake_set(ticker, excluded):
+        calls.append((ticker, excluded))
+        return ticker == "005930"
+
+    monkeypatch.setattr(db, "set_excluded", fake_set)
+    assert client.post("/api/watch/005930/exclude", headers=AUTH).status_code == 200
+    assert client.post("/api/watch/005930/include", headers=AUTH).status_code == 200
+    assert client.post("/api/watch/999999/exclude", headers=AUTH).status_code == 404
+    assert calls == [("005930", True), ("005930", False), ("999999", True)]
+
+
 def test_watch_db_not_ready(client, monkeypatch):
     monkeypatch.setattr(db, "ready", False)
     assert client.get("/api/watch", headers=AUTH).status_code == 503
