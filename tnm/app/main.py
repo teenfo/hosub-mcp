@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from . import db, settings
+from .collect import CollectRunner
 from .watch import WatchSync
 
 logging.basicConfig(level=logging.INFO,
@@ -21,6 +22,7 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("tnm")
 
 watchsync = WatchSync()
+collector = CollectRunner()
 
 
 @asynccontextmanager
@@ -28,6 +30,8 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(db.init_loop()),
         asyncio.create_task(watchsync.loop()),
+        asyncio.create_task(collector.dart_loop()),
+        asyncio.create_task(collector.news_loop()),
     ]
     yield
     for t in tasks:
@@ -61,7 +65,9 @@ async def api_status(_=Depends(require_auth)):
         "db_ready": db.ready,
         "db_error": db.last_error,
         "watch_sync": watchsync.status(),
+        "collect": collector.status(),
         "shadow_mode": bool(settings.ALERTS.get("shadow_mode", True)),
+        "dart_enabled": bool(settings.DART_API_KEY),
         "naver_enabled": bool(settings.NAVER_CLIENT_ID and settings.NAVER_CLIENT_SECRET),
     }
     if db.ready:
@@ -129,6 +135,19 @@ async def api_watch_settings(ticker: str, payload: dict, _=Depends(require_auth)
     if not await db.set_alert_settings(ticker, threshold, cap):
         return JSONResponse({"ok": False, "error": "종목 없음 또는 변경 값 없음"}, 404)
     return {"ok": True}
+
+
+# ---------------- 수집 ----------------
+
+@app.post("/api/collect/run")
+async def api_collect_run(_=Depends(require_auth)):
+    """공시·뉴스 수집 수동 트리거 — 백그라운드 시작 후 즉시 반환."""
+    _require_db()
+    if collector.running:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    asyncio.create_task(collector.run_once("dart"))
+    asyncio.create_task(collector.run_once("news"))
+    return {"ok": True, "message": "수집 시작 — /api/status 의 collect 로 결과 확인"}
 
 
 # ---------------- 설정 ----------------
