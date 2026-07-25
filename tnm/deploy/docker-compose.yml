@@ -1,0 +1,16 @@
+# TNM 전용 Postgres + pgvector (풀 Supabase 아님 — 컨테이너 1개).
+# 기동: docker compose --env-file /opt/hosub-mcp/tnm/.env -f tnm/deploy/docker-compose.yml up -d
+# TNM_DB_PASSWORD 는 tnm/.env 에서 주입한다.
+services:
+  tnm-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: tnm-postgres
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5433:5432"          # 로컬 전용 바인딩 (5432 충돌 회피)
+    environment:
+      POSTGRES_DB: tnm
+      POSTGRES_USER: tnm
+      POSTGRES_PASSWORD: ${TNM_DB_PASSWORD}
+    volumes:
+      - /opt/hosub-tnm-data/pg:/var/lib/postgresql/data
