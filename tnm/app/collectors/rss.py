@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import logging
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 
 import httpx
@@ -51,16 +51,23 @@ def parse_feed(xml_text: str) -> list[dict]:
     return out
 
 
-def filter_new(items: list[dict], cursor: str | None) -> tuple[list[dict], str | None]:
-    """커서(ISO 시각) 이후 발행분만. 새 커서 = 최대 발행시각."""
+def filter_new(items: list[dict], cursor: str | None,
+               initial_days: int | None = None) -> tuple[list[dict], str | None]:
+    """커서(ISO 시각) 이후 발행분만. 새 커서 = 최대 발행시각.
+
+    첫 실행(cursor 없음)은 initial_days 이내 발행분으로 제한 — 과거 백로그가
+    임베딩·분류 큐를 불필요하게 채우는 것을 막는다.
+    """
     since = None
     if cursor:
         try:
             since = datetime.fromisoformat(cursor)
         except ValueError:
             since = None
+    if since is None and initial_days:
+        since = datetime.now(timezone.utc) - timedelta(days=int(initial_days))
     fresh = [it for it in items if since is None or it["published"] > since]
-    latest = max((it["published"] for it in items), default=since)
+    latest = max((it["published"] for it in items), default=None)
     return fresh, (latest.isoformat() if latest else cursor)
 
 
@@ -93,7 +100,9 @@ class GoogleNewsCollector:
         async with httpx.AsyncClient(timeout=20) as client:
             r = await client.get(_SEARCH_URL, params=params, follow_redirects=True)
             r.raise_for_status()
-            fresh, new_cursor = filter_new(parse_feed(r.text), cursor)
+            initial_days = int(settings.COLLECT.get("news", {}).get("initial_days", 7))
+            fresh, new_cursor = filter_new(parse_feed(r.text), cursor,
+                                           initial_days=initial_days)
             docs: list[RawDoc] = []
             fetched = 0
             fetch_body = bool(settings.COLLECT.get("news", {}).get("fetch_body", True))

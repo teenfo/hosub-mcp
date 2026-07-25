@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import db, settings
+from . import db, ollama, settings
 from .collect import CollectRunner
+from .pipeline.workers import DedupWorker, EmbedWorker
 from .watch import WatchSync
 
 logging.basicConfig(level=logging.INFO,
@@ -23,6 +24,8 @@ log = logging.getLogger("tnm")
 
 watchsync = WatchSync()
 collector = CollectRunner()
+embedder = EmbedWorker()
+deduper = DedupWorker()
 
 
 @asynccontextmanager
@@ -32,6 +35,8 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(watchsync.loop()),
         asyncio.create_task(collector.dart_loop()),
         asyncio.create_task(collector.news_loop()),
+        asyncio.create_task(embedder.loop()),
+        asyncio.create_task(deduper.loop()),
     ]
     yield
     for t in tasks:
@@ -66,6 +71,9 @@ async def api_status(_=Depends(require_auth)):
         "db_error": db.last_error,
         "watch_sync": watchsync.status(),
         "collect": collector.status(),
+        "embed": embedder.status(),
+        "dedup": deduper.status(),
+        "ollama": await ollama.reachable(),
         "shadow_mode": bool(settings.ALERTS.get("shadow_mode", True)),
         "dart_enabled": bool(settings.DART_API_KEY),
         "naver_enabled": bool(settings.NAVER_CLIENT_ID and settings.NAVER_CLIENT_SECRET),

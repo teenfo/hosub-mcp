@@ -276,17 +276,99 @@ async def insert_raw_items(watchlist_id: int, source: str, rows: list[dict]) -> 
     return inserted
 
 
+# ---------------- 임베딩·신규성 워커 (M4 — DB 가 큐) ----------------
+
+async def pending_embeds(limit: int = 8) -> list[dict]:
+    """임베딩 대기 항목 (백오프 시각 지난 것만, 수집 순)."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select id, title, norm_body, embed_attempts from tnm_raw_items"
+            " where embedding is null and (next_retry_at is null or next_retry_at <= now())"
+            " order by collected_at limit %s", (limit,))
+        return [{"id": r[0], "title": r[1], "norm_body": r[2], "attempts": r[3]}
+                for r in await cur.fetchall()]
+
+
+async def save_embedding(item_id: int, vec: list[float]) -> None:
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "update tnm_raw_items set embedding = %s::vector,"
+            " next_retry_at = null where id = %s",
+            ("[" + ",".join(f"{v:.7g}" for v in vec) + "]", item_id))
+
+
+async def mark_embed_retry(item_ids: list[int], delay_sec: int) -> None:
+    """Ollama 불가 — 백오프 후 재시도 (수집은 계속, 큐만 쌓임)."""
+    if not item_ids:
+        return
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "update tnm_raw_items set embed_attempts = embed_attempts + 1,"
+            " next_retry_at = now() + make_interval(secs => %s)"
+            " where id = any(%s)", (delay_sec, item_ids))
+
+
+async def pending_dedup(limit: int = 50) -> list[int]:
+    """임베딩 완료·novelty 미판정 항목 id (수집 순)."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select id from tnm_raw_items"
+            " where embedding is not null and novelty is null"
+            " order by collected_at limit %s", (limit,))
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def max_similarity(item_id: int, window_days: int = 7) -> float | None:
+    """동일 종목 창 내 '먼저 적재된'(id 작은) 항목과의 최대 코사인 유사도.
+
+    먼저 온 기사가 new, 나중 재탕이 duplicate 가 되도록 비교 방향을 고정한다.
+    """
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select max(1 - (r.embedding <=> t.embedding))"
+            " from tnm_raw_items r,"
+            "  (select id, watchlist_id, embedding, published_at"
+            "   from tnm_raw_items where id = %s) t"
+            " where r.watchlist_id = t.watchlist_id and r.id < t.id"
+            "  and r.embedding is not null"
+            "  and r.published_at >= t.published_at - make_interval(days => %s)",
+            (item_id, window_days))
+        row = await cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+
+
+async def set_novelty(item_id: int, novelty: str, similarity: float | None) -> None:
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "update tnm_raw_items set novelty = %s, similarity = %s where id = %s",
+            (novelty, similarity, item_id))
+
+
+async def insert_skipped_duplicate(item_id: int, similarity: float | None) -> None:
+    """duplicate 판정 → LLM 생략, analyses 즉시 종결 (score 0)."""
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "insert into tnm_analyses (raw_item_id, status, novelty, score, score_detail)"
+            " values (%s, 'skipped_duplicate', 'duplicate', 0,"
+            "  jsonb_build_object('similarity', %s::numeric))"
+            " on conflict (raw_item_id) do nothing", (item_id, similarity))
+
+
 async def queue_stats() -> dict:
     """상태 화면용 큐 적체량."""
     async with _pool.connection() as conn:
         cur = await conn.execute(
             "select"
             " (select count(*) from tnm_raw_items where embedding is null) as embed_pending,"
-            " (select count(*) from tnm_raw_items r where r.embedding is not null"
+            " (select count(*) from tnm_raw_items"
+            "   where embedding is not null and novelty is null) as dedup_pending,"
+            " (select count(*) from tnm_raw_items r where r.novelty in ('new','follow_up')"
             "   and not exists (select 1 from tnm_analyses a where a.raw_item_id = r.id))"
             "   as classify_pending,"
             " (select count(*) from tnm_analyses where status = 'llm_failed') as llm_failed,"
+            " (select count(*) from tnm_analyses where status = 'skipped_duplicate')"
+            "   as duplicates,"
             " (select count(*) from tnm_raw_items) as raw_total")
         r = await cur.fetchone()
-        return {"embed_pending": r[0], "classify_pending": r[1],
-                "llm_failed": r[2], "raw_total": r[3]}
+        return {"embed_pending": r[0], "dedup_pending": r[1], "classify_pending": r[2],
+                "llm_failed": r[3], "duplicates": r[4], "raw_total": r[5]}
