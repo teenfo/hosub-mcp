@@ -85,13 +85,37 @@ export default {
     const select = header.querySelector("#briefing-date");
     const timeEl = header.querySelector("#briefing-time");
 
+    let lastKey = null;   // 마지막으로 렌더한 본문 식별자 — 같으면 재렌더 생략
+
     const load = async (date) => {
       const q = date ? "?date=" + encodeURIComponent(date) : "";
       const d = await fetchJSON("/api/briefing" + q);
+
+      // 날짜 셀렉트는 본문 재렌더 없이 조용히 동기화 (읽던 날짜 선택 유지)
+      if (d.exists && d.dates && d.dates.length > 1) {
+        const want = JSON.stringify(d.dates);
+        if (select.dataset.dates !== want) {
+          select.dataset.dates = want;
+          const cur = select.value;
+          select.innerHTML = "";
+          for (const dt of d.dates) select.appendChild(el("option", { value: dt }, dt));
+          select.value = d.dates.includes(cur) ? cur : d.date;
+        }
+        select.classList.remove("d-none");
+      } else {
+        select.classList.add("d-none");
+      }
+
+      // 내용이 그대로면 다시 그리지 않는다 — 주기 갱신마다 iframe 이 재생성되어
+      // 읽는 중 스크롤이 맨 위로 튀는 문제(새로고침처럼 보임) 방지.
+      const key = JSON.stringify(
+        [d.exists, d.date, d.updated_at, d.format, (d.content || "").length]);
+      if (key === lastKey) return;
+      lastKey = key;
+
       bodyEl.innerHTML = "";
 
       if (!d.exists) {
-        select.classList.add("d-none");
         timeEl.textContent = "";
         bodyEl.appendChild(
           el("div", { class: "text-center text-secondary py-5 border border-2 border-dashed rounded" }, [
@@ -103,17 +127,6 @@ export default {
         return;
       }
 
-      if (d.dates && d.dates.length > 1) {
-        select.innerHTML = "";
-        for (const dt of d.dates) {
-          const opt = el("option", { value: dt }, dt);
-          if (dt === d.date) opt.selected = true;
-          select.appendChild(opt);
-        }
-        select.classList.remove("d-none");
-      } else {
-        select.classList.add("d-none");
-      }
       timeEl.textContent = d.updated_at ? "업데이트: " + new Date(d.updated_at).toLocaleString("ko-KR") : "";
 
       if (d.format === "md") {
