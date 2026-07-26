@@ -170,25 +170,89 @@ def test_classify_worker_holds_on_unavailable(monkeypatch):
     assert w.unavailable is True
 
 
-def test_chat_fallback_records_model(monkeypatch):
-    """primary 연결 실패 → fallback(14b) 사용, model_name 에 기록 (요청서 5.5)."""
-    monkeypatch.setattr(settings, "OLLAMA_URL", "http://primary:11434")
-    monkeypatch.setattr(settings, "OLLAMA_FALLBACK_URL", "http://fb:11434")
+class _FakeJob:
+    def __init__(self, status="ok", response="{}", model="qwen2.5:7b",
+                 job_id="j1", error=None):
+        self.status = status
+        self.response = response
+        self.model = model
+        self.job_id = job_id
+        self.error = error
 
-    class FakeResp:
-        def raise_for_status(self):
-            pass
+    @property
+    def ok(self):
+        return self.status == "ok"
 
-        def json(self):
-            return {"message": {"content": "{}"}}
+    @property
+    def pending(self):
+        return self.status == "pending"
 
-    class FakeClient:
-        async def post(self, url, **k):
-            if "primary" in url:
-                import httpx
-                raise httpx.ConnectError("refused")
-            return FakeResp()
 
-    monkeypatch.setattr(ollama, "_client", FakeClient())
-    content, model, latency = asyncio.run(ollama.chat("s", "u"))
-    assert model == settings.LLM.get("fallback_model", "qwen2.5:14b")
+def test_chat_via_gateway_ok(monkeypatch):
+    """분류는 게이트웨이 role(classify_news) 경유 — 응답·모델명 반환."""
+    calls = {}
+
+    class FakeGW:
+        async def generate(self, role, prompt, *, system=None, wait=30,
+                           priority=0, metadata=None):
+            calls.update(role=role, system=system, wait=wait)
+            return _FakeJob(response='{"a":1}', model="qwen2.5:7b")
+
+    monkeypatch.setattr(ollama, "_gw", FakeGW())
+    content, model, latency = asyncio.run(ollama.chat("SYS", "USER"))
+    assert content == '{"a":1}' and model == "qwen2.5:7b"
+    assert calls["role"] == "classify_news" and calls["system"] == "SYS"
+
+
+def test_chat_gateway_pending_then_polled(monkeypatch):
+    class FakeGW:
+        async def generate(self, *a, **k):
+            return _FakeJob(status="pending", response=None, job_id="j9")
+
+        async def wait_for(self, job_id, *, timeout, poll):
+            assert job_id == "j9"
+            return _FakeJob(response='{"done":true}')
+
+    monkeypatch.setattr(ollama, "_gw", FakeGW())
+    content, _, _ = asyncio.run(ollama.chat("s", "u"))
+    assert content == '{"done":true}'
+
+
+def test_chat_gateway_failure_holds(monkeypatch):
+    """게이트웨이 연결 실패·잡 실패 → OllamaUnavailable (보류 계약 유지)."""
+    from app.llmgw import GatewayError
+
+    class DownGW:
+        async def generate(self, *a, **k):
+            raise GatewayError("연결 실패")
+
+    monkeypatch.setattr(ollama, "_gw", DownGW())
+    try:
+        asyncio.run(ollama.chat("s", "u"))
+        raised = False
+    except ollama.OllamaUnavailable:
+        raised = True
+    assert raised
+
+    class FailedGW:
+        async def generate(self, *a, **k):
+            return _FakeJob(status="failed", response=None, error="backend 죽음")
+
+    monkeypatch.setattr(ollama, "_gw", FailedGW())
+    try:
+        asyncio.run(ollama.chat("s", "u"))
+        raised = False
+    except ollama.OllamaUnavailable as e:
+        raised = "backend 죽음" in str(e)
+    assert raised
+
+
+def test_chat_requires_token(monkeypatch):
+    monkeypatch.setattr(ollama, "_gw", None)
+    monkeypatch.setattr(settings, "LLMGW_TOKEN", "")
+    try:
+        asyncio.run(ollama.chat("s", "u"))
+        raised = False
+    except ollama.OllamaUnavailable:
+        raised = True
+    assert raised
