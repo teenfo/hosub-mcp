@@ -516,6 +516,71 @@ async def upsert_label(analysis_id: int, verdict: str, note: str | None) -> bool
         return cur.rowcount > 0
 
 
+# ---------------- Shadow 지표 · 알림 (M7·M8) ----------------
+
+async def label_week_counts(weeks: int = 4) -> list[dict]:
+    """주별(발행 주, KST) 라벨 기반 tp/fp/fn 카운트 — metrics.week_metrics 입력."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select to_char(date_trunc('week', r.published_at at time zone 'Asia/Seoul'),"
+            "  'YYYY-MM-DD') as week,"
+            " count(*) as labeled,"
+            " count(*) filter (where l.human_verdict = 'important') as important,"
+            " count(*) filter (where a.score >= w.score_threshold"
+            "   and l.human_verdict = 'important') as tp,"
+            " count(*) filter (where a.score >= w.score_threshold"
+            "   and l.human_verdict = 'noise') as fp,"
+            " count(*) filter (where a.score < w.score_threshold"
+            "   and l.human_verdict = 'important') as fn"
+            " from tnm_labels l"
+            " join tnm_analyses a on a.id = l.analysis_id and a.status = 'ok'"
+            " join tnm_raw_items r on r.id = a.raw_item_id"
+            " join tnm_watchlist w on w.id = r.watchlist_id"
+            " group by 1 order by 1 desc limit %s", (weeks,))
+        keys = ("week", "labeled", "important", "tp", "fp", "fn")
+        return [dict(zip(keys, r)) for r in await cur.fetchall()]
+
+
+async def pending_alerts(limit: int = 50) -> list[dict]:
+    """발송 후보: 점수 ≥ 종목 임계값, 정상 판정, 알림 기록 없음 (오래된 순)."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select a.id, a.score, a.category, a.impact_direction, a.impact_horizon,"
+            " a.summary, r.title, r.url, w.ticker, w.name"
+            " from tnm_analyses a"
+            " join tnm_raw_items r on r.id = a.raw_item_id"
+            " join tnm_watchlist w on w.id = r.watchlist_id"
+            " where a.status = 'ok' and a.score >= w.score_threshold"
+            "  and not exists (select 1 from tnm_notifications n"
+            "                  where n.analysis_id = a.id)"
+            " order by a.created_at limit %s", (limit,))
+        keys = ("id", "score", "category", "impact_direction", "impact_horizon",
+                "summary", "title", "url", "ticker", "name")
+        return [dict(zip(keys, r)) for r in await cur.fetchall()]
+
+
+async def notifications_today(ticker: str) -> int:
+    """해당 종목의 오늘(KST) 실발송 수 — 일일 상한 판정용 (suppressed 제외)."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select count(*) from tnm_notifications n"
+            " join tnm_analyses a on a.id = n.analysis_id"
+            " join tnm_raw_items r on r.id = a.raw_item_id"
+            " join tnm_watchlist w on w.id = r.watchlist_id"
+            " where w.ticker = %s and n.channel = 'slack'"
+            "  and (n.sent_at at time zone 'Asia/Seoul')::date ="
+            "      (now() at time zone 'Asia/Seoul')::date", (ticker,))
+        return int((await cur.fetchone())[0])
+
+
+async def insert_notification(analysis_id: int, channel: str,
+                              is_deferred: bool) -> None:
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "insert into tnm_notifications (analysis_id, channel, is_deferred)"
+            " values (%s, %s, %s)", (analysis_id, channel, is_deferred))
+
+
 async def queue_stats() -> dict:
     """상태 화면용 큐 적체량."""
     async with _pool.connection() as conn:
