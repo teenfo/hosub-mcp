@@ -19,6 +19,11 @@ SYSTEM_PROMPT = (
     "너는 금융 뉴스·공시를 분류하는 분석 보조다.\n"
     "금지사항: 매수/매도/보유 의견 생성 금지, 목표주가 산출 금지, "
     "원문에 없는 수치 생성 금지.\n"
+    "category 는 반드시 다음 10개 중 하나를 '그대로' 써야 한다 — 새 카테고리를 "
+    "만들거나 변형하지 마라. 애매하면 '기타' 를 쓴다:\n"
+    f"  {', '.join(CATEGORIES)}\n"
+    "  (예: 신기술·특허·R&D → 증설투자 또는 기타, 주가·수급 해설 → 시황해설,\n"
+    "   이미 보도된 내용의 재보도 → 단순재탕)\n"
     "출력: 아래 스키마의 JSON 객체만 출력한다. 설명 문장이나 마크다운 코드펜스 금지.\n"
     "{\n"
     f'  "category": "{" | ".join(CATEGORIES)}",\n'
@@ -107,3 +112,10 @@ def _numbers(text: str) -> set[str]:
 def check_hallucination(reason: str, source_text: str) -> bool:
     """reason 에 원문에 없는 수치가 있으면 True (경고 플래그 — 요청서 5.4)."""
     return bool(_numbers(reason) - _numbers(source_text))
+
+
+def retry_hint(user_msg: str, error: str) -> str:
+    """재시도용 사용자 메시지 — 직전 위반을 알려 같은 실수를 반복하지 않게 한다."""
+    return (f"{user_msg}\n\n[이전 응답 오류] {error}\n"
+            f"category 는 반드시 다음 중 하나여야 한다: {', '.join(CATEGORIES)}. "
+            "다른 키도 스키마를 정확히 지켜 JSON 객체만 출력하라.")

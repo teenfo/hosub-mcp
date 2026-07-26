@@ -581,6 +581,17 @@ async def insert_notification(analysis_id: int, channel: str,
             " values (%s, %s, %s)", (analysis_id, channel, is_deferred))
 
 
+async def requeue_failed() -> int:
+    """llm_failed 분석행을 지워 분류 워커가 다시 집어가게 한다 (원문은 보존).
+
+    프롬프트·모델을 개선한 뒤 실패분을 재처리할 때 쓴다. 반환: 재큐 건수.
+    """
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "delete from tnm_analyses where status = 'llm_failed'")
+        return max(cur.rowcount, 0)
+
+
 async def queue_stats() -> dict:
     """상태 화면용 큐 적체량."""
     async with _pool.connection() as conn:

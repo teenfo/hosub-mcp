@@ -102,11 +102,12 @@ class ClassifyWorker:
         result = None
         model_name, latency = "", 0
         attempts = 0
+        prompt = user
         for attempt in range(1, 4):            # 최초 1 + 재시도 2 (FR-06)
             attempts = attempt
             try:
                 content, model_name, latency = await ollama.chat(
-                    classify.SYSTEM_PROMPT, user)
+                    classify.SYSTEM_PROMPT, prompt)
             except ollama.OllamaUnavailable as e:
                 self.last_error = str(e)
                 self.unavailable = True
@@ -121,6 +122,7 @@ class ClassifyWorker:
                                       attempt, False, str(e))
                 log.warning("분류 스키마 위반(시도 %d/3) item=%s: %s",
                             attempt, it["id"], e)
+                prompt = classify.retry_hint(user, str(e))   # 다음 시도에 위반 피드백
         self.unavailable = False
         if result is None:                      # 3회 모두 위반 → 원문 보존 적재
             await db.insert_llm_failed(it["id"], it["novelty"], input_hash,
