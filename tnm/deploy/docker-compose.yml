@@ -13,4 +13,6 @@ services:
       POSTGRES_USER: tnm
       POSTGRES_PASSWORD: ${TNM_DB_PASSWORD}
     volumes:
-      - /opt/hosub-tnm-data/pg:/var/lib/postgresql/data
+      # 외장 2TB SSD(/data — 트레이딩 DB 와 동일 디스크). 뉴스 원문·벡터가
+      # 계속 자라는 데이터라 내장 NVMe 대신 대용량 쪽에 둔다.
+      - /data/tnm/pg:/var/lib/postgresql/data
