@@ -5,6 +5,15 @@ roxlogy·BCL·TNM·trading 등 **다른 레포**에서 hosub 의 공유 LLM 게�
 > **워커도, 컨테이너도 필요 없다.** HTTP 호출만 하면 되고, 게이트웨이의 잡 큐가
 > 공용 워커 역할을 한다. 게이트웨이가 아직 없어도 개발을 시작할 수 있다(3절).
 
+**이 문서는 게이트웨이가 직접 서빙한다.** 저장소 접근 없이 언제나 최신본을 받을 수 있다:
+
+```bash
+curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/integration
+```
+
+소비 프로젝트는 이 문서를 복사하지 말고 이 URL 을 참조하는 편이 낫다 — 계약이 두
+곳에 있으면 반드시 어긋난다.
+
 ---
 
 ## 1. 5분 만에 시작
@@ -255,6 +264,7 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 | `GET /v1/roles` | 쓸 수 있는 역할·모델 |
 | `GET /v1/status` | 백엔드·레인 큐·사용량 |
 | `GET /v1/models/requests` | 모델 설치 요청 (승인은 hosub 만) |
+| `GET /v1/integration` | **이 문서** (마크다운). 계약의 최신본 |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
 
 요청 본문:
