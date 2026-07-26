@@ -13,8 +13,9 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import db, ollama, settings
+from . import db, metrics, ollama, settings
 from .collect import CollectRunner
+from .notify.loop import Notifier
 from .pipeline.workers import ClassifyWorker, DedupWorker, EmbedWorker
 from .watch import WatchSync
 
@@ -27,6 +28,7 @@ collector = CollectRunner()
 embedder = EmbedWorker()
 deduper = DedupWorker()
 classifier = ClassifyWorker()
+notifier = Notifier()
 
 
 @asynccontextmanager
@@ -39,6 +41,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(embedder.loop()),
         asyncio.create_task(deduper.loop()),
         asyncio.create_task(classifier.loop()),
+        asyncio.create_task(notifier.loop()),
     ]
     yield
     for t in tasks:
@@ -76,6 +79,7 @@ async def api_status(_=Depends(require_auth)):
         "embed": embedder.status(),
         "dedup": deduper.status(),
         "classify": classifier.status(),
+        "notify": notifier.status(),
         "ollama": await ollama.reachable(),
         "shadow_mode": bool(settings.ALERTS.get("shadow_mode", True)),
         "dart_enabled": bool(settings.DART_API_KEY),
@@ -179,6 +183,27 @@ async def api_item_label(analysis_id: int, payload: dict, _=Depends(require_auth
     if not await db.upsert_label(analysis_id, verdict, note):
         return JSONResponse({"ok": False, "error": "항목 없음"}, 404)
     return {"ok": True}
+
+
+# ---------------- Shadow 지표 · 알림 ----------------
+
+@app.get("/api/metrics")
+async def api_metrics(weeks: int = 4, _=Depends(require_auth)):
+    """주별 정밀도/재현율 (Shadow 전환 판정 — 재현율 0.9·정밀도 0.6)."""
+    _require_db()
+    return {"weeks": await metrics.weekly(db, min(max(weeks, 1), 12)),
+            "targets": {"recall": metrics.TARGET_RECALL,
+                        "precision": metrics.TARGET_PRECISION}}
+
+
+@app.post("/api/notify/test")
+async def api_notify_test(_=Depends(require_auth)):
+    """슬랙 테스트 발송 — 토큰·채널 연결 확인용 (Shadow 여부와 무관하게 1회 발송)."""
+    from .notify import slack
+
+    ok, err = await slack.post("✅ TNM 슬랙 연동 테스트 — 이 메시지가 보이면 연결 성공입니다.")
+    status = 200 if ok else 502
+    return JSONResponse({"ok": ok, "error": err or None}, status)
 
 
 # ---------------- 수집 ----------------
