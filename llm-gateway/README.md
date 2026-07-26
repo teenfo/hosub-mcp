@@ -16,6 +16,10 @@
 
 ## 소비자 사용법
 
+> 다른 레포에서 붙인다면 **[`docs/integration.md`](docs/integration.md)** 를 보세요.
+> 복사해 쓰는 한 파일 클라이언트(`client/llmgw.py`)와, 게이트웨이 없이 개발할 수 있는
+> 목 서버(`tools/mock_gateway.py`)가 있습니다.
+
 ```python
 import httpx
 GW, TOKEN = "http://127.0.0.1:8603", os.environ["LLMGW_TOKEN_BCL"]
