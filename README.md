@@ -14,7 +14,7 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
 - **SQLite 감사 로그**: 모든 도구 호출과 잡 종결을 기록
 - **모니터링 대시보드**: 같은 프로세스에 마운트, 별도 비밀번호 로그인(조회 전용)
 
-## 도구 (13종)
+## 도구 (19종)
 
 | 도구 | 위험도 | 설명 |
 |---|---|---|
@@ -29,6 +29,10 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
 | `run_script` | High | 화이트리스트 스크립트만 실행 |
 | `run_command` | High | **임의 셸 명령** (서버 전체 제어) |
 | `write_file` | High | **임의 파일 쓰기** (서버 전체 제어) |
+| `llm_list_roles` / `llm_status` | Low | 쓸 수 있는 LLM 역할·모델, 백엔드/대기열 상태 |
+| `llm_generate` / `llm_job` | Low | 맥의 LLM 실행(게이트웨이 경유) / pending 결과 수령 |
+| `llm_model_requests` | Low | 미설치 모델의 설치 요청 목록 |
+| `llm_decide_model` | Medium | 모델 설치 승인/거부 (맥 디스크에 수 GB 다운로드) |
 
 ### 승인 흐름 (Medium/High)
 
@@ -58,7 +62,18 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
    ├─ 화이트리스트 레지스트리 (config/registry.yaml)
    ├─ 잡 매니저 (백그라운드 실행)
    └─ 감사 로그 (SQLite)
+
+[llm-gateway (도커, 127.0.0.1:8603)]      ← LLM 은 전부 여기를 거친다
+   ├─ 2레인 잡 큐 (interactive / batch) + 영속화·재시도
+   ├─ 서비스별 토큰·역할 제한·사용량 집계
+   └─ 미설치 모델 자동 요청 → 승인 시 자동 설치
+        ↓ Tailscale
+[맥 스튜디오 Ollama (100.69.201.28:11434)]
 ```
+
+hosub 는 맥의 Ollama 를 **직접 부르지 않는다.** 게이트웨이를 거쳐야 다른 소비자
+(roxlogy·TNM·trading)와 같은 큐·재시도·사용량 집계를 공유하고, 모델 교체가
+`llm-gateway/config/roles.yaml` 한 줄로 끝난다. → [`llm-gateway/README.md`](llm-gateway/README.md)
 
 ## 로컬 개발
 

@@ -28,6 +28,7 @@ TOOL_RISK: dict[str, Risk] = {
     "list_directory": Risk.LOW,
     "llm_list_roles": Risk.LOW,
     "llm_status": Risk.LOW,
+    "llm_job": Risk.LOW,
     "llm_generate": Risk.LOW,
     "llm_model_requests": Risk.LOW,
     # 상태 변경 (confirm 필요)

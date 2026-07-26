@@ -103,6 +103,50 @@ def test_gateway_down_is_reported_not_raised():
     assert "게이트웨이" in out["hint"]
 
 
+# --- 추론 경로 (맥을 직접 부르지 않고 게이트웨이를 거친다) ---
+def test_generate_posts_role_and_prompt():
+    FakeClient.payload = {"job_id": "j1", "status": "ok", "response": "요약본",
+                          "model": "qwen2.5:7b", "lane": "interactive"}
+    out = gateway.generate("summarize", "긴 문서", client_factory=FakeClient)
+    method, url, body, _ = FakeClient.calls[0]
+    assert method == "POST" and url.endswith("/v1/generate")
+    assert body["role"] == "summarize" and body["prompt"] == "긴 문서"
+    assert "system" not in body           # 안 주면 역할 기본 프롬프트가 쓰인다
+    assert out["status"] == "ok" and out["response"] == "요약본"
+
+
+def test_generate_forwards_caller_system_prompt():
+    gateway.generate("analyze_workout", "데이터", system="너는 코치다",
+                     wait=0, metadata={"session_id": 7}, client_factory=FakeClient)
+    body = FakeClient.calls[0][2]
+    assert body["system"] == "너는 코치다"
+    assert body["wait"] == 0
+    assert body["metadata"] == {"session_id": 7}
+
+
+def test_generate_pending_is_not_an_error():
+    """긴 잡은 pending 으로 돌아온다 — 실패가 아니다."""
+    FakeClient.payload = {"job_id": "j2", "status": "pending", "model": "qwen2.5:32b",
+                          "queue_position": 2}
+    out = gateway.generate("general", "x", wait=0, client_factory=FakeClient)
+    assert out["status"] == "pending" and out["job_id"] == "j2"
+
+
+def test_get_job_fetches_result():
+    FakeClient.payload = {"job_id": "j2", "status": "ok", "response": "끝"}
+    out = gateway.get_job("j2", client_factory=FakeClient)
+    assert FakeClient.calls[0][1].endswith("/v1/jobs/j2")
+    assert out["response"] == "끝"
+
+
+def test_roles_and_status_are_read_only_gets():
+    FakeClient.payload = {"roles": [{"name": "summarize", "model": "qwen2.5:7b"}]}
+    assert gateway.list_roles(client_factory=FakeClient)["roles"][0]["name"] == "summarize"
+    FakeClient.payload = {"backend": {"online": True}, "lanes": {}, "roles": []}
+    assert gateway.status(client_factory=FakeClient)["backend"]["online"] is True
+    assert [c[0] for c in FakeClient.calls] == ["GET", "GET"]
+
+
 def test_http_error_surfaces_detail():
     FakeClient.status = 403
     FakeClient.payload = {"error": "forbidden", "detail": "권한 없음"}
@@ -187,3 +231,54 @@ async def test_decide_tool_rejects_bad_action(mcp_server):
     out = await _call(mcp_server, "llm_decide_model",
                       {"model": "qwen3:32b", "action": "delete", "confirm": True})
     assert out["status"] == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_generate_tool_goes_through_gateway(mcp_server, monkeypatch):
+    """맥을 직접 부르지 않고 게이트웨이를 거쳐야 한다."""
+    seen = {}
+
+    def fake_generate(role, prompt, *, system=None, wait=120, metadata=None):
+        seen.update(role=role, prompt=prompt, system=system, wait=wait)
+        return {"job_id": "j1", "status": "ok", "response": "결과",
+                "model": "qwen2.5:7b", "lane": "interactive"}
+
+    monkeypatch.setattr(gateway, "generate", fake_generate)
+    out = await _call(mcp_server, "llm_generate",
+                      {"prompt": "안녕", "role": "summarize", "system": "간결히"})
+    assert out["status"] == "ok" and out["response"] == "결과"
+    assert seen == {"role": "summarize", "prompt": "안녕",
+                    "system": "간결히", "wait": 120}
+
+
+@pytest.mark.asyncio
+async def test_generate_tool_clamps_wait_and_guides_on_pending(mcp_server, monkeypatch):
+    seen = {}
+
+    def fake_generate(role, prompt, *, system=None, wait=120, metadata=None):
+        seen["wait"] = wait
+        return {"job_id": "abc", "status": "pending", "model": "qwen2.5:32b"}
+
+    monkeypatch.setattr(gateway, "generate", fake_generate)
+    out = await _call(mcp_server, "llm_generate", {"prompt": "x", "wait": 9999})
+    assert seen["wait"] == 300                      # 게이트웨이 상한으로 클램프
+    assert out["status"] == "pending"
+    assert "llm_job" in out["hint"] and "abc" in out["hint"]
+
+
+@pytest.mark.asyncio
+async def test_job_tool_fetches_pending_result(mcp_server, monkeypatch):
+    monkeypatch.setattr(gateway, "get_job",
+                        lambda jid: {"job_id": jid, "status": "ok", "response": "늦게 옴"})
+    out = await _call(mcp_server, "llm_job", {"job_id": "abc"})
+    assert out["response"] == "늦게 옴"
+
+
+@pytest.mark.asyncio
+async def test_status_and_roles_tools_use_gateway(mcp_server, monkeypatch):
+    monkeypatch.setattr(gateway, "status",
+                        lambda: {"status": "ok", "backend": {"online": True}, "roles": []})
+    monkeypatch.setattr(gateway, "list_roles", lambda: {"status": "ok", "roles": []})
+    assert (await _call(mcp_server, "llm_status", {}))["backend"]["online"] is True
+    out = await _call(mcp_server, "llm_list_roles", {})
+    assert "roles.yaml" in out["hint"]              # 비었을 때 어디를 고칠지 알려준다

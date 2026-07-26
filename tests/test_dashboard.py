@@ -123,3 +123,64 @@ def test_model_decision_requires_model(client):
     client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
     r = client.post("/api/llm/models/decide", json={"action": "approve"})
     assert r.status_code == 400
+
+
+# --- LLM: 맥 직접 호출이 아니라 게이트웨이 경유 ---
+def test_llm_status_comes_from_gateway(client, monkeypatch):
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "status", lambda: {
+        "status": "ok",
+        "backend": {"base_url": "http://100.69.201.28:11434", "online": True,
+                    "models": ["qwen2.5:7b"], "loaded_model": None, "error": None},
+        "lanes": {"interactive": {"queued": 0, "running": 1}},
+        "roles": [{"name": "summarize", "model": "qwen2.5:7b", "lane": "interactive",
+                   "timeout": 120, "model_available": True}],
+        "usage": [{"service": "hosub", "calls": 3, "tokens": 40, "ok": 3}],
+        "mem_budget_gb": 40,
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/llm/status").json()
+    assert d["backend"]["online"] is True
+    assert d["lanes"]["interactive"]["running"] == 1
+    assert d["usage"][0]["service"] == "hosub"
+
+
+def test_llm_generate_goes_through_gateway_and_is_audited(client, monkeypatch):
+    from src import gateway
+
+    seen = {}
+
+    def fake_generate(role, prompt, **kw):
+        seen.update(role=role, prompt=prompt)
+        return {"job_id": "j9", "status": "ok", "response": "요약", "model": "qwen2.5:7b"}
+
+    monkeypatch.setattr(gateway, "generate", fake_generate)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.post("/api/llm/generate", json={"role": "summarize", "prompt": "긴 글"})
+    assert r.json()["response"] == "요약"
+    assert seen == {"role": "summarize", "prompt": "긴 글"}
+
+    rows = client.get("/api/audit?limit=5").json()["audit"]
+    assert any(row["tool"] == "llm_generate" for row in rows)
+
+
+def test_llm_job_route_polls_pending_result(client, monkeypatch):
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "get_job",
+                        lambda jid: {"job_id": jid, "status": "ok", "response": "늦게 옴"})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    assert client.get("/api/llm/jobs/j9").json()["response"] == "늦게 옴"
+
+
+def test_llm_routes_need_login(client):
+    assert client.get("/api/llm/status").status_code == 401
+    assert client.get("/api/llm/jobs/x").status_code == 401
+    assert client.post("/api/llm/generate", json={"prompt": "x"}).status_code == 401
+
+
+def test_llm_generate_rejects_empty_prompt(client):
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.post("/api/llm/generate", json={"prompt": "   "})
+    assert r.status_code == 400

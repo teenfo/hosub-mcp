@@ -91,9 +91,9 @@ async def test_mcp_session(server):
             await session.initialize()
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
-            assert len(names) == 18
+            assert len(names) == 19
             assert {"run_command", "write_file", "get_system_status",
-                    "llm_model_requests", "llm_decide_model"} <= names
+                    "llm_model_requests", "llm_decide_model", "llm_job"} <= names
 
             # Medium/High 도구는 confirm 없이 승인 요청 반환
             payload = _payload(
