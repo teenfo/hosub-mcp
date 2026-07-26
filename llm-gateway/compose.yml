@@ -1,0 +1,30 @@
+# 공유 LLM 게이트웨이
+#
+# - 호스트 프로세스(hosub-mcp/dash, trading, tnm) → http://127.0.0.1:8603
+# - 컨테이너 소비자(roxlogy 워커 등) → llm-net 에 join 후 http://llm-gateway:8603
+# - 컨테이너 → 맥 스튜디오 LAN IP 아웃바운드는 호스트 라우팅을 타므로 그대로 동작
+
+networks:
+  llm-net:
+    name: llm-net
+
+services:
+  llm-gateway:
+    build: .
+    image: hosub/llm-gateway:latest
+    container_name: llm-gateway
+    restart: unless-stopped
+    networks: [llm-net]
+    ports:
+      - "127.0.0.1:8603:8603"
+    env_file: .env
+    volumes:
+      - ./config:/app/config:ro
+      - /data/llm-gateway:/data        # 잡 DB (백업 대상 디스크)
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8603/healthz',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

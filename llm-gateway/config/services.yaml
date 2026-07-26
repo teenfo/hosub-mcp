@@ -1,0 +1,30 @@
+# 소비 서비스 등록 (인증·권한)
+#
+# 토큰 값은 여기 두지 않는다 — 환경변수 이름만 참조한다(.env 는 커밋 금지).
+# 새 소비자 추가 = 여기 블록 하나 + .env 토큰 하나. 워커·컨테이너 추가 없음.
+
+services:
+  hosub:
+    token_env: LLMGW_TOKEN_HOSUB
+    allow_roles: ["*"]            # MCP 도구·대시보드 (운영 주체)
+    rate_limit_per_min: 120
+
+  roxlogy:
+    token_env: LLMGW_TOKEN_ROXLOGY
+    allow_roles: ["analyze_workout", "coach_feedback", "summarize"]
+    rate_limit_per_min: 60
+
+  tnm:
+    token_env: LLMGW_TOKEN_TNM
+    allow_roles: ["summarize", "classify_news", "translate"]
+    rate_limit_per_min: 120
+
+  trading:
+    token_env: LLMGW_TOKEN_TRADING
+    allow_roles: ["summarize", "general"]
+    rate_limit_per_min: 60
+
+  # 예시) BCL Portal 을 붙일 때 — 이 3줄이면 끝
+  # bcl:
+  #   token_env: LLMGW_TOKEN_BCL
+  #   allow_roles: ["summarize", "translate", "general"]
