@@ -29,6 +29,7 @@ from .store import (
     MR_REJECTED,
     QUEUED,
     RUNNING,
+    SUCCEEDED,
     Store,
 )
 
@@ -37,6 +38,8 @@ log = logging.getLogger("llmgw")
 DEFAULT_WAIT = 30
 MAX_WAIT = 300
 MAX_PROMPT_CHARS = 200_000
+# 임베딩 한 번에 보낼 수 있는 텍스트 개수
+MAX_EMBED_BATCH = 256
 
 # 통합 가이드를 게이트웨이가 직접 서빙한다. 소비 프로젝트(roxlogy 등)는 별도
 # 레포에 있어 hosub-mcp 저장소를 못 볼 수 있다 — 토큰만 있으면 curl 한 번으로
@@ -149,6 +152,12 @@ def build_app(
                 {"error": "unknown_role", "known_roles": roles.role_names},
                 status_code=404,
             )
+        if role.kind != "generate":
+            return JSONResponse(
+                {"error": "wrong_role_kind",
+                 "detail": f"'{role_name}' 은 임베딩용 역할입니다. /v1/embed 를 쓰세요."},
+                status_code=400,
+            )
         if not svc.may_use(role_name):
             return JSONResponse(
                 {"error": "forbidden", "allowed": list(svc.allow_roles)},
@@ -186,6 +195,94 @@ def build_app(
         job = store.get_job(job["id"])
         pos = store.queue_position(job["id"])
         return JSONResponse(_job_response(job, queue_position=pos))
+
+    async def embed(request: Request):
+        """텍스트 임베딩. **이 엔드포인트만 잡이 아니다.**
+
+        임베딩은 밀리초 단위로 끝나고 보통 RAG 조회 같은 즉시 응답 경로에서 쓴다.
+        2레인 큐에 태우면 3분짜리 32b 생성 뒤에서 기다리게 되어 쓸모가 없어진다.
+        대신 인증·역할 제한·레이트리밋·사용량 집계는 생성과 똑같이 적용된다.
+
+        임베딩 모델은 작아야 한다(bge-m3 = 1.2GB). 큰 모델을 큐 밖에서 돌리면
+        메모리 예산 가드를 우회하게 되므로, roles.yaml 에 kind: embed 로 등록할 때
+        크기를 확인한다.
+        """
+        svc, err = _auth(request)
+        if err:
+            return err
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+
+        role_name = str(body.get("role") or "").strip()
+        role = roles.role(role_name)
+        if not role_name or role is None:
+            return JSONResponse(
+                {"error": "unknown_role",
+                 "known_roles": [r.name for r in roles.roles if r.kind == "embed"]},
+                status_code=404,
+            )
+        if role.kind != "embed":
+            return JSONResponse(
+                {"error": "wrong_role_kind",
+                 "detail": f"'{role_name}' 은 생성용 역할입니다. /v1/generate 를 쓰세요.",
+                 "embed_roles": [r.name for r in roles.roles if r.kind == "embed"]},
+                status_code=400,
+            )
+        if not svc.may_use(role_name):
+            return JSONResponse(
+                {"error": "forbidden", "allowed": list(svc.allow_roles)}, status_code=403
+            )
+
+        raw = body.get("input")
+        inputs = [raw] if isinstance(raw, str) else raw
+        if (not isinstance(inputs, list) or not inputs
+                or not all(isinstance(t, str) for t in inputs)):
+            return JSONResponse(
+                {"error": "invalid_request",
+                 "detail": "input 은 문자열 또는 문자열 배열이어야 합니다"},
+                status_code=400,
+            )
+        if len(inputs) > MAX_EMBED_BATCH:
+            return JSONResponse(
+                {"error": "batch_too_large", "limit": MAX_EMBED_BATCH, "got": len(inputs)},
+                status_code=413,
+            )
+        total_chars = sum(len(t) for t in inputs)
+        limit = role.max_prompt_chars or MAX_PROMPT_CHARS
+        if total_chars > limit:
+            return JSONResponse(
+                {"error": "input_too_long", "limit": limit, "got": total_chars},
+                status_code=413,
+            )
+
+        try:
+            result = await client.embed(
+                model=role.model, inputs=inputs, timeout=role.timeout
+            )
+        except BackendError as exc:
+            store.record_usage(service=svc.name, role=role_name, model=role.model,
+                               eval_count=None, duration_ms=None, status="failed")
+            # 재시도 가능(맥 재부팅 등)이면 503 — 호출자가 나중에 다시 하면 된다
+            return JSONResponse(
+                {"status": "failed", "error": str(exc), "retryable": exc.retryable},
+                status_code=503 if exc.retryable else 502,
+            )
+
+        store.record_usage(
+            service=svc.name, role=role_name, model=role.model,
+            eval_count=result.prompt_eval_count, duration_ms=result.duration_ms,
+            status=SUCCEEDED,
+        )
+        return JSONResponse({
+            "status": "ok",
+            "model": role.model,
+            "embeddings": result.embeddings,
+            "count": len(result.embeddings),
+            "dimensions": len(result.embeddings[0]) if result.embeddings else 0,
+            "duration_ms": result.duration_ms,
+        })
 
     async def get_job(request: Request):
         svc, err = _auth(request)
@@ -358,6 +455,7 @@ def build_app(
     routes = [
         Route("/healthz", healthz),
         Route("/v1/generate", generate, methods=["POST"]),
+        Route("/v1/embed", embed, methods=["POST"]),
         Route("/v1/jobs", list_jobs, methods=["GET"]),
         Route("/v1/jobs/{job_id}", get_job, methods=["GET"]),
         Route("/v1/jobs/{job_id}", cancel_job, methods=["DELETE"]),

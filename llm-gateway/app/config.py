@@ -17,6 +17,9 @@ import yaml
 
 LANES = ("interactive", "batch")
 DEFAULT_LANE = "batch"
+# 역할의 종류. generate = 텍스트 생성(잡 큐를 탄다), embed = 임베딩(동기 처리)
+KINDS = ("generate", "embed")
+DEFAULT_KIND = "generate"
 DEFAULT_TIMEOUT = 180
 # 모델 크기를 모를 때 쓰는 보수적 추정(메모리 예산 가드가 과하게 낙관하지 않도록)
 DEFAULT_MODEL_SIZE_GB = 20.0
@@ -44,6 +47,7 @@ def _resolve_env(value):
 class Role:
     name: str
     model: str
+    kind: str = DEFAULT_KIND
     lane: str = DEFAULT_LANE
     timeout: int = DEFAULT_TIMEOUT
     system: str | None = None          # 호출자가 안 보냈을 때의 기본값
@@ -54,6 +58,7 @@ class Role:
         return {
             "name": self.name,
             "model": self.model,
+            "kind": self.kind,
             "lane": self.lane,
             "timeout": self.timeout,
             "has_default_system": bool(self.system),
@@ -94,6 +99,10 @@ class RoleConfig:
     def roles_using(self, model: str) -> list[str]:
         """이 모델을 쓰는 역할 이름들(모델 설치 요청의 근거 표시용)."""
         return [n for n in self.role_names if self._roles[n].model == model]
+
+    @property
+    def embed_role_names(self) -> list[str]:
+        return [n for n in self.role_names if self._roles[n].kind == "embed"]
 
     def model_size_gb(self, model: str) -> float:
         """모델 메모리 추정치(GB). 미상이면 보수적으로 큰 값."""
@@ -140,9 +149,13 @@ class RoleConfig:
             lane = str(cfg.get("lane", DEFAULT_LANE))
             if lane not in LANES:
                 raise ConfigError(f"역할 '{name}' 의 lane 이 잘못됨: {lane} (가능: {LANES})")
+            kind = str(cfg.get("kind", DEFAULT_KIND))
+            if kind not in KINDS:
+                raise ConfigError(f"역할 '{name}' 의 kind 가 잘못됨: {kind} (가능: {KINDS})")
             roles[name] = Role(
                 name=name,
                 model=str(model),
+                kind=kind,
                 lane=lane,
                 timeout=int(cfg.get("timeout", DEFAULT_TIMEOUT)),
                 system=cfg.get("system"),

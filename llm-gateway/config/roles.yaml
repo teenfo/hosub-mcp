@@ -19,6 +19,7 @@ model_sizes_gb:
   "qwen2.5:14b": 10
   "qwen2.5:32b": 21
   "qwen2.5-coder:14b": 10
+  "bge-m3": 1.2
 
 roles:
   # ---------- hosub 운영 (프롬프트도 게이트웨이가 관리) ----------
@@ -71,6 +72,13 @@ roles:
     model: qwen2.5:32b
     lane: batch
     timeout: 300
+
+  # ---------- 임베딩 (kind: embed — 잡 큐를 타지 않고 동기 처리) ----------
+  # 모델이 작아야 한다(1.2GB). 큐 밖에서 도므로 메모리 예산 가드를 우회한다.
+  embed:
+    model: bge-m3
+    kind: embed
+    timeout: 60
 
   # ---------- TNM (뉴스·공시) ----------
   classify_news:

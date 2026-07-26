@@ -5,7 +5,8 @@ from tests.conftest import ROLES_RAW, SERVICES_RAW
 
 
 def test_roles_load(roles):
-    assert roles.role_names == ["bulk", "chat", "fast", "heavy", "tiny"]
+    assert roles.role_names == ["bulk", "chat", "fast", "heavy", "tiny", "vec"]
+    assert roles.embed_role_names == ["vec"]
     assert roles.role("fast").lane == "interactive"
     assert roles.role("heavy").lane == "batch"
     assert roles.backend.base_url == "http://mac.test:11434"

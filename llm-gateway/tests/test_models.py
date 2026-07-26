@@ -403,3 +403,51 @@ def test_missing_doc_returns_helpful_404(store, mroles, mservices, monkeypatch, 
         r = c.get("/v1/integration", headers={"Authorization": f"Bearer {TOKEN_ALPHA}"})
         assert r.status_code == 404
         assert "이미지를 다시 빌드" in r.json()["detail"]
+
+
+# --------------------------------------------------------------------------
+# 임베딩이 잡 큐를 타지 않는다는 회귀 테스트
+# --------------------------------------------------------------------------
+async def test_embed_does_not_wait_behind_a_long_generation(store, mservices):
+    """이게 깨지면 임베딩을 큐 밖에 둔 이유가 사라진다.
+
+    batch 레인에서 3초짜리 생성이 도는 동안 임베딩이 즉시 끝나야 한다.
+    """
+    import asyncio
+    import time
+
+    from starlette.testclient import TestClient
+
+    from app.config import RoleConfig
+    from app.main import build_app
+
+    roles_raw = {
+        "backend": {"base_url": "http://mac.test:11434"},
+        "mem_budget_gb": 40,
+        "model_sizes_gb": {"slow": 30, "bge-m3": 1.2},
+        "roles": {
+            "heavy": {"model": "slow", "lane": "batch", "timeout": 60},
+            "vec": {"model": "bge-m3", "kind": "embed", "timeout": 60},
+        },
+    }
+    mroles = RoleConfig.from_dict(roles_raw)
+    fake = FakeOllama(models=["slow", "bge-m3"], delays={"slow": 3.0})
+    sched = Scheduler(store, mroles, fake, poll_interval=0.01, auto_install=False)
+
+    with TestClient(build_app(roles=mroles, services=mservices, store=store,
+                              client=fake, scheduler=sched)) as c:
+        h = {"Authorization": f"Bearer {TOKEN_ALPHA}"}
+        # 긴 생성을 배치 레인에 넣고(기다리지 않는다) 실행에 들어가게 한다
+        c.post("/v1/generate", headers=h,
+               json={"role": "heavy", "prompt": "x", "wait": 0})
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and not sched.running_snapshot():
+            await asyncio.sleep(0.02)
+        assert sched.running_snapshot(), "긴 잡이 실행 중이어야 테스트가 의미 있다"
+
+        t0 = time.monotonic()
+        r = c.post("/v1/embed", headers=h, json={"role": "vec", "input": "빠르게"})
+        elapsed = time.monotonic() - t0
+
+    assert r.status_code == 200 and r.json()["count"] == 1
+    assert elapsed < 1.0, f"임베딩이 생성 뒤에서 기다렸다 ({elapsed:.1f}s)"

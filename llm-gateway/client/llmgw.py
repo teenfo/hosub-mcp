@@ -219,6 +219,17 @@ class LLMGateway:
         return job.response or ""
 
     # --- 조회 ---
+    # --- 임베딩 ---
+    def embed(self, texts: str | list[str], *, role: str = "embed") -> list[list[float]]:
+        """텍스트 임베딩 벡터. 잡이 아니라 **동기**로 바로 돌아온다.
+
+        생성과 달리 큐를 타지 않으므로 긴 배치 작업 뒤에서 기다리지 않는다.
+        배치로 보내면 한 번에 처리된다(호출 수를 줄이는 쪽이 훨씬 빠르다).
+        """
+        body = {"role": role, "input": texts}
+        out = self._call("POST", "/v1/embed", json=body, timeout=120)
+        return out["embeddings"]
+
     def roles(self) -> list[dict]:
         """이 토큰으로 쓸 수 있는 역할 목록. 모델·레인·타임아웃 포함."""
         return self._call("GET", "/v1/roles")["roles"]
@@ -309,6 +320,12 @@ class AsyncLLMGateway:
         elif not job.ok:
             raise JobFailed(job)
         return job.response or ""
+
+    async def embed(self, texts: str | list[str], *,
+                    role: str = "embed") -> list[list[float]]:
+        out = await self._call("POST", "/v1/embed",
+                               json={"role": role, "input": texts}, timeout=120)
+        return out["embeddings"]
 
     async def roles(self) -> list[dict]:
         return (await self._call("GET", "/v1/roles"))["roles"]

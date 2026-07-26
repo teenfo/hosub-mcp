@@ -50,6 +50,7 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | 엔드포인트 | 설명 |
 |---|---|
 | `POST /v1/generate` | 생성. `wait` 초까지 기다림(0이면 즉시 pending) |
+| `POST /v1/embed` | 임베딩 벡터(bge-m3). 큐를 타지 않고 동기 응답 |
 | `GET /v1/jobs/{id}` | 잡 조회 (본인 서비스 것만) |
 | `GET /v1/jobs?status=&limit=` | 잡 목록 |
 | `DELETE /v1/jobs/{id}` | 취소 (대기 중인 것만) |

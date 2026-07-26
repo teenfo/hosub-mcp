@@ -36,6 +36,8 @@ from starlette.routing import Route
 
 ROOT = Path(__file__).resolve().parent.parent
 
+EMBED_DIM = 1024   # bge-m3 차원
+
 BUILTIN_ROLES = {
     "summarize": ("qwen2.5:7b", "interactive", 120),
     "log_analyze": ("qwen2.5:14b", "interactive", 180),
@@ -185,6 +187,21 @@ def build_app(opts) -> Starlette:
         job.update(status="cancelled", finished_at="2026-01-01T00:00:00+00:00")
         return JSONResponse({"status": "cancelled"})
 
+    async def embed(request: Request):
+        if (err := auth(request)):
+            return err
+        body = await request.json()
+        raw = body.get("input")
+        texts = [raw] if isinstance(raw, str) else (raw or [])
+        if not texts or not all(isinstance(t, str) for t in texts):
+            return JSONResponse({"error": "invalid_request"}, status_code=400)
+        # 결정적 가짜 벡터 — 같은 입력이면 같은 값이라 테스트에 쓸 수 있다
+        vecs = [[((hash(t) >> i) % 1000) / 1000.0 for i in range(EMBED_DIM)]
+                for t in texts]
+        return JSONResponse({"status": "ok", "model": "bge-m3",
+                             "embeddings": vecs, "count": len(vecs),
+                             "dimensions": EMBED_DIM, "duration_ms": 5})
+
     async def list_roles(request: Request):
         if (err := auth(request)):
             return err
@@ -221,6 +238,7 @@ def build_app(opts) -> Starlette:
     return Starlette(routes=[
         Route("/healthz", healthz),
         Route("/v1/generate", generate, methods=["POST"]),
+        Route("/v1/embed", embed, methods=["POST"]),
         Route("/v1/jobs", list_jobs, methods=["GET"]),
         Route("/v1/jobs/{job_id}", get_job, methods=["GET"]),
         Route("/v1/jobs/{job_id}", cancel_job, methods=["DELETE"]),
