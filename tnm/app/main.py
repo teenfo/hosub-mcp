@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 
 from . import db, ollama, settings
 from .collect import CollectRunner
-from .pipeline.workers import DedupWorker, EmbedWorker
+from .pipeline.workers import ClassifyWorker, DedupWorker, EmbedWorker
 from .watch import WatchSync
 
 logging.basicConfig(level=logging.INFO,
@@ -26,6 +26,7 @@ watchsync = WatchSync()
 collector = CollectRunner()
 embedder = EmbedWorker()
 deduper = DedupWorker()
+classifier = ClassifyWorker()
 
 
 @asynccontextmanager
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(collector.news_loop()),
         asyncio.create_task(embedder.loop()),
         asyncio.create_task(deduper.loop()),
+        asyncio.create_task(classifier.loop()),
     ]
     yield
     for t in tasks:
@@ -73,6 +75,7 @@ async def api_status(_=Depends(require_auth)):
         "collect": collector.status(),
         "embed": embedder.status(),
         "dedup": deduper.status(),
+        "classify": classifier.status(),
         "ollama": await ollama.reachable(),
         "shadow_mode": bool(settings.ALERTS.get("shadow_mode", True)),
         "dart_enabled": bool(settings.DART_API_KEY),
