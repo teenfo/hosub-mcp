@@ -214,6 +214,45 @@ return Response.json(job);
 
 ---
 
+## 5-1. 임베딩 (`POST /v1/embed`)
+
+RAG·유사도·중복 제거용 벡터. **이것만 잡이 아니라 동기로 바로 돌아온다.**
+
+```bash
+curl -X POST $LLMGW_URL/v1/embed -H "Authorization: Bearer $LLMGW_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"role": "embed", "input": ["첫 문장", "둘째 문장"]}'
+```
+```jsonc
+{
+  "status": "ok",
+  "model": "bge-m3",
+  "embeddings": [[...], [...]],   // 입력 순서와 같다
+  "count": 2,
+  "dimensions": 1024,
+  "duration_ms": 42
+}
+```
+
+**왜 큐를 안 태우나.** 임베딩은 밀리초 단위로 끝나고 보통 즉시 응답 경로에서 쓴다.
+2레인 큐에 넣으면 3분짜리 32b 생성 뒤에서 기다리게 되어 쓸모가 없어진다. 대신
+인증·역할 제한·레이트리밋·사용량 집계는 생성과 똑같이 적용된다.
+
+**배치로 보내라.** `input` 에 배열을 주면 한 번에 처리된다. 100건을 100번 호출하면
+레이트리밋에 걸리고 느리다 — 한 번에 보내는 쪽이 훨씬 빠르다(최대 256건).
+
+```python
+vecs = gw.embed([item.title for item in items])   # 한 번에
+```
+
+실패 시 `503`(재시도 가치 있음 — 맥 재부팅 등) 또는 `502`(모델 문제 등)로 구분된다.
+
+> 임베딩 역할은 `roles.yaml` 에 `kind: embed` 로 등록한다. 생성용 역할을
+> `/v1/embed` 에 주면(또는 반대로) `400 wrong_role_kind` 로 즉시 거부된다 —
+> 조용히 이상한 결과가 나오는 것보다 낫다.
+
+---
+
 ## 6. 필요한 역할·모델이 없을 때
 
 **역할 추가**는 `config/roles.yaml` 에 PR 을 올린다(모델·레인·타임아웃만 정한다).
@@ -264,6 +303,7 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 | `GET /v1/roles` | 쓸 수 있는 역할·모델 |
 | `GET /v1/status` | 백엔드·레인 큐·사용량 |
 | `GET /v1/models/requests` | 모델 설치 요청 (승인은 hosub 만) |
+| `POST /v1/embed` | 임베딩 벡터. **유일하게 잡이 아닌 엔드포인트** |
 | `GET /v1/integration` | **이 문서** (마크다운). 계약의 최신본 |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
 

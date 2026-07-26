@@ -20,7 +20,7 @@ services:
 
   tnm:
     token_env: LLMGW_TOKEN_TNM
-    allow_roles: ["summarize", "classify_news", "translate"]
+    allow_roles: ["summarize", "classify_news", "translate", "embed"]
     rate_limit_per_min: 120
 
   trading:

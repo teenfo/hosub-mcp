@@ -172,7 +172,7 @@ def test_cancel_queued_job(store, roles, services):
 # --- 메타 ---
 def test_roles_filtered_by_permission(client):
     all_roles = client.get("/v1/roles", headers=H_ALPHA).json()["roles"]
-    assert len(all_roles) == 5
+    assert len(all_roles) == 6          # 생성 5 + 임베딩 1
     beta_roles = client.get("/v1/roles", headers=H_BETA).json()["roles"]
     assert [r["name"] for r in beta_roles] == ["fast"]
 
@@ -198,3 +198,73 @@ def test_status_graceful_when_backend_down(store, roles, services):
         assert b["backend"]["online"] is False
         assert b["backend"]["error"]
         assert all(r["model_available"] is False for r in b["roles"])
+
+
+# --- 임베딩 (/v1/embed — 유일하게 잡이 아닌 엔드포인트) ---
+def test_embed_returns_vectors(client):
+    fake = client.app.state.fake
+    r = client.post("/v1/embed", headers=H_ALPHA,
+                    json={"role": "vec", "input": ["첫 문장", "둘째 문장"]})
+    assert r.status_code == 200
+    d = r.json()
+    assert d["status"] == "ok" and d["count"] == 2 and d["dimensions"] == 3
+    assert d["model"] == "bge-m3"
+    assert fake.embed_calls == [("bge-m3", ["첫 문장", "둘째 문장"])]
+
+
+def test_embed_accepts_bare_string(client):
+    fake = client.app.state.fake
+    d = client.post("/v1/embed", headers=H_ALPHA,
+                    json={"role": "vec", "input": "한 건"}).json()
+    assert d["count"] == 1
+    assert fake.embed_calls == [("bge-m3", ["한 건"])]
+
+
+def test_embed_requires_auth(client):
+    assert client.post("/v1/embed", json={"role": "vec", "input": "x"}).status_code == 401
+
+
+def test_embed_rejects_generate_role(client):
+    """역할 종류를 섞어 쓰면 조용히 이상한 결과가 나오는 대신 즉시 알린다."""
+    r = client.post("/v1/embed", headers=H_ALPHA, json={"role": "fast", "input": "x"})
+    assert r.status_code == 400
+    assert r.json()["error"] == "wrong_role_kind"
+    assert r.json()["embed_roles"] == ["vec"]
+
+
+def test_generate_rejects_embed_role(client):
+    r = client.post("/v1/generate", headers=H_ALPHA, json={"role": "vec", "prompt": "x"})
+    assert r.status_code == 400
+    assert r.json()["error"] == "wrong_role_kind"
+
+
+def test_embed_respects_allow_roles(client):
+    """beta 는 fast 만 허용 — 임베딩도 같은 권한 모델을 따른다."""
+    assert client.post("/v1/embed", headers=H_BETA,
+                       json={"role": "vec", "input": "x"}).status_code == 403
+
+
+def test_embed_validates_input(client):
+    for bad in [{}, {"role": "vec"}, {"role": "vec", "input": []},
+                {"role": "vec", "input": [1, 2]}]:
+        r = client.post("/v1/embed", headers=H_ALPHA, json=bad)
+        assert r.status_code in (400, 404), bad
+
+
+def test_embed_rejects_oversized_batch(client):
+    r = client.post("/v1/embed", headers=H_ALPHA,
+                    json={"role": "vec", "input": ["x"] * 300})
+    assert r.status_code == 413 and r.json()["error"] == "batch_too_large"
+
+
+def test_embed_backend_failure_is_retryable_503(client):
+    client.app.state.fake.embed_fail = True
+    r = client.post("/v1/embed", headers=H_ALPHA, json={"role": "vec", "input": "x"})
+    assert r.status_code == 503                    # 맥 재부팅 등 — 나중에 다시
+    assert r.json()["retryable"] is True
+
+
+def test_embed_is_recorded_in_usage(client):
+    client.post("/v1/embed", headers=H_ALPHA, json={"role": "vec", "input": "x"})
+    usage = client.get("/v1/status", headers=H_ALPHA).json()["usage"]
+    assert any(u["service"] == "alpha" and u["calls"] >= 1 for u in usage)

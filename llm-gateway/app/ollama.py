@@ -24,6 +24,13 @@ class GenerateResult:
     duration_ms: int | None
 
 
+@dataclass
+class EmbedResult:
+    embeddings: list[list[float]]
+    prompt_eval_count: int | None
+    duration_ms: int | None
+
+
 class OllamaClient:
     def __init__(self, base_url: str, keep_alive: str = "10m") -> None:
         self.base_url = base_url.rstrip("/")
@@ -126,6 +133,46 @@ class OllamaClient:
             ) from exc
         if progress_cb:
             progress_cb(100)
+
+    async def embed(
+        self,
+        *,
+        model: str,
+        inputs: list[str],
+        timeout: int = 60,
+    ) -> "EmbedResult":
+        """텍스트 임베딩. /api/embed 는 배열 입력을 한 번에 처리한다.
+
+        구형 /api/embeddings 는 한 번에 한 건뿐이라 배치가 느리다.
+        """
+        payload = {"model": model, "input": inputs, "keep_alive": self.keep_alive}
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                res = await client.post(f"{self.base_url}/api/embed", json=payload)
+                if res.status_code >= 500:
+                    raise BackendError(f"백엔드 오류 HTTP {res.status_code}", retryable=True)
+                if res.status_code >= 400:
+                    raise BackendError(
+                        f"임베딩 거부 HTTP {res.status_code}: {res.text[:200]}",
+                        retryable=False,
+                    )
+                data = res.json()
+        except httpx.TimeoutException as exc:
+            raise BackendError(f"임베딩 타임아웃: {exc}", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise BackendError(
+                f"임베딩 연결 실패: {type(exc).__name__}: {exc}", retryable=True
+            ) from exc
+
+        vectors = data.get("embeddings")
+        if not isinstance(vectors, list) or not vectors:
+            raise BackendError("임베딩 응답 형식 오류(embeddings 없음)", retryable=False)
+        total = data.get("total_duration")
+        return EmbedResult(
+            embeddings=vectors,
+            prompt_eval_count=data.get("prompt_eval_count"),
+            duration_ms=round(total / 1_000_000) if total else None,
+        )
 
     async def tags(self, timeout: int = 5) -> list[str]:
         """보유 모델 목록. 실패 시 BackendError."""

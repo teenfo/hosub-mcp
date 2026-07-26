@@ -19,8 +19,9 @@ from app.store import Store  # noqa: E402
 ROLES_RAW = {
     "backend": {"base_url": "http://mac.test:11434", "keep_alive": "10m"},
     "mem_budget_gb": 40,
-    "model_sizes_gb": {"small": 5, "mid": 10, "big": 30},
+    "model_sizes_gb": {"small": 5, "mid": 10, "big": 30, "bge-m3": 1.2},
     "roles": {
+        "vec":   {"model": "bge-m3", "kind": "embed", "timeout": 60},
         "fast":  {"model": "small", "lane": "interactive", "timeout": 30,
                   "system": "기본 지시", "options": {"temperature": 0.3}},
         "chat":  {"model": "mid", "lane": "interactive", "timeout": 60},
@@ -62,12 +63,16 @@ class FakeOllama:
         self.calls: list[str] = []
         self.concurrent = 0
         self.max_concurrent = 0
-        self._models = models if models is not None else ["small", "mid", "big"]
+        self._models = models if models is not None else ["small", "mid", "big", "bge-m3"]
         self.tags_fail = False
         # pull 제어: 설치된 모델 기록 + 실패시킬 모델 + 지연
         self.pulled: list[str] = []
         self.pull_fail: set[str] = set()
         self.pull_delay = 0.0
+        # embed 제어
+        self.embed_calls: list[tuple] = []
+        self.embed_fail = False
+        self.embed_delay = 0.0
 
     async def generate(self, *, model, prompt, system=None, options=None,
                        timeout=180, client=None) -> GenerateResult:
@@ -86,6 +91,16 @@ class FakeOllama:
             )
         finally:
             self.concurrent -= 1
+
+    async def embed(self, *, model, inputs, timeout=60):
+        from app.ollama import EmbedResult
+        self.embed_calls.append((model, list(inputs)))
+        if self.embed_fail:
+            raise BackendError("가짜 임베딩 실패", retryable=self.retryable)
+        if self.embed_delay:
+            await asyncio.sleep(self.embed_delay)
+        return EmbedResult(embeddings=[[0.1, 0.2, 0.3] for _ in inputs],
+                           prompt_eval_count=len(inputs), duration_ms=3)
 
     async def tags(self, timeout: int = 5) -> list[str]:
         if self.tags_fail:
