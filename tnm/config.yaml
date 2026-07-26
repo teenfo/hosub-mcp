@@ -22,7 +22,8 @@ dedup:
   window_days: 7               # 동일 종목 비교 범위
 
 llm:
-  primary_model: "qwen2.5:32b"   # Mac 설치 태그 (기본 = instruct q4_K_M 양자화)
+  classify_role: "classify_news"   # 공유 LLM 게이트웨이 역할 (모델은 roles.yaml 소유)
+  primary_model: "qwen2.5:32b"     # (직접 호출 폴백용 참고값 — 게이트웨이 경유가 기본)
   fallback_model: "qwen2.5:14b"
   embed_model: "bge-m3"
   temperature: 0.1

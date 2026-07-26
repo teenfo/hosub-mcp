@@ -30,8 +30,11 @@ ENV_FILE = BASE_DIR / ".env"
 DART_API_KEY = os.environ.get("DART_API_KEY", "")
 NAVER_CLIENT_ID = os.environ.get("NAVER_CLIENT_ID", "")          # 선택 — 비우면 네이버 어댑터 비활성
 NAVER_CLIENT_SECRET = os.environ.get("NAVER_CLIENT_SECRET", "")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "")                    # Mac Studio (http://<ip>:11434)
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "")                    # Mac Studio (임베딩 직접 호출용)
 OLLAMA_FALLBACK_URL = os.environ.get("OLLAMA_FALLBACK_URL", "")  # hosub 로컬 — 비우면 폴백 생략
+# 공유 LLM 게이트웨이 (분류 경유 — llm-gateway/docs/integration.md)
+LLMGW_URL = os.environ.get("LLMGW_URL", "http://127.0.0.1:8603")
+LLMGW_TOKEN = os.environ.get("LLMGW_TOKEN", "")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "")
 DB_DSN = os.environ.get("TNM_DB_DSN", "")                        # postgresql://tnm:pw@127.0.0.1:5433/tnm
@@ -75,6 +78,7 @@ def masked() -> dict:
         "slack_token": _mask(SLACK_BOT_TOKEN),
         "slack_channel": SLACK_CHANNEL,
         "db_configured": bool(DB_DSN),
+        "llm_gateway": LLMGW_URL if LLMGW_TOKEN else "",
         "shadow_mode": bool(ALERTS.get("shadow_mode", True)),
     }
 

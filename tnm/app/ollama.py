@@ -1,27 +1,85 @@
-"""Ollama 클라이언트 — Mac Studio(primary) → hosub 로컬(fallback).
+"""LLM 접근 계층 — 분류는 공유 LLM 게이트웨이(:8603), 임베딩은 Ollama 직접.
 
-핵심 계약(계획 3절): 연결 실패는 OllamaUnavailable 로 던져 파이프라인이
-행을 보류(백오프 후 자동 재처리)하게 하고, 응답 형식 불량(SchemaError,
-M5 분류에서 사용)만 재시도 후 llm_failed 로 적재한다.
+- 분류(chat): llm-gateway 의 role `classify_news` 경유. 인증·레인 큐·사용량
+  귀속·모델 교체(roles.yaml 한 줄)는 게이트웨이가 담당한다. system 프롬프트는
+  호출자(TNM) 소유 — 요청마다 함께 보낸다.
+- 임베딩(embed): 게이트웨이가 임베딩 API 를 아직 제공하지 않아 Mac Ollama
+  (OLLAMA_URL)를 직접 호출한다. 게이트웨이에 embed 가 생기면 여기만 바꾸면 된다.
+
+핵심 계약(계획 3절)은 유지된다: 연결·큐 실패는 OllamaUnavailable 로 던져
+파이프라인이 행을 보류(백오프 후 자동 재처리)하게 하고, 응답 내용 불량
+(SchemaError)만 재시도 후 llm_failed 로 적재한다.
 """
 from __future__ import annotations
 
 import logging
+import time
 
 import httpx
 
 from . import settings
+from .llmgw import AsyncLLMGateway, GatewayError
 
 log = logging.getLogger("tnm.ollama")
 
 
 class OllamaUnavailable(Exception):
-    """모든 엔드포인트 연결 불가 — 항목을 버리지 말고 보류하라는 신호."""
+    """LLM 백엔드(게이트웨이/Ollama) 사용 불가 — 항목을 버리지 말고 보류하라는 신호."""
 
 
 class SchemaError(Exception):
-    """LLM 응답이 규격(JSON 스키마)을 벗어남 — 재시도 대상 (M5)."""
+    """LLM 응답이 규격(JSON 스키마)을 벗어남 — 재시도 대상."""
 
+
+_gw: AsyncLLMGateway | None = None
+
+
+def _gateway() -> AsyncLLMGateway:
+    global _gw
+    if _gw is None:
+        if not settings.LLMGW_TOKEN:
+            raise OllamaUnavailable("LLMGW_TOKEN 미설정")
+        _gw = AsyncLLMGateway(token=settings.LLMGW_TOKEN,
+                              base_url=settings.LLMGW_URL, timeout=30)
+    return _gw
+
+
+async def chat(system: str, user: str) -> tuple[str, str, int]:
+    """게이트웨이 role 로 분류 생성. 반환: (content, model_name, latency_ms).
+
+    게이트웨이 연결 실패·잡 실패·시간 초과 → OllamaUnavailable (보류 후 재시도).
+    잡이 pending 으로 돌아오면 완료까지 폴링한다.
+    """
+    role = settings.LLM.get("classify_role", "classify_news")
+    wait = min(int(settings.LLM.get("timeout_sec", 120)), 290)
+    t0 = time.monotonic()
+    try:
+        gw = _gateway()
+        job = await gw.generate(role, user, system=system, wait=wait,
+                                metadata={"src": "tnm-classify"})
+        if job.pending:
+            job = await gw.wait_for(job.job_id, timeout=wait, poll=2.0)
+    except OllamaUnavailable:
+        raise
+    except GatewayError as e:
+        # 연결 실패·잡 실패·타임아웃·권한 문제 전부 '지금은 못 쓴다' — 보류
+        raise OllamaUnavailable(f"게이트웨이 사용 불가: {e}") from e
+    latency = int((time.monotonic() - t0) * 1000)
+    if not job.ok or not (job.response or "").strip():
+        raise OllamaUnavailable(f"게이트웨이 잡 실패: {job.error or job.status}")
+    return job.response, job.model or role, latency
+
+
+async def gateway_reachable() -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{settings.LLMGW_URL.rstrip('/')}/healthz")
+            return r.status_code == 200
+    except httpx.HTTPError:
+        return False
+
+
+# ---------------- 임베딩 (Ollama 직접 — 게이트웨이 미지원 구간) ----------------
 
 def bases() -> list[str]:
     return [u.rstrip("/") for u in (settings.OLLAMA_URL, settings.OLLAMA_FALLBACK_URL) if u]
@@ -38,7 +96,9 @@ def _http() -> httpx.AsyncClient:
 
 
 async def reachable() -> str | None:
-    """상태 표시용 — 접속 가능한 첫 base URL (없으면 None)."""
+    """상태 표시용 — 게이트웨이 우선, 아니면 직접 Ollama 도달 주소."""
+    if await gateway_reachable():
+        return settings.LLMGW_URL
     for base in bases():
         try:
             r = await _http().get(f"{base}/api/version", timeout=3)
@@ -47,48 +107,6 @@ async def reachable() -> str | None:
         except httpx.HTTPError:
             continue
     return None
-
-
-def _chat_targets() -> list[tuple[str, str]]:
-    """(base, model) 쌍 — primary 는 32b, hosub 폴백은 14b."""
-    out = []
-    if settings.OLLAMA_URL:
-        out.append((settings.OLLAMA_URL.rstrip("/"),
-                    settings.LLM.get("primary_model", "qwen2.5:32b-instruct-q4_K_M")))
-    if settings.OLLAMA_FALLBACK_URL:
-        out.append((settings.OLLAMA_FALLBACK_URL.rstrip("/"),
-                    settings.LLM.get("fallback_model", "qwen2.5:14b")))
-    return out
-
-
-async def chat(system: str, user: str) -> tuple[str, str, int]:
-    """분류 호출 (format=json, temperature 0.1 — 요청서 5.1).
-
-    반환: (content, model_name, latency_ms). 모든 대상 실패 → OllamaUnavailable.
-    응답 '내용'의 스키마 검증은 호출자(classify) 몫 — 여기서는 연결만 책임진다.
-    """
-    import time
-    last_err: Exception | None = None
-    for base, model in _chat_targets():
-        t0 = time.monotonic()
-        try:
-            r = await _http().post(f"{base}/api/chat", json={
-                "model": model, "stream": False, "format": "json",
-                "options": {
-                    "temperature": float(settings.LLM.get("temperature", 0.1)),
-                    "num_ctx": int(settings.LLM.get("num_ctx", 8192)),
-                },
-                "messages": [{"role": "system", "content": system},
-                             {"role": "user", "content": user}],
-            }, timeout=int(settings.LLM.get("timeout_sec", 120)))
-            r.raise_for_status()
-            content = r.json().get("message", {}).get("content", "")
-            return content, model, int((time.monotonic() - t0) * 1000)
-        except (httpx.HTTPError, ValueError) as e:
-            last_err = e
-            log.warning("chat 실패 %s(%s): %s", base, model, e)
-            continue
-    raise OllamaUnavailable(f"Ollama 연결 불가: {last_err or 'OLLAMA_URL 미설정'}")
 
 
 async def embed(text: str) -> list[float]:
