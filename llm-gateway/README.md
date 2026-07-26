@@ -110,10 +110,24 @@ batch       : 동시 1 — 큰 모델·긴 작업 (야간 분석 등)
 ## 실행
 
 ```bash
-cp .env.example .env      # OLLAMA_URL(맥 LAN IP) + 토큰들 채우기
+cp .env.example .env      # OLLAMA_URL(맥 Tailscale IP) + 토큰들 채우기
 docker compose up -d --build
 curl -s localhost:8603/healthz
 ```
+
+운영 서버에서는 systemd 로 감싼다 — **다른 서비스 배포에 끌려 재시작되지 않도록**
+수명주기를 분리하기 위해서다(잡 큐를 들고 있다).
+
+```bash
+sudo cp ../deploy/llm-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now llm-gateway
+
+sudo systemctl restart llm-gateway   # 단독 재기동
+sudo systemctl reload  llm-gateway   # 코드 반영 재빌드
+```
+
+`hosub-mcp` 자동 업데이트 타이머는 게이트웨이를 건드리지 않는다. 대신
+`llm-gateway/` 코드가 바뀌면 로그로 알려준다 → `docs/SETUP.md` 8-1절.
 
 맥 스튜디오 준비물은 **[`docs/mac-setup.md`](docs/mac-setup.md)** 에 정리해 두었다.
 요점만:

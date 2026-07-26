@@ -34,6 +34,18 @@ log "업데이트 감지: ${LOCAL:0:8} -> ${REMOTE:0:8}"
 # fast-forward 만 허용 (히스토리 꼬임 방지)
 git merge --ff-only "origin/${BRANCH}"
 
+# llm-gateway 는 **의도적으로** 여기서 재기동하지 않는다.
+# 잡 큐를 들고 있어 다른 서비스 배포에 끌려 재시작되면 안 되기 때문이다
+# (실행 중이던 추론이 끊기고, 모델 다운로드 중이면 중단된다).
+#
+# 다만 코드만 내려오고 컨테이너가 옛 이미지로 계속 돌면 조용히 어긋나므로,
+# 변경이 있었다는 사실은 반드시 알린다. 반영은 사람이 명시적으로 한다.
+if ! git diff --quiet "$LOCAL" "$REMOTE" -- llm-gateway/ 2>/dev/null; then
+  log "주의: llm-gateway/ 가 변경됨 — 컨테이너는 자동 재빌드되지 않습니다."
+  log "      반영: sudo systemctl reload llm-gateway"
+  log "      또는: MCP deploy_service(service_name='llm-gateway', confirm=true)"
+fi
+
 # 의존성 변경이 있을 수 있으니 항상 반영 (이미 설치돼 있으면 빠르게 통과)
 if [ -x ".venv/bin/pip" ]; then
   .venv/bin/pip install --quiet --upgrade -r requirements.txt

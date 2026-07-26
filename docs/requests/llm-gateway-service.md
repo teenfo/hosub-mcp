@@ -371,11 +371,15 @@ LLMGW_TOKEN_HOSUB=...
 
 ## 12. 배포·운영
 
-- `config/registry.yaml` 에 서비스 등록 → 대화로 재시작·배포 가능.
-  Docker 이므로 `deploy.steps` 에 `docker compose up -d --build` 를 넣는다
-  (systemd 래퍼 방식과 택1 — **미결 3**).
+- **systemd 래퍼 + 레지스트리 등록 둘 다** 한다(미결 3 확정 — 15절).
+  `deploy/llm-gateway.service` 로 단독 재기동·로그 조회가 되고,
+  `config/registry.yaml` 의 `llm-gateway` 항목으로 대화 배포(`git pull` +
+  `docker compose up -d --build`)가 된다.
+- **다른 서비스 배포가 게이트웨이를 재시작하지 않는다.** 잡 큐를 들고 있어
+  끌려 재시작되면 실행 중이던 추론이 끊기고 모델 다운로드가 중단된다.
+  경로별 영향 표는 `docs/SETUP.md` 8-1절.
 - 대시보드에서 상태 확인(레인별 큐·백엔드·사용량).
-- 맥 스튜디오 준비물: `launchctl setenv OLLAMA_HOST 0.0.0.0` + 모델 pull.
+- 맥 스튜디오 준비물: `llm-gateway/docs/mac-setup.md`.
 
 ## 13. 테스트 전략
 
@@ -422,7 +426,18 @@ LLMGW_TOKEN_HOSUB=...
       11434 는 아직 `Connection refused`(= Ollama 가 없거나 127.0.0.1 바인딩)
 - [ ] roxlogy 역할의 모델 선택(`analyze_workout` 등) — 데이터 규모·응답 품질 요구 확인
       (프롬프트는 7절에 따라 roxlogy 소유이므로 게이트웨이엔 모델 정책만 정의)
-- [ ] Docker 서비스 등록 방식: `docker compose` 직접 vs systemd 래퍼
+- [x] ~~Docker 서비스 등록 방식: `docker compose` 직접 vs systemd 래퍼~~ →
+      **확정: systemd 래퍼**(`deploy/llm-gateway.service`). 게이트웨이는 잡 큐를
+      들고 있어 **다른 서비스 배포와 수명주기가 분리돼야 한다**. 유닛으로 두면
+      `systemctl restart/reload llm-gateway` 로 단독 제어되고, MCP
+      `restart_service`/`read_service_logs`/`deploy_service` 대상이 되며,
+      부팅 순서를 `docker.service` 뒤로 명시할 수 있다.
+      `ExecStop` 은 `compose down` 이 아니라 `stop` — `llm-net` 을 지우면 거기
+      붙은 다른 소비 컨테이너가 끊기기 때문이다.
+      `dash`/`tnm` 배포가 같은 클론에서 `git pull` 하므로 게이트웨이 코드가
+      디스크에만 내려오는 드리프트가 생기는데, `update.sh` 가 이를 감지해
+      **행동하지 않고 로그로만 알린다**(분리 유지 + 침묵 방지). 상세는
+      `docs/SETUP.md` 8-1·8-2절.
 - [x] ~~소비 서비스가 hosub **밖 다른 호스트**에서도 호출할 계획인지~~ → **확정: 그렇다.**
       roxlogy 는 Vercel 에서 서비스된다. 15-1절 참고
 
