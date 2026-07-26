@@ -401,8 +401,14 @@ LLMGW_TOKEN_HOSUB=...
 
 ## 15. 미결 사항 (구현 착수 전 확정 필요)
 
-- [ ] **맥 스튜디오 LAN IP** — 현재 미상. `config/llm_registry.yaml` 에 잘못된 맥북
-      Tailscale IP(100.107.151.46)가 들어가 있어 **함께 정정 필요**
+- [x] ~~**맥 스튜디오 LAN IP**~~ → **확정: Tailscale IP `100.69.201.28`** 을 쓴다.
+      맥 스튜디오에도 Tailscale 을 설치해 `macstudio` 노드로 붙었다. LAN IP
+      (192.168.0.31)는 DHCP 라 바뀔 수 있어 tailnet 주소가 낫고, 같은 LAN 이라
+      직접 연결(9ms)이므로 손해가 없다. `config/llm_registry.yaml` 의 잘못된
+      맥북 IP(100.107.151.46)도 함께 정정했다.
+      맥 쪽 준비 절차는 `llm-gateway/docs/mac-setup.md`.
+      hosub 에서 확인한 것: tailscale ping 성공, 도커 컨테이너 → tailnet 도달 가능,
+      11434 는 아직 `Connection refused`(= Ollama 가 없거나 127.0.0.1 바인딩)
 - [ ] roxlogy 역할의 모델 선택(`analyze_workout` 등) — 데이터 규모·응답 품질 요구 확인
       (프롬프트는 7절에 따라 roxlogy 소유이므로 게이트웨이엔 모델 정책만 정의)
 - [ ] Docker 서비스 등록 방식: `docker compose` 직접 vs systemd 래퍼

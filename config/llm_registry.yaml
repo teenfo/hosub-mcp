@@ -8,9 +8,9 @@
 
 backends:
   mac:
-    # Tailscale IP (macbookpro). Mac 에서 Ollama 가 외부 접속을 허용해야 한다:
-    #   launchctl setenv OLLAMA_HOST 0.0.0.0   (또는 앱 설정)
-    base_url: http://100.107.151.46:11434
+    # macstudio 의 Tailscale IP. LAN IP(192.168.0.31)와 달리 DHCP 에 흔들리지 않는다.
+    # Mac 에서 Ollama 가 외부 접속을 허용해야 한다 → llm-gateway/docs/mac-setup.md
+    base_url: http://100.69.201.28:11434
     type: ollama
   local:
     # hosub 자체에서 돌릴 때(현재는 미사용, 폴백 용도)

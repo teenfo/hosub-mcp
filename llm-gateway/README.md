@@ -111,12 +111,18 @@ docker compose up -d --build
 curl -s localhost:8603/healthz
 ```
 
-맥 스튜디오 준비물:
+맥 스튜디오 준비물은 **[`docs/mac-setup.md`](docs/mac-setup.md)** 에 정리해 두었다.
+요점만:
+
 ```bash
 launchctl setenv OLLAMA_HOST 0.0.0.0     # 외부 접속 허용 후 Ollama 재시작
+sudo pmset -a sleep 0 disksleep 0        # 맥이 자면 백엔드가 사라진다
 ```
-모델은 미리 받아둬도 되고(`ollama pull qwen2.5:7b …`), 그냥 두면 첫 호출 때
-게이트웨이가 설치 요청을 올린다 — 대시보드에서 승인만 하면 된다.
+`launchctl setenv` 는 재부팅하면 사라지므로 LaunchAgent 로 고정해야 하고,
+Tailscale 노드의 키 만료(기본 180일)도 꺼야 한다. 둘 다 문서에 스크립트가 있다.
+
+모델은 미리 받을 필요 없다 — 첫 호출 때 게이트웨이가 설치 요청을 올리고,
+대시보드에서 승인하면 자동으로 내려받는다.
 
 ## 개발·테스트
 
