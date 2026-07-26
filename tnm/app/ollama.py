@@ -1,13 +1,11 @@
-"""LLM 접근 계층 — 분류는 공유 LLM 게이트웨이(:8603), 임베딩은 Ollama 직접.
+"""LLM 접근 계층 — 분류·임베딩 모두 공유 LLM 게이트웨이(:8603) 경유.
 
-- 분류(chat): llm-gateway 의 role `classify_news` 경유. 인증·레인 큐·사용량
-  귀속·모델 교체(roles.yaml 한 줄)는 게이트웨이가 담당한다. system 프롬프트는
-  호출자(TNM) 소유 — 요청마다 함께 보낸다.
-- 임베딩(embed): 게이트웨이가 임베딩 API 를 아직 제공하지 않아 Mac Ollama
-  (OLLAMA_URL)를 직접 호출한다. 게이트웨이에 embed 가 생기면 여기만 바꾸면 된다.
+- 분류(chat): role `classify_news` (잡 큐, pending 시 폴링)
+- 임베딩(embed): role `embed` (kind: embed — 큐를 타지 않는 동기·배치 API)
+인증·레인·사용량 귀속·모델 교체(roles.yaml)는 게이트웨이 소유.
 
-핵심 계약(계획 3절)은 유지된다: 연결·큐 실패는 OllamaUnavailable 로 던져
-파이프라인이 행을 보류(백오프 후 자동 재처리)하게 하고, 응답 내용 불량
+핵심 계약(계획 3절)은 유지된다: 게이트웨이·백엔드 불가는 OllamaUnavailable 로
+던져 파이프라인이 행을 보류(백오프 후 자동 재처리)하게 하고, 응답 내용 불량
 (SchemaError)만 재시도 후 llm_failed 로 적재한다.
 """
 from __future__ import annotations
@@ -45,11 +43,7 @@ def _gateway() -> AsyncLLMGateway:
 
 
 async def chat(system: str, user: str) -> tuple[str, str, int]:
-    """게이트웨이 role 로 분류 생성. 반환: (content, model_name, latency_ms).
-
-    게이트웨이 연결 실패·잡 실패·시간 초과 → OllamaUnavailable (보류 후 재시도).
-    잡이 pending 으로 돌아오면 완료까지 폴링한다.
-    """
+    """게이트웨이 role 로 분류 생성. 반환: (content, model_name, latency_ms)."""
     role = settings.LLM.get("classify_role", "classify_news")
     wait = min(int(settings.LLM.get("timeout_sec", 120)), 290)
     t0 = time.monotonic()
@@ -70,61 +64,38 @@ async def chat(system: str, user: str) -> tuple[str, str, int]:
     return job.response, job.model or role, latency
 
 
-async def gateway_reachable() -> bool:
+async def embed_batch(texts: list[str]) -> list[list[float]]:
+    """bge-m3 임베딩 배치 — 게이트웨이 /v1/embed (동기, 큐 미경유).
+
+    한 번의 호출로 배치 전체를 처리한다. 실패 → OllamaUnavailable (전체 보류).
+    """
+    if not texts:
+        return []
+    role = settings.LLM.get("embed_role", "embed")
     try:
-        async with httpx.AsyncClient(timeout=3) as c:
-            r = await c.get(f"{settings.LLMGW_URL.rstrip('/')}/healthz")
-            return r.status_code == 200
-    except httpx.HTTPError:
-        return False
-
-
-# ---------------- 임베딩 (Ollama 직접 — 게이트웨이 미지원 구간) ----------------
-
-def bases() -> list[str]:
-    return [u.rstrip("/") for u in (settings.OLLAMA_URL, settings.OLLAMA_FALLBACK_URL) if u]
-
-
-_client: httpx.AsyncClient | None = None
-
-
-def _http() -> httpx.AsyncClient:
-    global _client
-    if _client is None:
-        _client = httpx.AsyncClient(timeout=int(settings.LLM.get("timeout_sec", 120)))
-    return _client
-
-
-async def reachable() -> str | None:
-    """상태 표시용 — 게이트웨이 우선, 아니면 직접 Ollama 도달 주소."""
-    if await gateway_reachable():
-        return settings.LLMGW_URL
-    for base in bases():
-        try:
-            r = await _http().get(f"{base}/api/version", timeout=3)
-            if r.status_code == 200:
-                return base
-        except httpx.HTTPError:
-            continue
-    return None
+        gw = _gateway()
+        vecs = await gw.embed(texts, role=role)
+    except OllamaUnavailable:
+        raise
+    except GatewayError as e:
+        raise OllamaUnavailable(f"게이트웨이 임베딩 불가: {e}") from e
+    if not isinstance(vecs, list) or len(vecs) != len(texts):
+        raise OllamaUnavailable("게이트웨이 임베딩 응답 형식 오류")
+    return vecs
 
 
 async def embed(text: str) -> list[float]:
-    """bge-m3 임베딩(1024차원). 모든 base 실패 → OllamaUnavailable."""
-    model = settings.LLM.get("embed_model", "bge-m3")
-    last_err: Exception | None = None
-    for base in bases():
-        try:
-            r = await _http().post(f"{base}/api/embeddings",
-                                   json={"model": model, "prompt": text}, timeout=60)
-            r.raise_for_status()
-            vec = r.json().get("embedding")
-            if not isinstance(vec, list) or not vec:
-                raise OllamaUnavailable(f"{base}: 임베딩 응답 형식 오류")
-            return vec
-        except (httpx.HTTPError, ValueError) as e:
-            # 연결 거부·타임아웃·모델 미설치(404)·5xx 전부 '이 base 불가'로 다음 시도
-            last_err = e
-            log.warning("임베딩 실패 %s: %s", base, e)
-            continue
-    raise OllamaUnavailable(f"Ollama 연결 불가: {last_err or 'OLLAMA_URL 미설정'}")
+    """단건 임베딩 (배치 경로의 편의 래퍼)."""
+    return (await embed_batch([text]))[0]
+
+
+async def reachable() -> str | None:
+    """상태 표시용 — 게이트웨이 healthz 도달 시 그 URL."""
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{settings.LLMGW_URL.rstrip('/')}/healthz")
+            if r.status_code == 200:
+                return settings.LLMGW_URL
+    except httpx.HTTPError:
+        pass
+    return None

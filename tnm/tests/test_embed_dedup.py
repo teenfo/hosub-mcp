@@ -31,13 +31,13 @@ def test_backoff_caps_at_10min():
 
 
 def test_embed_worker_holds_batch_on_unavailable(monkeypatch):
-    """Ollama 다운 → 행을 버리지 않고 배치 백오프, 복구 시 재처리 (비기능 9장)."""
+    """게이트웨이 다운 → 행을 버리지 않고 배치 백오프, 복구 시 재처리 (비기능 9장)."""
     w = EmbedWorker()
     pending = [{"id": 1, "title": "t1", "norm_body": "b", "attempts": 2},
                {"id": 2, "title": "t2", "norm_body": "b", "attempts": 0}]
     retries, saved = [], []
 
-    async def fake_pending(limit=8):
+    async def fake_pending(limit=16):
         return pending
 
     async def fake_retry(ids, delay):
@@ -50,21 +50,25 @@ def test_embed_worker_holds_batch_on_unavailable(monkeypatch):
     monkeypatch.setattr(db, "mark_embed_retry", fake_retry)
     monkeypatch.setattr(db, "save_embedding", fake_save)
 
-    async def down(text):
+    async def down(texts):
         raise ollama.OllamaUnavailable("연결 불가")
 
-    monkeypatch.setattr(workers_mod.ollama, "embed", down)
+    monkeypatch.setattr(workers_mod.ollama, "embed_batch", down)
     assert asyncio.run(w.run_batch()) == 0
     assert retries == [([1, 2], backoff_sec(2))]     # 최대 attempts 기준 백오프
     assert saved == [] and "연결 불가" in w.last_error
 
-    # 복구 시나리오: embed 성공 → 저장·에러 해제
-    async def up(text):
-        return [0.1] * 1024
+    # 복구 시나리오: 배치 1회 호출로 전체 저장·에러 해제
+    calls = []
 
-    monkeypatch.setattr(workers_mod.ollama, "embed", up)
+    async def up(texts):
+        calls.append(len(texts))
+        return [[0.1] * 1024 for _ in texts]
+
+    monkeypatch.setattr(workers_mod.ollama, "embed_batch", up)
     assert asyncio.run(w.run_batch()) == 2
     assert saved == [1, 2] and w.last_error == ""
+    assert calls == [2]                              # 배치 전체 1회 호출
 
 
 def test_dedup_worker_routes_duplicates(monkeypatch):
@@ -96,39 +100,39 @@ def test_dedup_worker_routes_duplicates(monkeypatch):
     assert dups == [11] and w.duplicates == 1        # duplicate 만 LLM 생략 종결
 
 
-def test_ollama_embed_fallback_and_unavailable(monkeypatch):
-    """primary 실패 → fallback 사용, 둘 다 실패 → OllamaUnavailable."""
-    monkeypatch.setattr(settings, "OLLAMA_URL", "http://primary:11434")
-    monkeypatch.setattr(settings, "OLLAMA_FALLBACK_URL", "http://fallback:11434")
+def test_embed_batch_via_gateway(monkeypatch):
+    """임베딩은 게이트웨이 /v1/embed 배치 — 실패 시 OllamaUnavailable."""
+    from app.llmgw import GatewayError
 
-    class FakeResp:
-        status_code = 200
+    class FakeGW:
+        async def embed(self, texts, *, role="embed"):
+            assert role == "embed"
+            return [[0.5] * 1024 for _ in texts]
 
-        def raise_for_status(self):
-            pass
+    monkeypatch.setattr(ollama, "_gw", FakeGW())
+    vecs = asyncio.run(ollama.embed_batch(["a", "b"]))
+    assert len(vecs) == 2 and len(vecs[0]) == 1024
+    assert len(asyncio.run(ollama.embed("한 건"))) == 1024
 
-        def json(self):
-            return {"embedding": [0.5] * 1024}
+    class DownGW:
+        async def embed(self, texts, *, role="embed"):
+            raise GatewayError("연결 실패")
 
-    class FakeClient:
-        async def post(self, url, **k):
-            if "primary" in url:
-                import httpx
-                raise httpx.ConnectError("refused")
-            return FakeResp()
-
-    monkeypatch.setattr(ollama, "_client", FakeClient())
-    vec = asyncio.run(ollama.embed("텍스트"))
-    assert len(vec) == 1024
-
-    class DeadClient:
-        async def post(self, url, **k):
-            import httpx
-            raise httpx.ConnectError("refused")
-
-    monkeypatch.setattr(ollama, "_client", DeadClient())
+    monkeypatch.setattr(ollama, "_gw", DownGW())
     try:
-        asyncio.run(ollama.embed("텍스트"))
+        asyncio.run(ollama.embed_batch(["a"]))
+        raised = False
+    except ollama.OllamaUnavailable:
+        raised = True
+    assert raised
+
+    class BadGW:
+        async def embed(self, texts, *, role="embed"):
+            return [[0.1]]                            # 개수 불일치
+
+    monkeypatch.setattr(ollama, "_gw", BadGW())
+    try:
+        asyncio.run(ollama.embed_batch(["a", "b"]))
         raised = False
     except ollama.OllamaUnavailable:
         raised = True
