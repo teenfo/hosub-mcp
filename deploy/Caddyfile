@@ -22,6 +22,28 @@ hosub.duckdns.org {
 	# 그 외(/mcp, OAuth /authorize·/token·/register·/.well-known)는
 	# :8700(hosub-mcp.service). 프로세스를 분리해 대시보드 배포·재시작이
 	# MCP 세션을 끊지 않는다.
+	# 공유 LLM 게이트웨이(:8603) — 집 밖에서 도는 소비자용.
+	# roxlogy 는 Vercel 에서 서비스되므로 고정 출발 IP가 없어 IP 허용목록을
+	# 만들 수 없다. Bearer 토큰 + 서비스별 레이트리밋이 유일한 통제다.
+	#
+	# /v1/* 만 연다. /healthz 는 굳이 공개할 이유가 없다.
+	# 토큰이 새도 피해는 "맥 GPU 소모"까지고 서버가 장악되지는 않는다.
+	#
+	# ⚠️ CORS 를 열지 않는다 — 브라우저가 게이트웨이를 직접 부르면 토큰이
+	#    노출된다. 소비자는 자기 서버 사이드 라우트에서만 호출해야 한다.
+	handle_path /llm/* {
+		route {
+			@api path /v1/*
+			reverse_proxy @api 127.0.0.1:8603 {
+				# XFF 를 덮어쓴다. 그러지 않으면 클라이언트가 보낸 값이 앞에 남아
+				# 게이트웨이의 "인증 실패 from <IP>" 로그를 위조할 수 있다.
+				# (최신 Caddy 는 기본으로 걸러주지만 버전에 기대지 않는다)
+				header_up X-Forwarded-For {remote_host}
+			}
+			respond "not found" 404
+		}
+	}
+
 	@dash path / /login /logout /favicon.ico /api/* /static/*
 	handle @dash {
 		reverse_proxy 127.0.0.1:8701

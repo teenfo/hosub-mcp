@@ -90,9 +90,20 @@ def build_app(
     limiter = RateLimiter()
 
     # --- 인증 헬퍼 ---
+    def _client_ip(request: Request) -> str:
+        # Caddy 뒤에 있으므로 request.client 는 프록시 주소다
+        fwd = request.headers.get("x-forwarded-for", "")
+        return fwd.split(",")[0].strip() or (
+            request.client.host if request.client else "?"
+        )
+
     def _auth(request: Request):
         svc = authenticate(services, request.headers.get("authorization"))
         if svc is None:
+            # /llm/v1/* 이 공개돼 있으므로 누가 두드리는지 보이게 남긴다.
+            # (토큰 값은 절대 로그에 남기지 않는다)
+            log.warning("인증 실패: %s %s from %s",
+                        request.method, request.url.path, _client_ip(request))
             return None, JSONResponse(
                 {"error": "unauthorized"}, status_code=401,
                 headers={"WWW-Authenticate": "Bearer"},

@@ -121,11 +121,91 @@ hosub 관리자에게(=본인) 요청할 것:
 |---|---|
 | hosub 의 다른 컨테이너 | `http://llm-gateway:8603` (`llm-net` 네트워크에 붙인다) |
 | hosub 의 호스트 프로세스 | `http://127.0.0.1:8603` |
-| 다른 머신 | 현재 설계 범위 밖 — 8603 은 루프백에만 게시된다 |
+| **집 밖**(Vercel·클라우드 등) | `https://hosub.duckdns.org/llm` — 5절 참고 |
 
 ---
 
-## 5. 필요한 역할·모델이 없을 때
+## 5. 집 밖에서 붙이기 (Vercel 등)
+
+roxlogy 처럼 서버리스/클라우드에서 도는 소비자용. Caddy 가 `/llm/v1/*` 만 게이트웨이로
+넘긴다(`deploy/Caddyfile`). `/healthz` 는 공개하지 않는다.
+
+```bash
+LLMGW_URL=https://hosub.duckdns.org/llm
+LLMGW_TOKEN=<LLMGW_TOKEN_ROXLOGY 와 같은 값>
+```
+
+### 서버리스는 절대 기다리지 않는다
+
+Vercel 함수는 플랜에 따라 최대 60~300초다. LLM 을 기다리며 그 시간을 태우는 건
+비용·안정성 양쪽에서 나쁘다. **`wait=0` 으로 던지고 job_id 만 저장한 뒤 즉시 응답**하고,
+브라우저가 폴링하게 한다.
+
+```
+[브라우저] 운동 기록 저장
+   → [route] gw.generate(..., wait=0) → job_id 를 DB 에 저장하고 즉시 응답
+   → 화면은 "분석 중"
+[브라우저] 몇 초마다 /api/analysis/{id}
+   → [route] gw.job(job_id) → 완료되면 결과 저장 + 반환
+```
+
+크론이 아니라 브라우저 폴링을 권한다 — Vercel Cron 은 플랜에 따라 주기 제한이 있고,
+브라우저 폴링은 UI 피드백이 자연스럽다.
+
+```ts
+// app/api/analysis/route.ts — 분석 시작 (서버 사이드에서만!)
+const res = await fetch(`${process.env.LLMGW_URL}/v1/generate`, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${process.env.LLMGW_TOKEN}`,
+             "Content-Type": "application/json" },
+  body: JSON.stringify({
+    role: "analyze_workout",
+    prompt: JSON.stringify(workout),
+    system: COACH_PROMPT,          // 프롬프트는 roxlogy 소유
+    wait: 0,                       // 기다리지 않는다
+    metadata: { session_id: session.id },
+  }),
+});
+const { job_id } = await res.json();
+await db.session.update({ where: { id: session.id }, data: { llmJobId: job_id } });
+return Response.json({ status: "analyzing" });
+```
+
+```ts
+// app/api/analysis/[id]/route.ts — 폴링 대상
+const r = await fetch(`${process.env.LLMGW_URL}/v1/jobs/${jobId}`,
+  { headers: { Authorization: `Bearer ${process.env.LLMGW_TOKEN}` } });
+const job = await r.json();          // status: ok | pending | failed
+if (job.status === "ok") await db.session.update({ ... , data: { analysis: job.response } });
+return Response.json(job);
+```
+
+### 반드시 지킬 것
+
+- **토큰은 서버 사이드에만.** `NEXT_PUBLIC_` 접두어를 붙이면 브라우저에 노출된다.
+  브라우저는 게이트웨이를 직접 부르지 않고 자기 서비스의 라우트를 부른다
+  (그래서 Caddy 에서 CORS 를 열지 않았다)
+- **Vercel 환경변수는 Production 에만 설정.** Preview/Development 까지 체크하면
+  모든 PR 프리뷰가 토큰을 갖는다. 프리뷰에서는 목 서버를 쓰거나 분석을 건너뛴다
+- **폴링은 2초 이상.** roxlogy 한도는 분당 30회다(=2초). 더 자주 부르면 429
+- **집 서버는 가정용 회선이다.** 정전·재부팅·공인 IP 변경(DuckDNS 갱신 5분 주기)에
+  대비해 `GatewayError` 는 치명적 실패로 다루지 말고 "나중에 다시"로 처리한다.
+  `llmJobId` 를 저장해 두면 서버가 돌아왔을 때 결과를 그대로 이어받을 수 있다
+  (잡은 게이트웨이 재시작에도 살아남는다)
+
+### 위험 범위
+
+게이트웨이 토큰이 새면 피해는 **맥 GPU 소모**까지다 — MCP 토큰(=root)과 달리 서버가
+장악되지 않는다. `allow_roles` 로 쓸 수 있는 역할이, `rate_limit_per_min` 으로 소비량이
+제한된다. 유출이 의심되면 `.env` 의 토큰만 갈아끼우고 게이트웨이를 재시작하면 된다.
+
+인증 실패는 클라이언트 IP 와 함께 로그에 남으므로 `docker logs llm-gateway` 로 누가
+두드리는지 볼 수 있다. 스캐너가 붙으면 시끄러울 수 있는데, 컨테이너 로그는 10MB×3 으로
+회전하므로 디스크는 안전하다.
+
+---
+
+## 6. 필요한 역할·모델이 없을 때
 
 **역할 추가**는 `config/roles.yaml` 에 PR 을 올린다(모델·레인·타임아웃만 정한다).
 **프롬프트는 게이트웨이에 올리지 않는다** — 요청의 `system` 으로 보내면 되고, 그래야
@@ -145,7 +225,7 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 
 ---
 
-## 6. 응답 계약 (직접 HTTP 를 부를 때)
+## 7. 응답 계약 (직접 HTTP 를 부를 때)
 
 클라이언트를 안 쓰고 직접 호출해도 된다. **모든 요청은 잡**이고, 어느 엔드포인트든
 응답 모양이 같다.
@@ -192,7 +272,7 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 
 ---
 
-## 7. 실무에서 걸리는 것들
+## 8. 실무에서 걸리는 것들
 
 - **폴링 간격은 2초 이상.** 기본 레이트리밋이 분당 60회라 1초 폴링은 429 를 부른다.
   `wait_for()` 의 기본값(2초)이 이 때문이다.
@@ -208,7 +288,7 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 
 ---
 
-## 8. 참고
+## 9. 참고
 
 - 설계 근거: [`docs/requests/llm-gateway-service.md`](../../docs/requests/llm-gateway-service.md)
 - 운영·배포: [`llm-gateway/README.md`](../README.md)

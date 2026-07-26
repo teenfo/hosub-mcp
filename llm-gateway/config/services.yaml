@@ -10,10 +10,13 @@ services:
     rate_limit_per_min: 120
     admin: true                   # 모델 설치 요청 승인/거부 권한 (여기에만 부여)
 
+  # Vercel 에서 서비스되므로 집 밖에서 Caddy(/llm/v1/*)를 거쳐 들어온다.
+  # 고정 출발 IP가 없어 IP 허용목록을 만들 수 없다 — 토큰이 유일한 통제이므로
+  # 한도를 보수적으로 잡아 토큰이 새도 소비량 상한이 걸리게 한다.
   roxlogy:
     token_env: LLMGW_TOKEN_ROXLOGY
     allow_roles: ["analyze_workout", "coach_feedback", "summarize"]
-    rate_limit_per_min: 60
+    rate_limit_per_min: 30
 
   tnm:
     token_env: LLMGW_TOKEN_TNM

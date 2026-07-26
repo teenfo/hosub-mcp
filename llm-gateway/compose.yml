@@ -21,6 +21,13 @@ services:
     volumes:
       - ./config:/app/config:ro
       - /data/llm-gateway:/data        # 잡 DB (백업 대상 디스크)
+    # Caddy 를 통해 /llm/v1/* 이 공개되므로 스캐너 트래픽이 로그를 채울 수 있다.
+    # 도커 기본 로그는 무제한이라 루트 디스크(465GB)를 잠식한다 — 반드시 회전시킨다.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "python", "-c",
              "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8603/healthz',timeout=3).status==200 else 1)"]
