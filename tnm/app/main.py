@@ -148,6 +148,39 @@ async def api_watch_settings(ticker: str, payload: dict, _=Depends(require_auth)
     return {"ok": True}
 
 
+# ---------------- 조회·라벨 ----------------
+
+@app.get("/api/items")
+async def api_items(date: str | None = None, ticker: str | None = None,
+                    min_score: int | None = None, status: str | None = None,
+                    novelty: str | None = None, limit: int = 100,
+                    _=Depends(require_auth)):
+    _require_db()
+    return {"items": await db.list_items(date, ticker, min_score, status,
+                                         novelty, limit)}
+
+
+@app.get("/api/items/{analysis_id}")
+async def api_item_detail(analysis_id: int, _=Depends(require_auth)):
+    _require_db()
+    item = await db.get_item(analysis_id)
+    if item is None:
+        return JSONResponse({"ok": False, "error": "항목 없음"}, 404)
+    return {"ok": True, "item": item}
+
+
+@app.post("/api/items/{analysis_id}/label")
+async def api_item_label(analysis_id: int, payload: dict, _=Depends(require_auth)):
+    _require_db()
+    verdict = str(payload.get("verdict", "")).strip()
+    if verdict not in ("important", "noise"):
+        return JSONResponse({"ok": False, "error": "verdict 는 important|noise"}, 400)
+    note = str(payload.get("note", "")).strip() or None
+    if not await db.upsert_label(analysis_id, verdict, note):
+        return JSONResponse({"ok": False, "error": "항목 없음"}, 404)
+    return {"ok": True}
+
+
 # ---------------- 수집 ----------------
 
 @app.post("/api/collect/run")

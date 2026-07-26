@@ -80,6 +80,18 @@ _TRADING_POST_RE = re.compile(
 # 스윕과 겹칠수록 수 초~수십 초) — 이 경로들만 프록시 타임아웃을 늘린다.
 _TRADING_SLOW_RE = re.compile(r"^backtest/(report/run|\d{6})$")
 
+# TNM(뉴스·공시 모니터링) 서비스 프록시 — trading 과 동일 패턴.
+TNM_URL = os.environ.get("HOSUB_TNM_URL", "http://127.0.0.1:8602")
+TNM_TOKEN = os.environ.get("HOSUB_TNM_TOKEN", "")
+
+_TNM_GET_RE = re.compile(
+    r"^(status|items|items/\d+|watch|settings|metrics)$"
+)
+_TNM_POST_RE = re.compile(
+    r"^(items/\d+/label|watch|watch/sync|watch/\d{6}/(exclude|include|settings)"
+    r"|settings|collect/run)$"
+)
+
 
 def _is_authed(request) -> bool:
     return bool(request.session.get(_SESSION_KEY))
@@ -257,6 +269,38 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
                 {"error": f"trading 서비스 연결 실패: {exc}"}, status_code=502
             )
 
+    async def api_tnm(request):
+        if (d := _require_auth_json(request)):
+            return d
+        path = request.path_params["path"]
+        allowed = (
+            _TNM_GET_RE.match(path)
+            if request.method == "GET"
+            else _TNM_POST_RE.match(path)
+        )
+        if not allowed:
+            return JSONResponse({"error": "not allowed"}, status_code=404)
+        try:
+            body = await request.body()
+            headers = {"X-Internal-Token": TNM_TOKEN}
+            if body:
+                headers["Content-Type"] = request.headers.get(
+                    "content-type", "application/json"
+                )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.request(
+                    request.method,
+                    f"{TNM_URL}/api/{path}",
+                    params=dict(request.query_params),
+                    content=body,
+                    headers=headers,
+                )
+            return JSONResponse(resp.json(), status_code=resp.status_code)
+        except Exception as exc:  # 서비스 다운 시 graceful
+            return JSONResponse(
+                {"error": f"TNM 서비스 연결 실패: {exc}"}, status_code=502
+            )
+
     async def static_file(request):
         # 로그인 페이지 자산(스타일·vendor 라이브러리)은 인증 전에도 필요하므로 공개.
         name = request.path_params["path"]
@@ -283,6 +327,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),
+        Route("/api/tnm/{path:path}", api_tnm, methods=["GET", "POST"]),
         Route("/static/{path:path}", static_file),
     ]
 

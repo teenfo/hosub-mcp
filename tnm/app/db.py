@@ -412,6 +412,110 @@ async def log_llm_call(raw_item_id: int, input_hash: str, model_name: str,
             (raw_item_id, input_hash, model_name, latency_ms, attempt, ok, error))
 
 
+# ---------------- 조회·라벨 (M6 — 대시보드) ----------------
+
+async def list_items(date: str | None = None, ticker: str | None = None,
+                     min_score: int | None = None, status: str | None = None,
+                     novelty: str | None = None, limit: int = 100) -> list[dict]:
+    """분석 목록 (최신순). 필터는 전부 선택."""
+    where, args = [], []
+    if date:
+        where.append("(r.published_at at time zone 'Asia/Seoul')::date = %s::date")
+        args.append(date)
+    if ticker:
+        where.append("w.ticker = %s"); args.append(ticker)
+    if min_score is not None:
+        where.append("coalesce(a.score, 0) >= %s"); args.append(int(min_score))
+    if status:
+        where.append("a.status = %s"); args.append(status)
+    if novelty:
+        where.append("a.novelty = %s"); args.append(novelty)
+    args.append(min(int(limit), 500))
+    sql = (
+        "select a.id, a.status, a.category, a.impact_direction, a.impact_horizon,"
+        " a.confidence, a.novelty, a.score, a.warn_hallucination, a.created_at,"
+        " r.source, r.title, r.url, r.published_at, w.ticker, w.name,"
+        " l.human_verdict"
+        " from tnm_analyses a"
+        " join tnm_raw_items r on r.id = a.raw_item_id"
+        " join tnm_watchlist w on w.id = r.watchlist_id"
+        " left join tnm_labels l on l.analysis_id = a.id"
+        + (" where " + " and ".join(where) if where else "")
+        + " order by r.published_at desc, a.id desc limit %s")
+    keys = ("id", "status", "category", "impact_direction", "impact_horizon",
+            "confidence", "novelty", "score", "warn_hallucination", "created_at",
+            "source", "title", "url", "published_at", "ticker", "name",
+            "human_verdict")
+    async with _pool.connection() as conn:
+        cur = await conn.execute(sql, args)
+        out = []
+        for r in await cur.fetchall():
+            d = dict(zip(keys, r))
+            for ts in ("created_at", "published_at"):
+                if d[ts] is not None:
+                    d[ts] = d[ts].isoformat()
+            if d["confidence"] is not None:
+                d["confidence"] = float(d["confidence"])
+            out.append(d)
+        return out
+
+
+async def get_item(analysis_id: int) -> dict | None:
+    """상세: 판정 전체 + 원문(P5: 링크·본문 보존) + LLM 호출 로그."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select a.id, a.status, a.category, a.is_material, a.impact_direction,"
+            " a.impact_horizon, a.confidence, a.novelty, a.reason, a.summary,"
+            " a.score, a.score_detail, a.model_name, a.latency_ms, a.retries,"
+            " a.warn_hallucination, a.created_at,"
+            " r.id, r.source, r.title, r.body, r.url, r.published_at, r.similarity,"
+            " w.ticker, w.name, l.human_verdict, l.note"
+            " from tnm_analyses a"
+            " join tnm_raw_items r on r.id = a.raw_item_id"
+            " join tnm_watchlist w on w.id = r.watchlist_id"
+            " left join tnm_labels l on l.analysis_id = a.id"
+            " where a.id = %s", (analysis_id,))
+        row = await cur.fetchone()
+        if row is None:
+            return None
+        keys = ("id", "status", "category", "is_material", "impact_direction",
+                "impact_horizon", "confidence", "novelty", "reason", "summary",
+                "score", "score_detail", "model_name", "latency_ms", "retries",
+                "warn_hallucination", "created_at", "raw_item_id", "source",
+                "title", "body", "url", "published_at", "similarity",
+                "ticker", "name", "human_verdict", "label_note")
+        d = dict(zip(keys, row))
+        for ts in ("created_at", "published_at"):
+            if d[ts] is not None:
+                d[ts] = d[ts].isoformat()
+        for num in ("confidence", "similarity"):
+            if d[num] is not None:
+                d[num] = float(d[num])
+        cur = await conn.execute(
+            "select model_name, latency_ms, attempt, ok, error, called_at"
+            " from tnm_llm_calls where raw_item_id = %s order by id",
+            (d["raw_item_id"],))
+        d["llm_calls"] = [
+            {"model_name": c[0], "latency_ms": c[1], "attempt": c[2], "ok": c[3],
+             "error": c[4], "called_at": c[5].isoformat() if c[5] else None}
+            for c in await cur.fetchall()]
+        return d
+
+
+async def upsert_label(analysis_id: int, verdict: str, note: str | None) -> bool:
+    """사람 정답 라벨 (Shadow 검증용 — FR-10). 재라벨 시 갱신."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "insert into tnm_labels (analysis_id, human_verdict, note)"
+            " select %s, %s, %s"
+            " where exists (select 1 from tnm_analyses where id = %s)"
+            " on conflict (analysis_id) do update"
+            "  set human_verdict = excluded.human_verdict, note = excluded.note,"
+            "      labeled_at = now()",
+            (analysis_id, verdict, note, analysis_id))
+        return cur.rowcount > 0
+
+
 async def queue_stats() -> dict:
     """상태 화면용 큐 적체량."""
     async with _pool.connection() as conn:
