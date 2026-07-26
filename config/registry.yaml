@@ -31,6 +31,17 @@ services:
         - ["git", "pull", "--ff-only"]
       restart_after: true
       timeout_seconds: 300
+  llm-gateway:
+    unit: llm-gateway.service
+    description: "공유 LLM 게이트웨이 (Docker, 127.0.0.1:8603) — 잡 큐를 들고 있어 다른 서비스 배포와 수명주기를 분리한다"
+    deploy:
+      workdir: /opt/hosub-mcp/llm-gateway
+      steps:
+        - ["git", "pull", "--ff-only"]
+        # up -d --build 가 컨테이너를 새 이미지로 교체한다 → restart_after 불필요
+        - ["docker", "compose", "up", "-d", "--build"]
+      restart_after: false
+      timeout_seconds: 900
   tnm:
     unit: tnm.service
     description: "TNM 뉴스·공시 모니터링 (127.0.0.1:8602 — /opt/hosub-mcp 공유 클론)"

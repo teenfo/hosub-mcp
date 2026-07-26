@@ -273,6 +273,57 @@ OTP/SSO) 병행을 권장**한다.
 > 즉 그 브랜치에 push 할 수 있는 사람은 서버에서 코드를 돌릴 수 있다. 브랜치
 > 보호 규칙(main 직접 push 금지, PR 리뷰 필수)을 걸어 두는 것을 권장한다.
 
+### 8-1. 무엇이 무엇을 재시작하나 (수명주기 분리)
+
+서비스마다 재기동 경로가 **분리돼 있다.** 특히 LLM 게이트웨이는 잡 큐를 들고 있어
+다른 서비스 배포에 끌려 재시작되면 안 된다 — 실행 중이던 추론이 끊기고, 모델
+다운로드 중이면 중단된다.
+
+| 트리거 | 재시작 대상 | 게이트웨이에 영향 |
+|---|---|---|
+| `hosub-mcp-update.timer` (5분) | `hosub-mcp` 만 | ❌ 없음 |
+| `deploy_service("dash")` | `hosub-dash` | ❌ 없음 (코드는 pull 됨 — 아래 참고) |
+| `deploy_service("tnm")` | `tnm` | ❌ 없음 (동상) |
+| `deploy_service("trading")` | `trading` | ❌ 없음 (다른 클론) |
+| `deploy_service("llm-gateway")` | 게이트웨이 컨테이너만 | ✅ 이때만 |
+| `systemctl reload llm-gateway` | 게이트웨이 컨테이너만 | ✅ 이때만 |
+
+`dash`·`tnm` 배포는 `/opt/hosub-mcp` 에서 `git pull` 하므로 **게이트웨이 코드도
+디스크에는 내려온다.** 컨테이너는 옛 이미지로 계속 도는데, 이건 의도된 동작이다
+(수명주기 분리). 다만 조용히 어긋나지 않도록 `update.sh` 가 `llm-gateway/` 변경을
+감지하면 로그로 알린다:
+
+```
+[hosub-mcp-update] 주의: llm-gateway/ 가 변경됨 — 컨테이너는 자동 재빌드되지 않습니다.
+[hosub-mcp-update]       반영: sudo systemctl reload llm-gateway
+```
+
+게이트웨이 코드를 반영하려면 **명시적으로** 하나를 실행한다:
+
+```bash
+sudo systemctl reload llm-gateway        # git pull 없이 현재 코드로 재빌드
+# 또는 MCP 로: deploy_service(service_name="llm-gateway", confirm=true)
+#   → git pull --ff-only + docker compose up -d --build
+```
+
+### 8-2. LLM 게이트웨이 서비스 등록
+
+게이트웨이는 Docker Compose 로 돌지만 systemd 로 감싼다. 그래야 다른 서비스와 같은
+방식으로(단독 재기동·로그 조회·MCP 도구) 다룰 수 있다.
+
+```bash
+sudo cp /opt/hosub-mcp/deploy/llm-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now llm-gateway
+systemctl status llm-gateway --no-pager
+```
+
+- `systemctl restart llm-gateway` — 단독 재기동 (이미지 재빌드 없음)
+- `systemctl reload llm-gateway` — 코드 반영 재빌드 (`compose up -d --build`)
+- `systemctl stop` 은 `compose stop` 이다. `down` 이 아닌 이유: `llm-net` 네트워크를
+  지우면 거기 붙은 다른 소비 컨테이너가 끊긴다
+- 컨테이너 자체 로그는 `docker logs llm-gateway` (10MB×3 회전)
+
 ### (제거됨) GitHub Actions push 배포
 
 과거 대안으로 `appleboy/ssh-action` 기반 push 배포 워크플로우가 있었으나, NAT 뒤

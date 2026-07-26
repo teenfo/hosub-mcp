@@ -1,0 +1,36 @@
+# 공유 LLM 게이트웨이 (Docker Compose 를 systemd 로 감싼다)
+#
+# 왜 감싸나: 게이트웨이는 잡 큐를 들고 있어 **다른 서비스 배포와 수명주기가
+# 분리돼야 한다.** systemd 유닛으로 두면
+#   - systemctl restart llm-gateway 로 단독 재기동
+#   - MCP restart_service / read_service_logs / deploy_service 대상이 됨
+#   - 부팅 순서를 docker.service 뒤로 명시
+# 가 가능해진다. (설계서 15절 "Docker 서비스 등록 방식" 결론)
+#
+# 설치:
+#   sudo cp deploy/llm-gateway.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now llm-gateway
+
+[Unit]
+Description=hosub 공유 LLM 게이트웨이 (Docker Compose)
+Documentation=https://github.com/teenfo/hosub-mcp/blob/main/llm-gateway/README.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/hosub-mcp/llm-gateway
+# up -d 는 멱등하다 — 이미 떠 있으면 아무 일도 안 한다
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+# down 이 아니라 stop: llm-net 네트워크를 지우면 다른 소비 컨테이너가 끊긴다
+ExecStop=/usr/bin/docker compose stop
+# reload = 코드 반영 재빌드
+ExecReload=/usr/bin/docker compose up -d --build
+# 이미지 빌드가 오래 걸릴 수 있다
+TimeoutStartSec=900
+
+[Install]
+WantedBy=multi-user.target
