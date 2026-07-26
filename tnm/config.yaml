@@ -22,7 +22,7 @@ dedup:
   window_days: 7               # 동일 종목 비교 범위
 
 llm:
-  primary_model: "qwen2.5:32b-instruct-q4_K_M"
+  primary_model: "qwen2.5:32b"   # Mac 설치 태그 (기본 = instruct q4_K_M 양자화)
   fallback_model: "qwen2.5:14b"
   embed_model: "bge-m3"
   temperature: 0.1
