@@ -82,7 +82,7 @@ roles:
 
   # ---------- TNM (뉴스·공시) ----------
   classify_news:
-    model: qwen2.5:7b
+    model: qwen2.5:14b   # 7b 의 JSON 스키마 위반율(~2%)로 상향 (사용자 요청)
     lane: interactive
-    timeout: 60
+    timeout: 120
     options: { temperature: 0.1 }
