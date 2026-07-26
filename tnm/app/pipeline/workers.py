@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 
+import hashlib
+
 from .. import db, ollama, settings
+from . import classify, score
 from .dedup import judge
 
 log = logging.getLogger("tnm.workers")
@@ -68,6 +71,97 @@ class EmbedWorker:
             except Exception:  # noqa: BLE001
                 log.exception("임베딩 워커 오류")
             await asyncio.sleep(10)
+
+
+class ClassifyWorker:
+    """LLM 분류 (요청서 5장·FR-06) + 스코어 산출 (6장).
+
+    - OllamaUnavailable: analyses 행을 만들지 않고 보류 — 복구 시 자동 재처리.
+      루프 수준 지수백오프로 재시도 폭주를 막는다.
+    - SchemaError: 재시도 2회(총 3시도) 후 llm_failed 적재 (원문 보존).
+    - 모든 호출은 tnm_llm_calls 에 기록 (입력해시·모델·지연·시도·결과).
+    """
+
+    def __init__(self) -> None:
+        self.processed = 0
+        self.failed = 0
+        self.last_error = ""
+        self.unavailable = False
+
+    def status(self) -> dict:
+        return {"processed": self.processed, "failed": self.failed,
+                "last_error": self.last_error, "unavailable": self.unavailable}
+
+    async def _classify_one(self, it: dict) -> bool:
+        """한 항목 분류. 반환 False = Ollama 불가(배치 중단 신호)."""
+        max_chars = int(settings.LLM.get("max_body_chars", 6000))
+        body = it.get("norm_body") or it.get("body") or ""
+        user = classify.build_user_msg(it["stock_name"], it["source"], it["title"],
+                                       it["published_at"], body, max_chars)
+        input_hash = hashlib.sha256(
+            (classify.SYSTEM_PROMPT + "\n" + user).encode()).hexdigest()
+        result = None
+        model_name, latency = "", 0
+        attempts = 0
+        for attempt in range(1, 4):            # 최초 1 + 재시도 2 (FR-06)
+            attempts = attempt
+            try:
+                content, model_name, latency = await ollama.chat(
+                    classify.SYSTEM_PROMPT, user)
+            except ollama.OllamaUnavailable as e:
+                self.last_error = str(e)
+                self.unavailable = True
+                return False                    # 보류 — analyses 미생성
+            try:
+                result = classify.validate(classify.extract_json(content))
+                await db.log_llm_call(it["id"], input_hash, model_name, latency,
+                                      attempt, True, None)
+                break
+            except ollama.SchemaError as e:
+                await db.log_llm_call(it["id"], input_hash, model_name, latency,
+                                      attempt, False, str(e))
+                log.warning("분류 스키마 위반(시도 %d/3) item=%s: %s",
+                            attempt, it["id"], e)
+        self.unavailable = False
+        if result is None:                      # 3회 모두 위반 → 원문 보존 적재
+            await db.insert_llm_failed(it["id"], it["novelty"], input_hash,
+                                       attempts - 1, model_name)
+            self.failed += 1
+            return True
+        score_val, detail = score.compute(it["source"], result, it["novelty"],
+                                          settings.SCORE)
+        warn = classify.check_hallucination(
+            result["reason"], (it["title"] or "") + "\n" + body)
+        await db.insert_analysis(it["id"], result, it["novelty"], score_val, detail,
+                                 model_name, latency, attempts - 1, input_hash, warn)
+        self.processed += 1
+        return True
+
+    async def run_batch(self, limit: int = 2) -> int:
+        items = await db.pending_classify(limit)
+        done = 0
+        for it in items:
+            if not await self._classify_one(it):
+                break                           # Ollama 불가 — 배치 중단
+            done += 1
+        return done
+
+    async def loop(self) -> None:
+        await asyncio.sleep(30)
+        backoff = 10
+        while True:
+            try:
+                if db.ready:
+                    n = await self.run_batch()
+                    if self.unavailable:
+                        backoff = min(_MAX_BACKOFF_SEC, backoff * 2)
+                    else:
+                        backoff = 10
+                        if n:                   # 큐 소화 계속
+                            continue
+            except Exception:  # noqa: BLE001
+                log.exception("분류 워커 오류")
+            await asyncio.sleep(backoff)
 
 
 class DedupWorker:

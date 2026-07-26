@@ -354,6 +354,64 @@ async def insert_skipped_duplicate(item_id: int, similarity: float | None) -> No
             " on conflict (raw_item_id) do nothing", (item_id, similarity))
 
 
+# ---------------- LLM 분류 (M5) ----------------
+
+async def pending_classify(limit: int = 2) -> list[dict]:
+    """분류 대기: 신규성 판정 완료(new/follow_up)·분석 미존재 (수집 순)."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select r.id, r.source, r.title, r.body, r.norm_body, r.published_at,"
+            " r.novelty, w.name"
+            " from tnm_raw_items r join tnm_watchlist w on w.id = r.watchlist_id"
+            " where r.novelty in ('new','follow_up')"
+            "  and not exists (select 1 from tnm_analyses a where a.raw_item_id = r.id)"
+            " order by r.collected_at limit %s", (limit,))
+        return [{"id": r[0], "source": r[1], "title": r[2], "body": r[3],
+                 "norm_body": r[4], "published_at": r[5].isoformat(), "novelty": r[6],
+                 "stock_name": r[7]} for r in await cur.fetchall()]
+
+
+async def insert_analysis(raw_item_id: int, a: dict, novelty: str, score: int,
+                          score_detail: dict, model_name: str, latency_ms: int,
+                          retries: int, input_hash: str, warn: bool) -> None:
+    import json
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "insert into tnm_analyses (raw_item_id, status, category, is_material,"
+            " impact_direction, impact_horizon, confidence, novelty, reason, summary,"
+            " score, score_detail, model_name, latency_ms, retries, input_hash,"
+            " warn_hallucination)"
+            " values (%s,'ok',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s)"
+            " on conflict (raw_item_id) do nothing",
+            (raw_item_id, a["category"], a["is_material"], a["impact_direction"],
+             a["impact_horizon"], a["confidence"], novelty, a["reason"], a["summary"],
+             score, json.dumps(score_detail, ensure_ascii=False), model_name,
+             latency_ms, retries, input_hash, warn))
+
+
+async def insert_llm_failed(raw_item_id: int, novelty: str, input_hash: str,
+                            retries: int, model_name: str) -> None:
+    """스키마 검증 최종 실패 — 항목을 버리지 않고 llm_failed 로 적재 (FR-06)."""
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "insert into tnm_analyses (raw_item_id, status, novelty, retries,"
+            " input_hash, model_name)"
+            " values (%s, 'llm_failed', %s, %s, %s, %s)"
+            " on conflict (raw_item_id) do nothing",
+            (raw_item_id, novelty, retries, input_hash, model_name))
+
+
+async def log_llm_call(raw_item_id: int, input_hash: str, model_name: str,
+                       latency_ms: int, attempt: int, ok: bool,
+                       error: str | None) -> None:
+    """비기능 9장: 모든 LLM 호출의 입력해시·모델·지연·재시도 기록."""
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "insert into tnm_llm_calls (raw_item_id, input_hash, model_name,"
+            " latency_ms, attempt, ok, error) values (%s,%s,%s,%s,%s,%s,%s)",
+            (raw_item_id, input_hash, model_name, latency_ms, attempt, ok, error))
+
+
 async def queue_stats() -> dict:
     """상태 화면용 큐 적체량."""
     async with _pool.connection() as conn:
