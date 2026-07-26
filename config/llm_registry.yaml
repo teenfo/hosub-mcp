@@ -1,0 +1,68 @@
+# LLM 게이트웨이 레지스트리
+#
+# hosub 는 게이트웨이 역할만 하고, 실제 추론은 backends(주로 Mac)에서 돌린다.
+# 호출하는 쪽은 **모델 이름이 아니라 역할(role) 이름**으로 요청한다.
+#   → 모델을 바꿔도 호출부는 그대로. 모델 교체 = 아래 model 한 줄 수정.
+#
+# 변경은 Git PR 로 반영한다(레지스트리와 동일 철학).
+
+backends:
+  mac:
+    # Tailscale IP (macbookpro). Mac 에서 Ollama 가 외부 접속을 허용해야 한다:
+    #   launchctl setenv OLLAMA_HOST 0.0.0.0   (또는 앱 설정)
+    base_url: http://100.107.151.46:11434
+    type: ollama
+  local:
+    # hosub 자체에서 돌릴 때(현재는 미사용, 폴백 용도)
+    base_url: http://127.0.0.1:11434
+    type: ollama
+
+# 기본 백엔드 (role 에서 backend 생략 시 사용)
+default_backend: mac
+
+roles:
+  summarize:
+    backend: mac
+    model: qwen2.5:7b            # 요약은 속도 우선
+    description: "긴 문서·로그·기사를 핵심만 요약"
+    system: "너는 요약 도우미다. 핵심만 간결하게, 불필요한 수식 없이 한국어로 답한다."
+    options: { temperature: 0.3 }
+    timeout: 120
+
+  log_analyze:
+    backend: mac
+    model: qwen2.5:14b
+    description: "서버 로그에서 문제 원인과 확인할 지점 도출"
+    system: |
+      너는 리눅스 서버 운영 분석가다. 주어진 로그에서
+      (1) 무슨 일이 일어났는지 (2) 원인 후보 (3) 다음에 확인할 것
+      을 한국어로 간결히 정리한다. 추측은 추측이라고 명시한다.
+    options: { temperature: 0.2 }
+    timeout: 180
+
+  translate:
+    backend: mac
+    model: qwen2.5:14b
+    description: "한↔영 번역 (자연스러운 문장)"
+    system: "입력된 텍스트를 번역한다. 한국어면 영어로, 그 외는 자연스러운 한국어로. 설명 없이 번역문만 출력."
+    options: { temperature: 0.2 }
+    timeout: 180
+
+  code:
+    backend: mac
+    model: qwen2.5-coder:14b
+    description: "코드 생성·리뷰·설명"
+    system: "너는 숙련된 소프트웨어 엔지니어다. 정확하고 간결하게, 코드에는 필요한 주석만 단다."
+    options: { temperature: 0.2 }
+    timeout: 240
+
+  general:
+    backend: mac
+    model: qwen2.5:32b           # M4 Max 48GB 라 32B 여유
+    description: "범용 질의응답·글쓰기 (기본 폴백)"
+    system: "너는 유능한 한국어 어시스턴트다. 정확하고 간결하게 답한다."
+    options: { temperature: 0.6 }
+    timeout: 300
+
+# role 을 못 찾거나 실패했을 때 쓰는 기본 역할
+fallback_role: general

@@ -27,7 +27,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from . import service_ops, sysinfo
+from . import llm as llm_mod, service_ops, sysinfo
 from .context import AppContext
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -184,6 +184,38 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
             return d
         return _dated_response(NIGHT_REPORT_DIR, request.query_params.get("date"), "야간 분석 리포트")
 
+    async def api_llm_status(request):
+        if (d := _require_auth_json(request)):
+            return d
+        if not ctx.llm.role_names:
+            return JSONResponse({
+                "backends": [], "roles": [],
+                "hint": "config/llm_registry.yaml 에 backends/roles 를 정의하세요.",
+            })
+        # 백엔드 HTTP 조회는 블로킹이라 스레드풀로
+        result = await run_in_threadpool(llm_mod.backend_status, ctx.llm)
+        return JSONResponse(result)
+
+    async def api_llm_generate(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        prompt = (body.get("prompt") or "").strip()
+        role = body.get("role") or "general"
+        if not prompt:
+            return JSONResponse({"status": "rejected", "reason": "prompt 가 비어 있습니다."},
+                                status_code=400)
+        result = await run_in_threadpool(llm_mod.generate, ctx.llm, role, prompt)
+        ctx.audit.log(
+            tool="llm_generate", params={"role": role, "prompt_chars": len(prompt), "via": "dashboard"},
+            risk="low", outcome=result.get("status", "error"),
+            result_summary=(result.get("response") or result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
     async def api_docker(request):
         if (d := _require_auth_json(request)):
             return d
@@ -324,6 +356,8 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/audit", api_audit),
         Route("/api/briefing", api_briefing),
         Route("/api/night-report", api_night_report),
+        Route("/api/llm/status", api_llm_status),
+        Route("/api/llm/generate", api_llm_generate, methods=["POST"]),
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),

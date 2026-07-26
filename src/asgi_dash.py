@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 
 from .audit import AuditLog
+from .llm import LLMRegistry
 from .registry import Registry
 from .runner import SubprocessRunner
 from .server import build_dash_app
@@ -35,7 +36,10 @@ def create_app():
     strict = os.environ.get("HOSUB_MCP_STRICT", "false").lower() in ("1", "true", "yes")
 
     registry = Registry.load(registry_path, strict=strict)
-    audit = AuditLog(db_path)   # MCP 프로세스와 같은 SQLite 파일 공유
+    audit = AuditLog(db_path)
+    llm_registry = LLMRegistry.load(
+        os.environ.get('HOSUB_LLM_REGISTRY', 'config/llm_registry.yaml')
+    )   # MCP 프로세스와 같은 SQLite 파일 공유
     runner = SubprocessRunner()
 
     return build_dash_app(
@@ -44,6 +48,7 @@ def create_app():
         audit=audit,
         dash_password=dash_password,
         session_secret=session_secret,
+        llm=llm_registry,
     )
 
 
