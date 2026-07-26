@@ -48,6 +48,8 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `DELETE /v1/jobs/{id}` | 취소 (대기 중인 것만) |
 | `GET /v1/roles` | 쓸 수 있는 역할·모델 |
 | `GET /v1/status` | 백엔드·레인 큐·사용량 |
+| `GET /v1/models/requests` | 모델 설치 요청 목록 |
+| `POST /v1/models/requests` | 승인/거부 — `{"model":…, "action":"approve"\|"reject"}` (admin 서비스만) |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
 
 ## 새 소비자 추가 (예: BCL)
@@ -62,6 +64,24 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 3. 소비자 코드에서 HTTP 호출 (위 예시)
 
 컨테이너·워커 추가 없음.
+
+## 새 모델은 승인 한 번으로 설치된다
+
+새 소비자가 아직 맥에 없는 모델을 쓰는 역할을 호출하면:
+
+1. 게이트웨이가 그 잡을 **레인에서 건너뛰고**(다른 잡은 계속 돈다) 설치 요청을 만든다
+2. 대시보드 **LLM → 모델 설치 요청** 카드에 "승인 대기"로 뜬다
+   (Claude 에게 물어봐도 된다 — MCP 도구 `llm_model_requests` / `llm_decide_model`)
+3. 승인하면 게이트웨이가 맥의 `/api/pull` 로 직접 내려받는다 — **맥에 SSH 접속 불필요**
+4. 설치가 끝나면 대기하던 잡이 자동으로 이어서 실행된다
+
+거부하거나 설치가 실패하면 그 모델을 기다리던 잡은 무한 대기 대신 명확한 오류로
+끝난다. 거부한 모델은 다시 물어보지 않는다(다시 승인하면 그때 설치).
+
+> 승인해도 설치되는 것은 `config/roles.yaml` 에 있는 역할이 참조하는 모델뿐이다.
+> 역할 추가는 여전히 Git PR 을 거친다 — 임의 모델을 요청할 수 있는 경로가 아니다.
+
+끄려면 `.env` 에 `AUTO_INSTALL_MODELS=0`.
 
 ## 역할 = 모델 정책, 프롬프트 = 호출자 소유
 
@@ -90,8 +110,9 @@ curl -s localhost:8603/healthz
 맥 스튜디오 준비물:
 ```bash
 launchctl setenv OLLAMA_HOST 0.0.0.0     # 외부 접속 허용 후 Ollama 재시작
-ollama pull qwen2.5:7b qwen2.5:14b qwen2.5-coder:14b qwen2.5:32b
 ```
+모델은 미리 받아둬도 되고(`ollama pull qwen2.5:7b …`), 그냥 두면 첫 호출 때
+게이트웨이가 설치 요청을 올린다 — 대시보드에서 승인만 하면 된다.
 
 ## 개발·테스트
 
@@ -100,4 +121,4 @@ ollama pull qwen2.5:7b qwen2.5:14b qwen2.5-coder:14b qwen2.5:32b
 ```
 
 주요 회귀 테스트: head-of-line blocking 방지, 모델 전환 최소화, 재시도/백오프,
-재시작 후 잡 이어받기.
+재시작 후 잡 이어받기, 미설치 모델이 레인을 막지 않는지, 승인 후 잡 자동 재개.

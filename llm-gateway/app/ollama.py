@@ -79,6 +79,54 @@ class OllamaClient:
             duration_ms=round(total / 1_000_000) if total else None,
         )
 
+    async def pull(
+        self,
+        model: str,
+        *,
+        progress_cb=None,
+        timeout: int = 3600,
+    ) -> None:
+        """맥의 Ollama 에 모델 설치를 지시한다 (SSH 불필요).
+
+        /api/pull 은 진행 상황을 JSON 라인으로 스트리밍한다. progress_cb(percent)
+        로 0~100 을 콜백한다. 실패 시 BackendError.
+        """
+        import json as _json
+
+        url = f"{self.base_url}/api/pull"
+        payload = {"model": model, "stream": True}
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                async with client.stream("POST", url, json=payload) as res:
+                    if res.status_code >= 400:
+                        body = (await res.aread()).decode("utf-8", "replace")[:200]
+                        raise BackendError(
+                            f"pull 거부 HTTP {res.status_code}: {body}",
+                            retryable=res.status_code >= 500,
+                        )
+                    async for line in res.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            evt = _json.loads(line)
+                        except ValueError:
+                            continue
+                        if evt.get("error"):
+                            raise BackendError(str(evt["error"]), retryable=False)
+                        total, done = evt.get("total"), evt.get("completed")
+                        if progress_cb and total:
+                            pct = int(min(100, (done or 0) * 100 / total))
+                            progress_cb(pct)
+        except httpx.TimeoutException as exc:
+            raise BackendError(f"pull 타임아웃: {exc}", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise BackendError(
+                f"pull 연결 실패: {type(exc).__name__}: {exc}", retryable=True
+            ) from exc
+        if progress_cb:
+            progress_cb(100)
+
     async def tags(self, timeout: int = 5) -> list[str]:
         """보유 모델 목록. 실패 시 BackendError."""
         try:

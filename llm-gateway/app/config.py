@@ -91,6 +91,10 @@ class RoleConfig:
     def roles(self) -> list[Role]:
         return [self._roles[n] for n in self.role_names]
 
+    def roles_using(self, model: str) -> list[str]:
+        """이 모델을 쓰는 역할 이름들(모델 설치 요청의 근거 표시용)."""
+        return [n for n in self.role_names if self._roles[n].model == model]
+
     def model_size_gb(self, model: str) -> float:
         """모델 메모리 추정치(GB). 미상이면 보수적으로 큰 값."""
         if model in self._model_sizes:
@@ -167,6 +171,8 @@ class Service:
     token: str
     allow_roles: tuple[str, ...] = ("*",)
     rate_limit_per_min: int = 60
+    # 모델 설치 요청을 승인/거부할 수 있는가. hosub(MCP·대시보드)에만 준다.
+    admin: bool = False
 
     def may_use(self, role: str) -> bool:
         return "*" in self.allow_roles or role in self.allow_roles
@@ -219,6 +225,7 @@ class ServiceConfig:
                 token=token,
                 allow_roles=tuple(str(a) for a in allow),
                 rate_limit_per_min=int(cfg.get("rate_limit_per_min", 60)),
+                admin=bool(cfg.get("admin", False)),
             )
         if not services:
             raise ConfigError("services 가 비어 있습니다")

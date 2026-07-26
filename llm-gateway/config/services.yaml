@@ -8,6 +8,7 @@ services:
     token_env: LLMGW_TOKEN_HOSUB
     allow_roles: ["*"]            # MCP 도구·대시보드 (운영 주체)
     rate_limit_per_min: 120
+    admin: true                   # 모델 설치 요청 승인/거부 권한 (여기에만 부여)
 
   roxlogy:
     token_env: LLMGW_TOKEN_ROXLOGY

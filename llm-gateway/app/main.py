@@ -21,7 +21,16 @@ from .auth import RateLimiter, authenticate
 from .config import RoleConfig, ServiceConfig
 from .ollama import BackendError, OllamaClient
 from .scheduler import LANES, Scheduler
-from .store import QUEUED, RUNNING, Store
+from .store import (
+    MR_APPROVED,
+    MR_PENDING,
+    MR_PULLING,
+    MR_READY,
+    MR_REJECTED,
+    QUEUED,
+    RUNNING,
+    Store,
+)
 
 log = logging.getLogger("llmgw")
 
@@ -75,6 +84,8 @@ def build_app(
     scheduler = scheduler or Scheduler(
         store, roles, client,
         max_retries=int(os.environ.get("MAX_RETRIES", 3)),
+        auto_install=os.environ.get("AUTO_INSTALL_MODELS", "1") not in ("0", "false"),
+        models_refresh=float(os.environ.get("MODELS_REFRESH_SECONDS", 30)),
     )
     limiter = RateLimiter()
 
@@ -199,6 +210,64 @@ def build_app(
         allowed = [r.to_dict() for r in roles.roles if svc.may_use(r.name)]
         return JSONResponse({"roles": allowed, "service": svc.name})
 
+    # --- 모델 설치 요청 (승인은 hosub = 대시보드/MCP 만) ---
+    async def list_model_requests(request: Request):
+        svc, err = _auth(request)
+        if err:
+            return err
+        reqs = store.list_model_requests(request.query_params.get("status"))
+        live = scheduler.pulling_snapshot()
+        for r in reqs:
+            if r["model"] in live:
+                r["progress"] = live[r["model"]]
+        return JSONResponse({
+            "requests": reqs,
+            "can_decide": svc.admin,
+            "available_models": scheduler.available_models,
+        })
+
+    async def decide_model_request(request: Request):
+        """모델 설치 요청 승인/거부. 모델명에 ':' '/' 가 들어가 body 로 받는다."""
+        svc, err = _auth(request)
+        if err:
+            return err
+        if not svc.admin:
+            return JSONResponse(
+                {"error": "forbidden", "detail": "모델 승인 권한이 없는 서비스입니다"},
+                status_code=403,
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        model = str(body.get("model") or "").strip()
+        action = str(body.get("action") or "").strip()
+        if action not in ("approve", "reject"):
+            return JSONResponse(
+                {"error": "invalid_request", "detail": "action 은 approve|reject"},
+                status_code=400,
+            )
+        req = store.get_model_request(model)
+        if req is None:
+            return JSONResponse({"error": "not_found", "model": model}, status_code=404)
+        # 진행 중인 설치는 되돌리지 않는다(중간에 끊으면 부분 파일이 남는다)
+        if req["status"] in (MR_APPROVED, MR_PULLING):
+            return JSONResponse(
+                {"error": "in_progress", "detail": "이미 설치가 진행 중입니다",
+                 "request": req},
+                status_code=409,
+            )
+        if action == "approve" and req["status"] == MR_READY:
+            return JSONResponse({"request": req, "detail": "이미 설치된 모델입니다"})
+
+        if action == "approve":
+            # 이전 실패 흔적을 지우고 다시 시도한다
+            store.set_model_request_status(model, MR_APPROVED, error="", progress=0)
+        else:
+            store.set_model_request_status(model, MR_REJECTED)
+        log.info("모델 요청 %s → %s (by %s)", model, action, svc.name)
+        return JSONResponse({"request": store.get_model_request(model)})
+
     async def status(request: Request):
         svc, err = _auth(request)
         if err:
@@ -239,6 +308,10 @@ def build_app(
             "mem_budget_gb": roles.mem_budget_gb,
             "roles": role_status,
             "usage": store.usage_summary(),
+            "model_requests": {
+                "pending": len(store.list_model_requests(MR_PENDING)),
+                "pulling": scheduler.pulling_snapshot(),
+            },
         })
 
     routes = [
@@ -249,6 +322,8 @@ def build_app(
         Route("/v1/jobs/{job_id}", cancel_job, methods=["DELETE"]),
         Route("/v1/roles", list_roles),
         Route("/v1/status", status),
+        Route("/v1/models/requests", list_model_requests, methods=["GET"]),
+        Route("/v1/models/requests", decide_model_request, methods=["POST"]),
     ]
 
     @asynccontextmanager

@@ -64,6 +64,10 @@ class FakeOllama:
         self.max_concurrent = 0
         self._models = models if models is not None else ["small", "mid", "big"]
         self.tags_fail = False
+        # pull 제어: 설치된 모델 기록 + 실패시킬 모델 + 지연
+        self.pulled: list[str] = []
+        self.pull_fail: set[str] = set()
+        self.pull_delay = 0.0
 
     async def generate(self, *, model, prompt, system=None, options=None,
                        timeout=180, client=None) -> GenerateResult:
@@ -87,6 +91,17 @@ class FakeOllama:
         if self.tags_fail:
             raise BackendError("백엔드 다운")
         return sorted(self._models)
+
+    async def pull(self, model, *, progress_cb=None, timeout: int = 3600) -> None:
+        self.pulled.append(model)
+        if self.pull_delay:
+            await asyncio.sleep(self.pull_delay)
+        if model in self.pull_fail:
+            raise BackendError(f"pull 실패: {model}", retryable=False)
+        for pct in (0, 50, 100):
+            if progress_cb:
+                progress_cb(pct)
+        self._models.append(model)
 
     @property
     def model_switches(self) -> int:

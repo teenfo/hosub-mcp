@@ -47,7 +47,28 @@ CREATE TABLE IF NOT EXISTS usage (
   status      TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage(ts);
+
+-- 모델 설치 요청 (미설치 모델을 만나면 자동 생성 → 사용자가 승인하면 pull)
+CREATE TABLE IF NOT EXISTS model_requests (
+  model        TEXT PRIMARY KEY,
+  status       TEXT NOT NULL,          -- pending|approved|pulling|ready|rejected|failed
+  requested_by TEXT,                   -- 최초로 필요로 한 서비스
+  roles_json   TEXT,                   -- 이 모델을 쓰는 역할들
+  est_size_gb  REAL,
+  progress     INTEGER DEFAULT 0,      -- 0~100
+  error        TEXT,
+  created_at   TEXT NOT NULL,
+  decided_at   TEXT,
+  finished_at  TEXT
+);
 """
+
+MR_PENDING = "pending"
+MR_APPROVED = "approved"
+MR_PULLING = "pulling"
+MR_READY = "ready"
+MR_REJECTED = "rejected"
+MR_FAILED = "failed"
 
 QUEUED = "queued"
 RUNNING = "running"
@@ -182,6 +203,16 @@ class Store:
                 (QUEUED, job_id, RUNNING),
             )
 
+    def fail_if_queued(self, job_id: str, error: str) -> bool:
+        """대기 중일 때만 실패 처리(실행 중인 잡을 가로채지 않도록 원자적으로)."""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "UPDATE jobs SET status=?, error=?, finished_at=?"
+                " WHERE id=? AND status=?",
+                (FAILED, error, utcnow(), job_id, QUEUED),
+            )
+            return cur.rowcount == 1
+
     def finish(self, job_id: str, *, status: str, response: str | None = None,
                error: str | None = None) -> None:
         with self._lock, self._connect() as conn:
@@ -234,6 +265,111 @@ class Store:
         for r in rows:
             out.setdefault(r["lane"], {})[r["status"]] = int(r["c"])
         return out
+
+    # --- 모델 설치 요청 ---
+    def ensure_model_request(self, model: str, *, requested_by: str,
+                             roles: list[str], est_size_gb: float) -> dict:
+        """미설치 모델 요청을 만든다(이미 있으면 갱신만 하고 반환).
+
+        거부/실패했던 요청을 다시 만나도 pending 으로 되돌리지 않는다 —
+        사용자의 거부 결정을 존중하고, 재요청은 명시적 재승인으로만.
+        예외는 ready 였던 모델이 다시 사라진 경우(맥에서 삭제 등)로,
+        이때는 pending 으로 되돌려 다시 승인을 받는다.
+        """
+        roles_json = json.dumps(sorted(roles), ensure_ascii=False)
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT status FROM model_requests WHERE model=?", (model,)
+            ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO model_requests (model, status, requested_by, roles_json,"
+                    " est_size_gb, created_at) VALUES (?,?,?,?,?,?)",
+                    (model, MR_PENDING, requested_by, roles_json, est_size_gb, utcnow()),
+                )
+            elif row["status"] == MR_READY:
+                conn.execute(
+                    "UPDATE model_requests SET status=?, roles_json=?, progress=0,"
+                    " error=NULL, decided_at=NULL, finished_at=NULL, created_at=?"
+                    " WHERE model=?",
+                    (MR_PENDING, roles_json, utcnow(), model),
+                )
+            else:
+                # 쓰는 역할 목록은 최신으로 갱신(정보성)
+                conn.execute(
+                    "UPDATE model_requests SET roles_json=? WHERE model=?",
+                    (roles_json, model),
+                )
+        return self.get_model_request(model)
+
+    def get_model_request(self, model: str) -> dict | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM model_requests WHERE model=?", (model,)
+            ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["roles"] = json.loads(d.pop("roles_json") or "[]")
+        return d
+
+    def list_model_requests(self, status: str | None = None) -> list[dict]:
+        q = "SELECT * FROM model_requests"
+        args: list = []
+        if status:
+            q += " WHERE status=?"; args.append(status)
+        q += " ORDER BY created_at DESC"
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(q, args).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["roles"] = json.loads(d.pop("roles_json") or "[]")
+            out.append(d)
+        return out
+
+    def set_model_request_status(self, model: str, status: str, *,
+                                 error: str | None = None,
+                                 progress: int | None = None) -> bool:
+        sets = ["status=?"]
+        args: list = [status]
+        if error is not None:
+            sets.append("error=?"); args.append(error)
+        if progress is not None:
+            sets.append("progress=?"); args.append(progress)
+        if status in (MR_APPROVED, MR_REJECTED):
+            sets.append("decided_at=?"); args.append(utcnow())
+        if status in (MR_READY, MR_FAILED):
+            sets.append("finished_at=?"); args.append(utcnow())
+        args.append(model)
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE model_requests SET {', '.join(sets)} WHERE model=?", args
+            )
+            return cur.rowcount == 1
+
+    def claim_approved_model(self) -> dict | None:
+        """approved → pulling 원자 전이. 설치할 모델이 없으면 None."""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT model FROM model_requests WHERE status=? ORDER BY created_at LIMIT 1",
+                (MR_APPROVED,),
+            ).fetchone()
+            if not row:
+                return None
+            cur = conn.execute(
+                "UPDATE model_requests SET status=?, progress=0 WHERE model=? AND status=?",
+                (MR_PULLING, row["model"], MR_APPROVED),
+            )
+            if cur.rowcount != 1:
+                return None
+        return self.get_model_request(row["model"])
+
+    def model_request_statuses(self) -> dict[str, str]:
+        """모델 → 요청 상태. 스케줄러가 잡을 대기시킬지/실패시킬지 판단한다."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute("SELECT model, status FROM model_requests").fetchall()
+        return {r["model"]: r["status"] for r in rows}
 
     def purge_old(self, days: int = 30) -> int:
         """완료된 오래된 잡 정리."""
