@@ -35,30 +35,29 @@ class EmbedWorker:
     def status(self) -> dict:
         return {"processed": self.processed, "last_error": self.last_error}
 
-    async def run_batch(self, limit: int = 8) -> int:
-        """한 배치 처리. 반환: 임베딩 성공 수."""
+    async def run_batch(self, limit: int = 16) -> int:
+        """한 배치 처리 — 게이트웨이 /v1/embed 로 배치 전체를 1회 호출."""
         items = await db.pending_embeds(limit)
         if not items:
             return 0
-        done = 0
-        for it in items:
-            text = ((it.get("title") or "") + "\n" + (it.get("norm_body") or ""))[:2000]
-            try:
-                vec = await ollama.embed(text)
-            except ollama.OllamaUnavailable as e:
-                # 배치 전체 보류 — 같은 원인(연결 불가)이므로 개별 재시도 무의미
-                delay = backoff_sec(max(x.get("attempts", 0) for x in items))
-                await db.mark_embed_retry([x["id"] for x in items], delay)
-                self.last_error = str(e)
-                log.warning("임베딩 보류(%ds 후 재시도): %s", delay, e)
-                return done
+        texts = [((it.get("title") or "") + "\n" + (it.get("norm_body") or ""))[:2000]
+                 for it in items]
+        try:
+            vecs = await ollama.embed_batch(texts)
+        except ollama.OllamaUnavailable as e:
+            # 배치 전체 보류 — 같은 원인(게이트웨이/백엔드 불가)이므로 개별 재시도 무의미
+            delay = backoff_sec(max(x.get("attempts", 0) for x in items))
+            await db.mark_embed_retry([x["id"] for x in items], delay)
+            self.last_error = str(e)
+            log.warning("임베딩 보류(%ds 후 재시도): %s", delay, e)
+            return 0
+        for it, vec in zip(items, vecs):
             await db.save_embedding(it["id"], vec)
-            done += 1
-        self.processed += done
+        self.processed += len(items)
         if self.last_error:
             self.last_error = ""
-            log.info("Ollama 복구 — 임베딩 재개")
-        return done
+            log.info("게이트웨이 복구 — 임베딩 재개")
+        return len(items)
 
     async def loop(self) -> None:
         await asyncio.sleep(20)
