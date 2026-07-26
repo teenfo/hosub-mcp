@@ -21,10 +21,11 @@ from .audit import AuditLog
 from .auth import BearerAuthMiddleware
 from .context import AppContext
 from .jobs import JobManager
+from .llm import LLMRegistry
 from .oauth import OAuthStore
 from .registry import Registry
 from .runner import CommandRunner
-from .tools import control, files, scripts, shell, system
+from .tools import control, files, llm as llm_tools, scripts, shell, system
 from .tools import jobs as jobs_tools
 
 SERVER_NAME = "hosub-mcp"
@@ -58,6 +59,7 @@ def build_mcp(
     shell.register(mcp, ctx)
     files.register(mcp, ctx)
     jobs_tools.register(mcp, ctx)
+    llm_tools.register(mcp, ctx)
     return mcp
 
 
@@ -67,9 +69,16 @@ def build_context(
     audit: AuditLog,
     *,
     jobs: JobManager | None = None,
+    llm: LLMRegistry | None = None,
 ) -> AppContext:
     job_mgr = jobs or JobManager(runner, audit)
-    return AppContext(registry=registry, runner=runner, jobs=job_mgr, audit=audit)
+    return AppContext(
+        registry=registry,
+        runner=runner,
+        jobs=job_mgr,
+        audit=audit,
+        llm=llm or LLMRegistry({}, {}, None),
+    )
 
 
 def build_app(
@@ -84,8 +93,9 @@ def build_app(
     allowed_hosts: list[str] | None = None,
     oauth_store: OAuthStore | None = None,
     public_url: str | None = None,
+    llm: LLMRegistry | None = None,
 ) -> Starlette:
-    ctx = build_context(registry, runner, audit, jobs=jobs)
+    ctx = build_context(registry, runner, audit, jobs=jobs, llm=llm)
     mcp = build_mcp(ctx, allowed_hosts=allowed_hosts)
     mcp_app = mcp.streamable_http_app()
 
@@ -137,6 +147,7 @@ def build_dash_app(
     dash_password: str,
     session_secret: str,
     jobs: JobManager | None = None,
+    llm: LLMRegistry | None = None,
 ) -> Starlette:
     """대시보드 전용 앱(웹 UI·정적 자산·트레이딩 프록시, 세션 인증).
 
@@ -144,7 +155,7 @@ def build_dash_app(
     MCP 세션을 끊지 않게 한다. 잡 목록은 프로세스별이므로 이 앱의
     /api/jobs 에는 MCP 쪽에서 시작한 잡이 보이지 않는다.
     """
-    ctx = build_context(registry, runner, audit, jobs=jobs)
+    ctx = build_context(registry, runner, audit, jobs=jobs, llm=llm)
     app = Starlette(
         routes=dashboard.build_routes(ctx, dash_password),
         middleware=[
