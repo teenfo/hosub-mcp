@@ -44,9 +44,34 @@ export default {
         d.dart_enabled ? '<span class="badge text-bg-success">DART</span>' : '<span class="badge text-bg-secondary">DART 키 없음</span>',
       ].join(" ");
       statusBody.appendChild(el("div", { class: "mb-2", html: badges }));
-      statusBody.appendChild(el("div", { class: "text-secondary" },
-        `수집 ${q.raw_total ?? "-"}건 · 임베딩 대기 ${q.embed_pending ?? "-"} · 판정 대기 ${q.dedup_pending ?? "-"} · ` +
-        `분류 대기 ${q.classify_pending ?? "-"} · 재탕 ${q.duplicates ?? "-"} · 분류 실패 ${q.llm_failed ?? "-"}`));
+      // 숫자를 클릭하면 아래 목록 필터로 바로 조회 (판정 완료 항목만 목록化 가능)
+      const chip = (label, status) => {
+        const a = el("a", { href: "#", class: "text-decoration-none",
+                            title: "클릭하면 목록에 필터 적용" }, label);
+        a.onclick = (ev) => {
+          ev.preventDefault();
+          fStatus.value = status;
+          changed.invalidate("items");
+          loadItems();
+        };
+        return a;
+      };
+      const plain = (label) => el("span", {
+        title: "아직 판정 전이라 목록에 없음 — 처리되면 줄어듭니다" }, label);
+      const parts = [
+        chip(`수집 ${q.raw_total ?? "-"}건`, ""),
+        plain(`임베딩 대기 ${q.embed_pending ?? "-"}`),
+        plain(`판정 대기 ${q.dedup_pending ?? "-"}`),
+        plain(`분류 대기 ${q.classify_pending ?? "-"}`),
+        chip(`재탕 ${q.duplicates ?? "-"}`, "skipped_duplicate"),
+        chip(`분류 실패 ${q.llm_failed ?? "-"}`, "llm_failed"),
+      ];
+      const line = el("div", { class: "text-secondary" });
+      parts.forEach((p, i) => {
+        if (i) line.appendChild(document.createTextNode(" · "));
+        line.appendChild(p);
+      });
+      statusBody.appendChild(line);
     };
 
     // --- 판정 목록 + 상세 ---
