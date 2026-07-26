@@ -28,3 +28,7 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# llm-gateway 런타임 (토큰·DB)
+llm-gateway/.env
+llm-gateway/data/

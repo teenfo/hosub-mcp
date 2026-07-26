@@ -27,7 +27,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from . import llm as llm_mod, service_ops, sysinfo
+from . import gateway, llm as llm_mod, service_ops, sysinfo
 from .context import AppContext
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -216,6 +216,40 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         )
         return JSONResponse(result)
 
+    async def api_llm_models(request):
+        """게이트웨이의 모델 설치 요청 목록 (승인 대기 포함)."""
+        if (d := _require_auth_json(request)):
+            return d
+        result = await run_in_threadpool(
+            gateway.list_model_requests, request.query_params.get("status")
+        )
+        return JSONResponse(result)
+
+    async def api_llm_models_decide(request):
+        """모델 설치 승인/거부 — 조회 전용 대시보드의 의도된 예외.
+
+        승인해도 설치되는 것은 PR 리뷰를 거친 역할이 참조하는 모델뿐이다.
+        """
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        model = (body.get("model") or "").strip()
+        action = (body.get("action") or "").strip()
+        if not model:
+            return JSONResponse({"status": "rejected", "reason": "model 이 필요합니다."},
+                                status_code=400)
+        result = await run_in_threadpool(gateway.decide_model_request, model, action)
+        ctx.audit.log(
+            tool="llm_decide_model",
+            params={"model": model, "action": action, "via": "dashboard"},
+            risk="medium", outcome=result.get("status", "error"),
+            result_summary=str(result.get("request") or result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
     async def api_docker(request):
         if (d := _require_auth_json(request)):
             return d
@@ -358,6 +392,8 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/night-report", api_night_report),
         Route("/api/llm/status", api_llm_status),
         Route("/api/llm/generate", api_llm_generate, methods=["POST"]),
+        Route("/api/llm/models", api_llm_models),
+        Route("/api/llm/models/decide", api_llm_models_decide, methods=["POST"]),
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),

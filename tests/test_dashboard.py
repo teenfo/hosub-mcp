@@ -78,3 +78,48 @@ def test_logout_clears_session(client):
     assert client.get("/api/status").status_code == 200
     client.get("/logout", follow_redirects=False)
     assert client.get("/api/status").status_code == 401
+
+
+# --- 모델 설치 요청 (게이트웨이 프록시) ---
+def test_model_requests_need_login(client):
+    assert client.get("/api/llm/models").status_code == 401
+    assert client.post("/api/llm/models/decide",
+                       json={"model": "m", "action": "approve"}).status_code == 401
+
+
+def test_model_requests_proxied_to_gateway(client, monkeypatch):
+    from src import gateway
+
+    seen = {}
+
+    def fake_list(status=None):
+        seen["status"] = status
+        return {"status": "ok", "requests": [], "can_decide": True}
+
+    monkeypatch.setattr(gateway, "list_model_requests", fake_list)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    body = client.get("/api/llm/models?status=pending").json()
+    assert body["can_decide"] is True
+    assert seen["status"] == "pending"
+
+
+def test_model_decision_is_audited(client, monkeypatch):
+    from src import gateway
+
+    calls = []
+    monkeypatch.setattr(gateway, "decide_model_request",
+                        lambda m, a: calls.append((m, a)) or
+                        {"status": "ok", "request": {"model": m, "status": "approved"}})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.post("/api/llm/models/decide", json={"model": "qwen3:32b", "action": "approve"})
+    assert r.status_code == 200 and r.json()["status"] == "ok"
+    assert calls == [("qwen3:32b", "approve")]
+
+    rows = client.get("/api/audit?limit=5").json()["audit"]
+    assert any(row["tool"] == "llm_decide_model" for row in rows)
+
+
+def test_model_decision_requires_model(client):
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.post("/api/llm/models/decide", json={"action": "approve"})
+    assert r.status_code == 400

@@ -11,7 +11,7 @@ from src.llm import LLMConfigError, LLMRegistry, backend_status, generate
 
 VALID = {
     "backends": {
-        "mac": {"base_url": "http://100.107.151.46:11434", "type": "ollama"},
+        "mac": {"base_url": "http://mac.test:11434", "type": "ollama"},
         "local": {"base_url": "http://127.0.0.1:11434"},
     },
     "default_backend": "mac",
@@ -134,7 +134,7 @@ def test_generate_routes_to_role_model():
     assert out["status"] == "ok"
     assert out["model"] == "qwen2.5-coder:14b"
     assert out["response"] == "안녕하세요"
-    assert FakeClient.last_url == "http://100.107.151.46:11434/api/generate"
+    assert FakeClient.last_url == "http://mac.test:11434/api/generate"
     assert FakeClient.last_json["model"] == "qwen2.5-coder:14b"
     assert FakeClient.last_json["stream"] is False
 

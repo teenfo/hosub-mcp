@@ -1,0 +1,34 @@
+# 소비 서비스 등록 (인증·권한)
+#
+# 토큰 값은 여기 두지 않는다 — 환경변수 이름만 참조한다(.env 는 커밋 금지).
+# 새 소비자 추가 = 여기 블록 하나 + .env 토큰 하나. 워커·컨테이너 추가 없음.
+
+services:
+  hosub:
+    token_env: LLMGW_TOKEN_HOSUB
+    allow_roles: ["*"]            # MCP 도구·대시보드 (운영 주체)
+    rate_limit_per_min: 120
+    admin: true                   # 모델 설치 요청 승인/거부 권한 (여기에만 부여)
+
+  # Vercel 에서 서비스되므로 집 밖에서 Caddy(/llm/v1/*)를 거쳐 들어온다.
+  # 고정 출발 IP가 없어 IP 허용목록을 만들 수 없다 — 토큰이 유일한 통제이므로
+  # 한도를 보수적으로 잡아 토큰이 새도 소비량 상한이 걸리게 한다.
+  roxlogy:
+    token_env: LLMGW_TOKEN_ROXLOGY
+    allow_roles: ["analyze_workout", "coach_feedback", "summarize"]
+    rate_limit_per_min: 30
+
+  tnm:
+    token_env: LLMGW_TOKEN_TNM
+    allow_roles: ["summarize", "classify_news", "translate"]
+    rate_limit_per_min: 120
+
+  trading:
+    token_env: LLMGW_TOKEN_TRADING
+    allow_roles: ["summarize", "general"]
+    rate_limit_per_min: 60
+
+  # 예시) BCL Portal 을 붙일 때 — 이 3줄이면 끝
+  # bcl:
+  #   token_env: LLMGW_TOKEN_BCL
+  #   allow_roles: ["summarize", "translate", "general"]

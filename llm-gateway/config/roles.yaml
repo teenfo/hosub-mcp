@@ -1,0 +1,80 @@
+# 역할 = 모델 정책 (설계서 7절)
+#
+# 여기서 정하는 것: 어떤 모델을 어느 레인에서 얼마의 타임아웃으로 돌릴지.
+# 프롬프트는 **호출자 소유** — 요청의 system 이 있으면 그것이 우선한다.
+# (hosub 운영용 역할처럼 게이트웨이가 관리해도 되는 것만 기본 system 을 둔다)
+#
+# 모델 교체 = 이 파일 한 줄. 소비자 코드는 바뀌지 않는다.
+
+backend:
+  base_url: ${OLLAMA_URL}       # 예: http://192.168.0.x:11434 (맥 스튜디오)
+  keep_alive: 10m               # 연속 요청 시 모델 재로드 방지
+
+# 메모리 예산(GB). 두 레인에서 동시에 도는 모델 크기 합이 이 값을 넘지 않게 한다.
+mem_budget_gb: ${MEM_BUDGET_GB}
+
+# 모델별 메모리 추정치(GB). 없으면 태그의 파라미터 수로 추정한다.
+model_sizes_gb:
+  "qwen2.5:7b": 5
+  "qwen2.5:14b": 10
+  "qwen2.5:32b": 21
+  "qwen2.5-coder:14b": 10
+
+roles:
+  # ---------- hosub 운영 (프롬프트도 게이트웨이가 관리) ----------
+  summarize:
+    model: qwen2.5:7b
+    lane: interactive
+    timeout: 120
+    system: "너는 요약 도우미다. 핵심만 간결하게, 불필요한 수식 없이 한국어로 답한다."
+    options: { temperature: 0.3 }
+
+  log_analyze:
+    model: qwen2.5:14b
+    lane: interactive
+    timeout: 180
+    system: |
+      너는 리눅스 서버 운영 분석가다. 주어진 로그에서
+      (1) 무슨 일이 일어났는지 (2) 원인 후보 (3) 다음에 확인할 것
+      을 한국어로 간결히 정리한다. 추측은 추측이라고 명시한다.
+    options: { temperature: 0.2 }
+
+  translate:
+    model: qwen2.5:14b
+    lane: interactive
+    timeout: 180
+    system: "입력 텍스트를 번역한다. 한국어면 영어로, 그 외는 자연스러운 한국어로. 설명 없이 번역문만 출력."
+    options: { temperature: 0.2 }
+
+  code:
+    model: qwen2.5-coder:14b
+    lane: interactive
+    timeout: 240
+    system: "너는 숙련된 소프트웨어 엔지니어다. 정확하고 간결하게, 코드에는 필요한 주석만 단다."
+    options: { temperature: 0.2 }
+
+  general:
+    model: qwen2.5:32b
+    lane: batch
+    timeout: 300
+    system: "너는 유능한 한국어 어시스턴트다. 정확하고 간결하게 답한다."
+    options: { temperature: 0.6 }
+
+  # ---------- roxlogy (HYROX 훈련 분석) ----------
+  # 프롬프트는 roxlogy 가 요청의 system 으로 보낸다 — 자기 레포에서 자유롭게 개선.
+  analyze_workout:
+    model: qwen2.5:14b
+    lane: batch
+    timeout: 240
+
+  coach_feedback:
+    model: qwen2.5:32b
+    lane: batch
+    timeout: 300
+
+  # ---------- TNM (뉴스·공시) ----------
+  classify_news:
+    model: qwen2.5:7b
+    lane: interactive
+    timeout: 60
+    options: { temperature: 0.1 }

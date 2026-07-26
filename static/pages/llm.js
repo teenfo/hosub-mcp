@@ -51,6 +51,22 @@ export default {
     rolesCol.appendChild(rolesCard);
     row.appendChild(rolesCol);
 
+    // --- 모델 설치 요청 카드 (게이트웨이가 만든 승인 대기 목록) ---
+    // 조회 전용 대시보드의 의도된 예외: 여기서만 상태를 바꾼다.
+    const reqCol = el("div", { class: "col-12 d-none" });
+    const reqCard = el("div", { class: "card shadow-sm" }, [
+      el("div", { class: "card-header d-flex align-items-center gap-2" }, [
+        el("span", { html: '<i class="bi bi-box-arrow-down"></i> 모델 설치 요청' }),
+        el("span", { class: "badge text-bg-warning d-none", id: "llm-req-count" }),
+        el("span", { class: "small text-secondary ms-auto" },
+          "외부 서비스가 아직 맥에 없는 모델을 요청하면 여기에 쌓입니다"),
+      ]),
+    ]);
+    const reqBody = el("div", { class: "card-body" });
+    reqCard.appendChild(reqBody);
+    reqCol.appendChild(reqCard);
+    row.appendChild(reqCol);
+
     // --- 테스트 실행 카드 ---
     const tryCol = el("div", { class: "col-12" });
     const tryCard = el("div", { class: "card shadow-sm" }, [
@@ -78,6 +94,111 @@ export default {
       el("div", { class: "d-flex align-items-center gap-2 text-secondary small" }, [
         el("span", { class: "spinner-border spinner-border-sm" }), msg,
       ]);
+
+    const MR_STYLE = {
+      pending: ["승인 대기", "warning"],
+      approved: ["설치 예정", "info"],
+      pulling: ["설치 중", "info"],
+      ready: ["설치됨", "success"],
+      rejected: ["거부됨", "secondary"],
+      failed: ["설치 실패", "danger"],
+    };
+
+    const decide = async (model, action, btn) => {
+      const verb = action === "approve" ? "설치" : "거부";
+      if (!window.confirm(`모델 '${model}' 을(를) ${verb}할까요?`)) return;
+      btn.disabled = true;
+      btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>';
+      try {
+        const r = await postJSON("/api/llm/models/decide", { model, action });
+        if (r.status !== "ok") {
+          window.alert(r.error || r.reason || "요청을 처리하지 못했습니다.");
+        }
+      } finally {
+        await loadRequests();
+      }
+    };
+
+    const loadRequests = async () => {
+      const d = await fetchJSON("/api/llm/models");
+      const list = d.requests || [];
+      // 게이트웨이가 아직 없고 요청도 없으면 카드를 숨긴다
+      if (d.status === "unconfigured" && !list.length) {
+        reqCol.classList.add("d-none");
+        return;
+      }
+      reqCol.classList.remove("d-none");
+      reqBody.innerHTML = "";
+
+      const countBadge = reqCard.querySelector("#llm-req-count");
+      const pending = list.filter((r) => r.status === "pending").length;
+      countBadge.textContent = pending ? `승인 대기 ${pending}` : "";
+      countBadge.classList.toggle("d-none", !pending);
+
+      if (d.status === "error" || d.status === "unconfigured") {
+        reqBody.appendChild(el("div", { class: "alert alert-warning mb-0" }, [
+          el("div", {}, d.error || d.reason || "게이트웨이에 연결할 수 없습니다."),
+          d.hint ? el("div", { class: "small text-secondary mt-1" }, d.hint) : null,
+        ]));
+        return;
+      }
+      if (!list.length) {
+        reqBody.appendChild(el("div", { class: "text-secondary small" },
+          "설치 요청이 없습니다."));
+        return;
+      }
+
+      const rows = list.map((r) => {
+        const [label, tone] = MR_STYLE[r.status] || [r.status, "secondary"];
+        const statusCell = el("td", {}, [badge(label, tone)]);
+        if (r.status === "pulling") {
+          statusCell.appendChild(el("div", {
+            class: "progress mt-1", style: "height:6px; min-width:90px",
+          }, el("div", {
+            class: "progress-bar progress-bar-striped progress-bar-animated",
+            style: `width:${r.progress || 0}%`,
+          })));
+        } else if (r.error) {
+          statusCell.appendChild(el("div", { class: "small text-danger mt-1" }, r.error));
+        }
+
+        const actions = el("td", { class: "text-end" });
+        if (d.can_decide && (r.status === "pending" || r.status === "failed")) {
+          const ok = el("button", { class: "btn btn-sm btn-primary me-1", type: "button" },
+            r.status === "failed" ? "다시 설치" : "승인");
+          ok.addEventListener("click", () => decide(r.model, "approve", ok));
+          actions.appendChild(ok);
+        }
+        if (d.can_decide && r.status === "pending") {
+          const no = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "거부");
+          no.addEventListener("click", () => decide(r.model, "reject", no));
+          actions.appendChild(no);
+        }
+        if (d.can_decide && r.status === "rejected") {
+          const re = el("button", { class: "btn btn-sm btn-outline-primary", type: "button" }, "승인으로 변경");
+          re.addEventListener("click", () => decide(r.model, "approve", re));
+          actions.appendChild(re);
+        }
+
+        return el("tr", {}, [
+          el("td", { class: "mono small" }, r.model),
+          el("td", { class: "small text-secondary" }, (r.roles || []).join(", ") || "-"),
+          el("td", { class: "small text-secondary" }, r.requested_by || "-"),
+          el("td", { class: "small text-secondary" },
+            r.est_size_gb ? `~${r.est_size_gb}GB` : "-"),
+          statusCell,
+          actions,
+        ]);
+      });
+
+      const thead = el("thead", {}, el("tr", {}, [
+        el("th", {}, "모델"), el("th", {}, "역할"), el("th", {}, "요청 서비스"),
+        el("th", {}, "크기"), el("th", {}, "상태"), el("th", {}, ""),
+      ]));
+      reqBody.appendChild(el("div", { class: "table-responsive" },
+        el("table", { class: "table table-sm table-hover align-middle mb-0" },
+          [thead, el("tbody", {}, rows)])));
+    };
 
     let firstLoad = true;
     const load = async () => {
@@ -149,7 +270,8 @@ export default {
       }
     };
 
-    backendCard.querySelector("#llm-refresh").addEventListener("click", load);
+    backendCard.querySelector("#llm-refresh").addEventListener("click", () =>
+      Promise.all([load(), loadRequests()]));
 
     runBtn.addEventListener("click", async () => {
       const prompt = promptBox.value.trim();
@@ -184,7 +306,9 @@ export default {
       }
     });
 
-    await load();
+    await Promise.all([load(), loadRequests()]);
     ctx.addTimer(setInterval(load, 30000));
+    // 설치 진행률이 보이도록 요청 목록은 조금 더 자주
+    ctx.addTimer(setInterval(loadRequests, 10000));
   },
 };

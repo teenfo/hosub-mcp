@@ -26,9 +26,15 @@ TOOL_RISK: dict[str, Risk] = {
     "list_jobs": Risk.LOW,
     "read_file": Risk.LOW,
     "list_directory": Risk.LOW,
+    "llm_list_roles": Risk.LOW,
+    "llm_status": Risk.LOW,
+    "llm_generate": Risk.LOW,
+    "llm_model_requests": Risk.LOW,
     # 상태 변경 (confirm 필요)
     "restart_service": Risk.MEDIUM,
     "run_backup": Risk.MEDIUM,
+    # 승인 시 맥 디스크에 수 GB 를 내려받는다
+    "llm_decide_model": Risk.MEDIUM,
     "deploy_service": Risk.HIGH,
     "run_script": Risk.HIGH,
     "run_command": Risk.HIGH,
