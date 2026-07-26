@@ -61,7 +61,8 @@ export default {
     const fTicker = el("input", { class: "form-control form-control-sm", placeholder: "종목코드", style: "max-width:110px" });
     const fScore = el("input", { type: "number", class: "form-control form-control-sm", placeholder: "최소점수", style: "max-width:100px" });
     const fStatus = el("select", { class: "form-select form-select-sm", style: "max-width:130px" }, [
-      el("option", { value: "" }, "전체 상태"), el("option", { value: "ok" }, "정상"),
+      el("option", { value: "ok", selected: "selected" }, "정상 (기본)"),
+      el("option", { value: "" }, "전체 상태"),
       el("option", { value: "llm_failed" }, "분류 실패"),
       el("option", { value: "skipped_duplicate" }, "재탕"),
     ]);
