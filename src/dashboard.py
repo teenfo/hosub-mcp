@@ -27,7 +27,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from . import gateway, llm as llm_mod, service_ops, sysinfo
+from . import gateway, service_ops, sysinfo
 from .context import AppContext
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -185,16 +185,11 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         return _dated_response(NIGHT_REPORT_DIR, request.query_params.get("date"), "야간 분석 리포트")
 
     async def api_llm_status(request):
+        """게이트웨이 상태 — 백엔드·보유 모델·레인 큐·메모리 예산·사용량."""
         if (d := _require_auth_json(request)):
             return d
-        if not ctx.llm.role_names:
-            return JSONResponse({
-                "backends": [], "roles": [],
-                "hint": "config/llm_registry.yaml 에 backends/roles 를 정의하세요.",
-            })
-        # 백엔드 HTTP 조회는 블로킹이라 스레드풀로
-        result = await run_in_threadpool(llm_mod.backend_status, ctx.llm)
-        return JSONResponse(result)
+        # 게이트웨이 HTTP 조회는 블로킹이라 스레드풀로
+        return JSONResponse(await run_in_threadpool(gateway.status))
 
     async def api_llm_generate(request):
         if (d := _require_auth_json(request)):
@@ -208,13 +203,21 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         if not prompt:
             return JSONResponse({"status": "rejected", "reason": "prompt 가 비어 있습니다."},
                                 status_code=400)
-        result = await run_in_threadpool(llm_mod.generate, ctx.llm, role, prompt)
+        result = await run_in_threadpool(gateway.generate, role, prompt)
         ctx.audit.log(
             tool="llm_generate", params={"role": role, "prompt_chars": len(prompt), "via": "dashboard"},
             risk="low", outcome=result.get("status", "error"),
             result_summary=(result.get("response") or result.get("error") or "")[:300],
         )
         return JSONResponse(result)
+
+    async def api_llm_job(request):
+        """pending 으로 돌아온 생성 요청의 결과 수령."""
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(
+            await run_in_threadpool(gateway.get_job, request.path_params["job_id"])
+        )
 
     async def api_llm_models(request):
         """게이트웨이의 모델 설치 요청 목록 (승인 대기 포함)."""
@@ -392,6 +395,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/night-report", api_night_report),
         Route("/api/llm/status", api_llm_status),
         Route("/api/llm/generate", api_llm_generate, methods=["POST"]),
+        Route("/api/llm/jobs/{job_id}", api_llm_job),
         Route("/api/llm/models", api_llm_models),
         Route("/api/llm/models/decide", api_llm_models_decide, methods=["POST"]),
         Route("/api/docker", api_docker),

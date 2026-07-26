@@ -1,10 +1,12 @@
-"""LLM 게이트웨이 도구.
+"""LLM 도구 — 전부 공유 게이트웨이(llm-gateway)를 거친다.
 
-- llm_list_roles / llm_status / llm_generate: 역할(role) 이름으로 요청하면
-  레지스트리가 Mac 등 백엔드의 모델로 라우팅한다. 조회성이라 위험도 Low.
-- llm_model_requests / llm_decide_model: 공유 게이트웨이가 만든 **모델 설치
-  요청**을 확인하고 승인/거부한다. 승인은 맥 디스크에 수 GB 를 내려받는
-  상태 변경이므로 Medium — confirm 게이트를 통과해야 한다.
+hosub 는 맥의 Ollama 를 직접 부르지 않는다. 게이트웨이를 거쳐야 다른 소비자
+(roxlogy·TNM·trading)와 같은 큐·레인·재시도·사용량 집계를 공유한다.
+
+- llm_list_roles / llm_status / llm_generate / llm_job: 조회·추론이라 위험도 Low.
+- llm_model_requests / llm_decide_model: 게이트웨이가 만든 **모델 설치 요청**을
+  확인하고 승인/거부한다. 승인은 맥 디스크에 수 GB 를 내려받는 상태 변경이므로
+  Medium — confirm 게이트를 통과해야 한다.
 """
 
 from __future__ import annotations
@@ -12,7 +14,6 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 
 from .. import gateway
-from .. import llm as llm_mod
 from ..context import AppContext
 from ..policy import check_confirm
 
@@ -26,21 +27,19 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
 
         역할 이름을 llm_generate 의 role 인자로 넘기면 해당 모델이 실행된다.
         """
-        roles = [r.to_dict() | {"description": r.description} for r in ctx.llm.roles]
-        if not roles:
-            return {
-                "roles": [],
-                "hint": "config/llm_registry.yaml 에 roles 를 정의하면 여기에 표시됩니다.",
-            }
-        return {"roles": roles, "fallback_role": ctx.llm.fallback_role}
+        result = gateway.list_roles()
+        if not result.get("roles"):
+            result.setdefault(
+                "hint",
+                "llm-gateway/config/roles.yaml 에 역할을 정의하면 여기에 표시됩니다.",
+            )
+        return result
 
     @mcp.tool()
     def llm_status() -> dict:
-        """LLM 백엔드(Mac 등)의 연결 상태와 보유 모델, 역할별 모델 준비 여부를 조회한다."""
-        if not ctx.llm.role_names:
-            return {"backends": [], "roles": [], "hint": "LLM 레지스트리가 비어 있습니다."}
-        result = llm_mod.backend_status(ctx.llm)
-        ctx.audit.log(tool="llm_status", outcome="ok", risk="low")
+        """LLM 백엔드(맥)의 연결 상태·보유 모델·대기열·사용량을 조회한다."""
+        result = gateway.status()
+        ctx.audit.log(tool="llm_status", outcome=result.get("status", "ok"), risk="low")
         return result
 
     @mcp.tool()
@@ -48,31 +47,46 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
         prompt: str,
         role: str = "general",
         system: str | None = None,
+        wait: int = 120,
     ) -> dict:
-        """로컬 LLM(Mac 등)으로 프롬프트를 실행한다.
+        """맥의 LLM 으로 프롬프트를 실행한다 (게이트웨이 경유).
 
         prompt: 모델에 보낼 입력 텍스트.
         role: 기능 이름 (llm_list_roles 로 확인. 예: summarize, log_analyze,
-              translate, code, general). 역할마다 모델·기본 지시문이 다르다.
+              translate, code, general). 역할마다 모델·레인·기본 지시문이 다르다.
         system: 역할의 기본 시스템 프롬프트를 이번 호출만 다른 값으로 대체(선택).
-        """
-        if not ctx.llm.role_names:
-            return {
-                "status": "rejected",
-                "reason": "LLM 레지스트리가 비어 있습니다. config/llm_registry.yaml 을 설정하세요.",
-            }
-        result = llm_mod.generate(ctx.llm, role, prompt, system=system)
+        wait: 결과를 기다릴 초(0~300). 안에 못 끝나면 status=pending 과 job_id 를
+              돌려주며, 잡은 계속 돈다 — llm_job 으로 나중에 수령한다.
 
-        outcome = result.get("status", "error")
+        status 는 ok(완료) | pending(대기 중) | failed(실패) 중 하나다.
+        """
+        result = gateway.generate(role, prompt, system=system,
+                                  wait=max(0, min(int(wait), 300)))
+        status = result.get("status", "error")
+        if status == "pending":
+            result["hint"] = (
+                f"아직 실행 중입니다. llm_job(job_id='{result.get('job_id')}') 로 "
+                "결과를 확인하세요. 모델이 아직 설치되지 않아 대기 중일 수도 있습니다 "
+                "— llm_model_requests 로 확인할 수 있습니다."
+            )
         summary = (result.get("response") or result.get("error") or "")[:_SUMMARY_MAX]
         ctx.audit.log(
             tool="llm_generate",
-            params={"role": role, "prompt_chars": len(prompt)},
+            params={"role": role, "prompt_chars": len(prompt), "wait": wait},
             risk="low",
-            outcome=outcome,
+            outcome=status,
             result_summary=f"{result.get('model', '?')} :: {summary}",
         )
         return result
+
+    @mcp.tool()
+    def llm_job(job_id: str) -> dict:
+        """llm_generate 가 pending 으로 돌려준 잡의 결과를 조회한다.
+
+        게이트웨이는 잡을 영속 저장하므로, 맥이나 게이트웨이가 재시작해도
+        결과는 남아 있다.
+        """
+        return gateway.get_job(job_id)
 
     @mcp.tool()
     def llm_model_requests(status: str | None = None) -> dict:

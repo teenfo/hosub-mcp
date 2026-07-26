@@ -212,50 +212,85 @@ export default {
       backendBody.innerHTML = "";
       rolesBody.innerHTML = "";
 
-      if (!d.backends || !d.backends.length) {
-        const msg = d.hint || "LLM 레지스트리가 비어 있습니다.";
-        backendBody.appendChild(el("div", { class: "text-secondary small" }, msg));
-        rolesBody.appendChild(el("div", { class: "text-secondary small" }, msg));
+      // 게이트웨이 자체에 못 닿는 경우 (컨테이너 다운·토큰 미설정)
+      if (d.status === "error" || d.status === "unconfigured") {
+        const box = el("div", { class: "alert alert-warning mb-0" }, [
+          el("div", { class: "fw-medium" }, "게이트웨이에 연결할 수 없습니다"),
+          el("div", { class: "mono small mt-1" }, d.error || d.reason || ""),
+          d.hint ? el("div", { class: "small text-secondary mt-2" }, d.hint) : null,
+        ]);
+        backendBody.appendChild(box);
+        rolesBody.appendChild(el("div", { class: "text-secondary small" },
+          "게이트웨이가 떠야 역할 목록을 볼 수 있습니다."));
         return;
       }
 
-      // 백엔드
-      for (const b of d.backends) {
-        const box = el("div", { class: "mb-3" }, [
-          el("div", { class: "d-flex align-items-center gap-2" }, [
-            el("span", { class: "fw-medium" }, b.name),
-            b.online ? badge("online", "success") : badge("offline", "danger"),
-          ]),
-          el("div", { class: "mono text-secondary" }, b.base_url),
-          b.online
-            ? el("div", { class: "small text-secondary mt-1" }, `보유 모델 ${b.models.length}개`)
-            : el("div", { class: "small text-danger mt-1" }, b.error || ""),
-        ]);
-        if (b.online && b.models.length) {
-          const list = el("div", { class: "d-flex flex-wrap gap-1 mt-1" },
-            b.models.map((m) => el("span", { class: "badge text-bg-secondary" }, m)));
-          box.appendChild(list);
-        }
-        backendBody.appendChild(box);
+      // --- 백엔드(맥) + 레인 큐 ---
+      const b = d.backend || {};
+      backendBody.appendChild(el("div", {}, [
+        el("div", { class: "d-flex align-items-center gap-2" }, [
+          el("span", { class: "fw-medium" }, "맥 스튜디오"),
+          b.online ? badge("online", "success") : badge("offline", "danger"),
+        ]),
+        el("div", { class: "mono text-secondary" }, b.base_url || ""),
+        b.online
+          ? el("div", { class: "small text-secondary mt-1" },
+              `보유 모델 ${(b.models || []).length}개`
+              + (b.loaded_model ? ` · 최근 사용 ${b.loaded_model}` : ""))
+          : el("div", { class: "small text-danger mt-1" }, b.error || ""),
+        (b.models || []).length
+          ? el("div", { class: "d-flex flex-wrap gap-1 mt-1" },
+              b.models.map((m) => el("span", { class: "badge text-bg-secondary" }, m)))
+          : null,
+      ]));
+
+      // 레인별 대기/실행 — 잡이 밀리는지 한눈에
+      const lanes = d.lanes || {};
+      const running = d.running || {};
+      backendBody.appendChild(el("div", { class: "mt-3" }, [
+        el("div", { class: "small text-secondary mb-1" },
+          `레인 (메모리 예산 ${d.mem_budget_gb ?? "?"}GB)`),
+        ...Object.keys(lanes).map((name) => {
+          const l = lanes[name];
+          const cur = running[name];
+          return el("div", { class: "d-flex align-items-center gap-2 small" }, [
+            el("span", { class: "mono", style: "min-width:88px" }, name),
+            l.running ? badge(`실행 ${l.running}`, "primary") : badge("유휴", "secondary"),
+            l.queued ? badge(`대기 ${l.queued}`, "warning") : null,
+            cur ? el("span", { class: "text-secondary mono" }, cur.model) : null,
+          ]);
+        }),
+      ]));
+
+      // 사용량 — 어느 서비스가 얼마나 썼는지
+      if ((d.usage || []).length) {
+        backendBody.appendChild(el("div", { class: "mt-3" }, [
+          el("div", { class: "small text-secondary mb-1" }, "사용량 (서비스별 누적)"),
+          ...d.usage.map((u) =>
+            el("div", { class: "d-flex justify-content-between small" }, [
+              el("span", { class: "mono" }, u.service),
+              el("span", { class: "text-secondary" },
+                `${u.calls}회 · ${u.tokens || 0} 토큰 · 성공 ${u.ok}/${u.calls}`),
+            ])),
+        ]));
       }
 
-      // 역할
+      // --- 역할 ---
       if (!d.roles || !d.roles.length) {
         rolesBody.appendChild(el("div", { class: "text-secondary small" }, "정의된 역할이 없습니다."));
       } else {
         const rows = d.roles.map((r) =>
           el("tr", {}, [
-            el("td", {}, [
-              el("div", { class: "fw-medium" }, r.name),
-              el("div", { class: "small text-secondary" }, r.description || ""),
-            ]),
+            el("td", { class: "fw-medium" }, r.name),
             el("td", { class: "mono small" }, r.model),
-            el("td", { class: "small text-secondary" }, r.backend),
-            el("td", {}, r.model_available ? badge("준비됨", "success") : badge("모델 없음", "warning")),
+            el("td", { class: "small text-secondary" }, r.lane),
+            el("td", { class: "small text-secondary" }, `${r.timeout}s`),
+            el("td", {}, r.model_available ? badge("준비됨", "success") : badge("설치 필요", "warning")),
           ])
         );
         const thead = el("thead", {}, el("tr", {}, [
-          el("th", {}, "역할"), el("th", {}, "모델"), el("th", {}, "백엔드"), el("th", {}, "상태"),
+          el("th", {}, "역할"), el("th", {}, "모델"), el("th", {}, "레인"),
+          el("th", {}, "타임아웃"), el("th", {}, "상태"),
         ]));
         rolesBody.appendChild(el("div", { class: "table-responsive" },
           el("table", { class: "table table-sm table-hover align-middle mb-0" },
@@ -266,7 +301,7 @@ export default {
         roleSelect.innerHTML = "";
         for (const r of d.roles) roleSelect.appendChild(el("option", { value: r.name }, r.name));
         if (cur && d.roles.some((r) => r.name === cur)) roleSelect.value = cur;
-        else if (d.fallback_role) roleSelect.value = d.fallback_role;
+        else if (d.roles.some((r) => r.name === "general")) roleSelect.value = "general";
       }
     };
 
@@ -279,23 +314,39 @@ export default {
       runBtn.disabled = true;
       runBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 실행 중';
       outBox.innerHTML = "";
-      try {
-        const r = await postJSON("/api/llm/generate", { role: roleSelect.value, prompt });
+      const showResult = (r) => {
+        outBox.innerHTML = "";
         if (r.status === "ok") {
-          const meta = [r.model, r.total_duration_ms ? `${(r.total_duration_ms / 1000).toFixed(1)}s` : null]
-            .filter(Boolean).join(" · ");
-          outBox.appendChild(el("div", { class: "small text-secondary mb-1" }, meta));
+          const secs = r.started_at && r.finished_at
+            ? (new Date(r.finished_at) - new Date(r.started_at)) / 1000 : null;
+          outBox.appendChild(el("div", { class: "small text-secondary mb-1" },
+            [r.model, r.lane, secs ? `${secs.toFixed(1)}s` : null].filter(Boolean).join(" · ")));
           outBox.appendChild(el("pre", {
             class: "border rounded p-3 mb-0",
             style: "white-space:pre-wrap; word-break:break-word; max-height:420px; overflow:auto",
           }, r.response || ""));
         } else {
           outBox.appendChild(el("div", { class: "alert alert-warning mb-0" }, [
-            el("div", { class: "fw-medium" }, r.reason || "실행 실패"),
-            el("div", { class: "mono small mt-1" }, r.error || ""),
+            el("div", { class: "fw-medium" }, r.reason || r.error || "실행 실패"),
             r.hint ? el("div", { class: "small mt-2 text-secondary" }, r.hint) : null,
           ]));
         }
+      };
+
+      try {
+        let r = await postJSON("/api/llm/generate", { role: roleSelect.value, prompt });
+        // 잡이 아직 안 끝났으면 폴링한다. 모델 미설치로 승인을 기다리는 중일 수도 있다.
+        for (let i = 0; r.status === "pending" && i < 150; i++) {
+          outBox.innerHTML = "";
+          outBox.appendChild(el("div", { class: "d-flex align-items-center gap-2 text-secondary small" }, [
+            el("span", { class: "spinner-border spinner-border-sm" }),
+            r.queue_position ? `대기 중 (앞에 ${r.queue_position}개)` : "실행 중",
+            el("span", { class: "mono" }, r.model || ""),
+          ]));
+          await new Promise((res) => setTimeout(res, 2000));
+          r = await fetchJSON(`/api/llm/jobs/${r.job_id}`);
+        }
+        showResult(r);
       } catch (e) {
         if (e.message !== "unauthorized") {
           outBox.appendChild(el("div", { class: "alert alert-danger mb-0" }, e.message));

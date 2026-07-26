@@ -8,7 +8,6 @@ from __future__ import annotations
 import os
 
 from .audit import AuditLog
-from .llm import LLMRegistry
 from .oauth import OAuthStore
 from .registry import Registry
 from .runner import SubprocessRunner
@@ -47,9 +46,6 @@ def create_app():
 
     registry = Registry.load(registry_path, strict=strict)
     audit = AuditLog(db_path)
-    llm_registry = LLMRegistry.load(
-        os.environ.get('HOSUB_LLM_REGISTRY', 'config/llm_registry.yaml')
-    )
     runner = SubprocessRunner()
     oauth_store = OAuthStore(oauth_db)
 
@@ -63,7 +59,6 @@ def create_app():
         allowed_hosts=allowed_hosts,
         oauth_store=oauth_store,
         public_url=public_url,
-        llm=llm_registry,
     )
 
 
