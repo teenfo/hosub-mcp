@@ -206,6 +206,15 @@ async def api_notify_test(_=Depends(require_auth)):
     return JSONResponse({"ok": ok, "error": err or None}, status)
 
 
+@app.post("/api/reclassify_failed")
+async def api_reclassify_failed(_=Depends(require_auth)):
+    """분류 실패(llm_failed) 항목을 재큐 — 프롬프트·모델 개선 후 재처리용."""
+    _require_db()
+    n = await db.requeue_failed()
+    log.info("분류 실패 재큐: %d건", n)
+    return {"ok": True, "requeued": n}
+
+
 # ---------------- 수집 ----------------
 
 @app.post("/api/collect/run")
