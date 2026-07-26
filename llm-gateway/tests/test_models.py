@@ -366,3 +366,40 @@ def test_status_reports_pending_model_requests(store, mroles, mservices):
         body = c.get("/v1/status",
                      headers={"Authorization": f"Bearer {TOKEN_ALPHA}"}).json()
         assert body["model_requests"]["pending"] == 1
+
+
+# --------------------------------------------------------------------------
+# 통합 가이드 서빙 (/v1/integration)
+# --------------------------------------------------------------------------
+def test_integration_doc_is_served_as_markdown(store, mroles, mservices):
+    with _client(store, mroles, mservices, fake_backend()) as c:
+        r = c.get("/v1/integration",
+                  headers={"Authorization": f"Bearer {TOKEN_ALPHA}"})
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("text/markdown")
+        body = r.text
+        assert "소비 프로젝트 통합 가이드" in body
+        assert "/v1/generate" in body          # 실제 계약이 담겨 있다
+
+
+def test_integration_doc_requires_auth(store, mroles, mservices):
+    """공개 경로(/llm/v1/*)에 놓이므로 스캐너에게 내부 구조를 주지 않는다."""
+    with _client(store, mroles, mservices, fake_backend()) as c:
+        assert c.get("/v1/integration").status_code == 401
+
+
+def test_integration_doc_available_to_non_admin_consumers(store, mroles, mservices):
+    """소비자(beta)도 읽을 수 있어야 한다 — 이걸 보라고 만든 것이다."""
+    with _client(store, mroles, mservices, fake_backend()) as c:
+        assert c.get("/v1/integration",
+                     headers={"Authorization": f"Bearer {TOKEN_BETA}"}).status_code == 200
+
+
+def test_missing_doc_returns_helpful_404(store, mroles, mservices, monkeypatch, tmp_path):
+    from app import main as main_mod
+
+    monkeypatch.setattr(main_mod, "DOCS_DIR", tmp_path / "nope")
+    with _client(store, mroles, mservices, fake_backend()) as c:
+        r = c.get("/v1/integration", headers={"Authorization": f"Bearer {TOKEN_ALPHA}"})
+        assert r.status_code == 404
+        assert "이미지를 다시 빌드" in r.json()["detail"]

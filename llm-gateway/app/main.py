@@ -14,7 +14,7 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from .auth import RateLimiter, authenticate
@@ -37,6 +37,13 @@ log = logging.getLogger("llmgw")
 DEFAULT_WAIT = 30
 MAX_WAIT = 300
 MAX_PROMPT_CHARS = 200_000
+
+# 통합 가이드를 게이트웨이가 직접 서빙한다. 소비 프로젝트(roxlogy 등)는 별도
+# 레포에 있어 hosub-mcp 저장소를 못 볼 수 있다 — 토큰만 있으면 curl 한 번으로
+# 최신 계약을 가져갈 수 있게 한다. 컨테이너에서는 /app/docs.
+DOCS_DIR = Path(
+    os.environ.get("LLMGW_DOCS_DIR") or Path(__file__).resolve().parent.parent / "docs"
+)
 
 
 def _job_response(job: dict, *, queue_position: int | None = None) -> dict:
@@ -221,6 +228,29 @@ def build_app(
         allowed = [r.to_dict() for r in roles.roles if svc.may_use(r.name)]
         return JSONResponse({"roles": allowed, "service": svc.name})
 
+    async def integration_doc(request: Request):
+        """소비 프로젝트용 통합 가이드를 마크다운으로 돌려준다.
+
+        경로 파라미터를 두지 않는다 — 파일 하나만 노출하므로 경로 탐색 여지가 없다.
+        인증을 요구하는 이유: 공개 경로(/llm/v1/*)에 놓이므로, 스캐너에게 역할·모델·
+        내부 구조를 알려줄 이유가 없다. 소비자는 어차피 토큰을 받는다.
+        """
+        _svc, err = _auth(request)
+        if err:
+            return err
+        path = DOCS_DIR / "integration.md"
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            log.warning("통합 가이드를 읽을 수 없음 %s: %s", path, exc)
+            return JSONResponse(
+                {"error": "not_found",
+                 "detail": f"통합 가이드가 없습니다({path}). "
+                           "이미지를 다시 빌드했는지 확인하세요."},
+                status_code=404,
+            )
+        return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+
     # --- 모델 설치 요청 (승인은 hosub = 대시보드/MCP 만) ---
     async def list_model_requests(request: Request):
         svc, err = _auth(request)
@@ -335,6 +365,7 @@ def build_app(
         Route("/v1/status", status),
         Route("/v1/models/requests", list_model_requests, methods=["GET"]),
         Route("/v1/models/requests", decide_model_request, methods=["POST"]),
+        Route("/v1/integration", integration_doc, methods=["GET"]),
     ]
 
     @asynccontextmanager

@@ -19,6 +19,9 @@
 > 다른 레포에서 붙인다면 **[`docs/integration.md`](docs/integration.md)** 를 보세요.
 > 복사해 쓰는 한 파일 클라이언트(`client/llmgw.py`)와, 게이트웨이 없이 개발할 수 있는
 > 목 서버(`tools/mock_gateway.py`)가 있습니다.
+>
+> 저장소 접근이 없다면 게이트웨이가 같은 문서를 서빙한다:
+> `curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/integration`
 
 ```python
 import httpx
@@ -52,6 +55,7 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `DELETE /v1/jobs/{id}` | 취소 (대기 중인 것만) |
 | `GET /v1/roles` | 쓸 수 있는 역할·모델 |
 | `GET /v1/status` | 백엔드·레인 큐·사용량 |
+| `GET /v1/integration` | 소비자용 통합 가이드(마크다운) — 레포 접근 없이 최신 계약 |
 | `GET /v1/models/requests` | 모델 설치 요청 목록 |
 | `POST /v1/models/requests` | 승인/거부 — `{"model":…, "action":"approve"\|"reject"}` (admin 서비스만) |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
