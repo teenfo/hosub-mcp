@@ -1,0 +1,12 @@
+# /etc/systemd/system/hosub-backup.timer
+# 매일 04:30 KST — 장 시작(09:00) 전, 야간 분석(07:10) 전 조용한 시간대.
+[Unit]
+Description=Daily hosub backup timer
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+Persistent=true          # 서버가 꺼져 있었으면 부팅 후 즉시 1회 실행
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target

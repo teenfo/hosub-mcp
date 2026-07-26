@@ -1,0 +1,11 @@
+# /etc/systemd/system/hosub-backup.service
+# 일일 백업 (타이머로 04:30 KST 실행). 설치: docs/SETUP.md
+[Unit]
+Description=Hosub daily backup (TNM Postgres + SQLite DBs + configs)
+After=network.target docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/hosub-mcp/scripts/backup_daily.sh
+# 백업 실패 시 저널에 남고 타이머가 다음 날 재시도한다.
