@@ -770,10 +770,17 @@ export default {
       if (hz.length >= 2) {
         const shapes = hz.map((b) => (b.exc_fwd_5 ?? 0) - (b.exc_fwd_1 ?? 0));
         const spread = Math.max(...shapes) - Math.min(...shapes);
-        lines.push([spread > 1 ? "success" : "warning",
-          `지속기간별 1일→5일 증가폭 차이 ${spread.toFixed(2)}%p — ` +
-          (spread > 1 ? "곡선 모양이 실제로 갈린다. 필드가 정보를 담고 있다."
-                      : "곡선이 구분되지 않는다. LLM 스키마에서 빼는 편이 낫다(프롬프트가 짧아지고 재시도가 준다).")]);
+        // 격차만 보면 안 된다 — 우연히 벌어진 격차도 격차다. 어느 버킷이든
+        // 1일 초과수익이 0과 구분되지 않으면 곡선 자체를 논할 근거가 없다.
+        const anySolid = hz.some((b) => Math.abs(b.t_fwd_1 || 0) > 2);
+        lines.push([anySolid && spread > 1 ? "success" : "warning",
+          `지속기간별 1일→5일 증가폭 차이 ${spread.toFixed(2)}%p · ` +
+          `1일 초과수익이 0과 구분되는 버킷 ${hz.filter((b) => Math.abs(b.t_fwd_1 || 0) > 2).length}개 — ` +
+          (anySolid && spread > 1
+            ? "곡선 모양이 실제로 갈린다. 필드가 정보를 담고 있다."
+            : !anySolid
+              ? "어느 버킷도 1일 초과수익이 0과 구분되지 않는다. 격차가 벌어져 보여도 근거가 아니다 — LLM 스키마에서 빼는 편이 낫다(프롬프트가 짧아지고 재시도가 준다)."
+              : "곡선이 구분되지 않는다. LLM 스키마에서 빼는 편이 낫다.")]);
       }
       if (pos && neg && pos.reliable && neg.reliable) {
         const gap = (pos.exc_fwd_1 ?? 0) - (neg.exc_fwd_1 ?? 0);
@@ -792,7 +799,17 @@ export default {
         ]));
       }
       if ((d.by_category || []).length) {
+        // 카테고리를 여러 개 훑으면 그중 하나쯤은 우연히 |t|>2 를 넘는다.
+        // 문턱을 올리지 않으면 '살아남은 카테고리' 가 발견이 아니라 다중검정의 산물이다.
+        const k = d.by_category.length;
+        const bonf = d.bonferroni_t || 2;
+        const survivors = d.by_category.filter((b) => b.reliable && Math.abs(b.t_fwd_1 || 0) > bonf);
         niBody.appendChild(el("div", { class: "fw-semibold small mt-3 mb-1" }, "카테고리별 (표본 상위)"));
+        niBody.appendChild(el("div", { class: "small text-secondary mb-1" },
+          `카테고리를 ${k}개 훑으므로 우연히 넘는 것을 걸러내려면 |t| > ${bonf}(본페로니)를 요구한다. ` +
+          (survivors.length
+            ? `통과: ${survivors.map((b) => `${b.key} (${b.exc_fwd_1 > 0 ? "+" : ""}${b.exc_fwd_1}%)`).join(", ")}`
+            : "통과한 카테고리가 없다.")));
         niBody.appendChild(table(d.by_category, null, "카테고리"));
       }
       niBody.appendChild(el("ul", { class: "small text-secondary mt-3 mb-0 ps-3" },
