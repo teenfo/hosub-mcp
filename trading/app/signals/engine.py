@@ -343,6 +343,9 @@ class SignalEngine:
         # 아낀 호출은 매매 대상의 감시 주기를 줄이는 데 쓸 수 있다.
         for symbol in self._collect_targets():
             await collector.backfill_minutes(symbol)
+        # 신규 편입 종목의 과거 확보 — 단발 조회는 최근 900봉뿐이라 편입 당일에는
+        # 백테스트 최소 일수를 못 채운다. 연속조회로 2주치를 끌어온다(종목당 1회).
+        await self.deep_backfill_pending()
         # 실계좌 자산 동기화 — 포지션 사이징이 가짜 기본값(1천만원)으로 계산되는 것 방지
         await self._sync_equity()
         if not self.equity_synced:
@@ -580,6 +583,40 @@ class SignalEngine:
             return list(settings.WATCHLIST)
         return [s for s in settings.WATCHLIST if s not in settings.COLLECT_ONLY]
 
+    async def deep_backfill_pending(self, limit: int = 0) -> int:
+        """아직 과거를 확보하지 못한 감시 종목을 연속조회로 채운다(종목당 1회).
+
+        신규 편입 종목은 단발 조회로 최근 900봉(≈2.4거래일)밖에 못 받는다.
+        분봉 API 는 언제 부르든 '최근' 900봉이라 마감 후로 미뤄도 과거가 늘지
+        않으므로, 편입 직후 연속조회로 끌어와 첫날부터 평가 대상이 되게 한다.
+
+        수집전용(COLLECT_ONLY)도 포함한다 — 매매는 안 해도 백테스트가 쓴다.
+        비용은 종목당 pages 콜 × 1회뿐이라 실시간 제외 대상이 아니다.
+        사이클당 처리 종목 수를 제한해 레이트리밋을 지킨다(최초 배포 시 감시목록
+        전체가 대상이 되므로 한 번에 몰아 부르지 않는다).
+        반환: 이번에 처리한 종목 수.
+        """
+        cfg = settings.CONFIG.get("collection", {})
+        if not cfg.get("deep_backfill", True):
+            return 0
+        pages = int(cfg.get("deep_backfill_pages", 5))
+        cap = int(limit or cfg.get("deep_backfill_per_cycle", 3))
+        done = store.deep_backfilled()
+        pending = [s for s in settings.WATCHLIST if s not in done]
+        n = 0
+        for symbol in pending[:cap]:
+            try:
+                bars = await collector.deep_backfill(symbol, pages)
+            except Exception:  # noqa: BLE001 - 실패는 기록하지 않고 다음 주기 재시도
+                log.warning("심층 백필 실패 %s — 다음 주기 재시도", symbol)
+                continue
+            store.mark_deep_backfill(symbol, bars)
+            n += 1
+        if n:
+            log.info("심층 백필 %d종목 (%d페이지), 남은 대상 %d",
+                     n, pages, max(0, len(pending) - n))
+        return n
+
     async def eod_backfill_once(self) -> int:
         """장 마감 후 감시목록 **전체**를 1회 백필해 그날 분봉을 확정한다.
 
@@ -598,6 +635,11 @@ class SignalEngine:
             except Exception:  # noqa: BLE001 - 개별 실패는 나머지를 막지 않는다
                 log.exception("마감 백필 실패 %s", symbol)
         log.info("마감 백필 완료: %d종목 (수집전용 포함)", n)
+        # 장중에 실패했거나 사이클 상한에 밀린 신규 편입분을 여기서 회수한다.
+        # 장이 끝나 실시간 호출이 없으므로 상한을 넉넉히 준다.
+        cfg = settings.CONFIG.get("collection", {})
+        await self.deep_backfill_pending(
+            limit=int(cfg.get("deep_backfill_eod_max", 30)))
         return n
 
     async def eod_backfill_loop(self, interval_sec: int = 120) -> None:

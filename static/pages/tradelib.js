@@ -1,5 +1,5 @@
 // 트레이딩 그룹 페이지(매매 데스크·발굴감시·성과백테스트) 공용 헬퍼.
-import { badge } from "../app.js";
+import { badge, el } from "../app.js";
 
 export async function postJSON(path, body) {
   const res = await fetch(path, {
@@ -49,6 +49,53 @@ export const leftStr = (iso) => {
 
 export const sideBadge = (side) =>
   badge(side === "short" ? "숏" : "롱", side === "short" ? "danger" : "success");
+
+// 카드 안 탭 그리드. 성격이 다른 표를 한 카드에 쌓지 않고 갈라, 지금 무엇을
+// 보고 있는지가 항상 분명하게 한다(발굴·감시 페이지와 같은 방식).
+//   defs: [{ id, label, icon, note }]
+//   반환: { nav, panes, mount(parent), set(id, node, count), show(id) }
+export function makeTabs(defs) {
+  const nav = el("ul", { class: "nav nav-tabs nav-fill small mb-2" });
+  const panes = {};
+  const counts = {};
+  let active = defs[0].id;
+  const show = (id) => {
+    active = id;
+    defs.forEach((t) => {
+      panes[t.id].classList.toggle("d-none", t.id !== id);
+      nav.querySelector(`[data-tab="${t.id}"]`).classList.toggle("active", t.id === id);
+    });
+  };
+  defs.forEach((t) => {
+    const cnt = el("span", { class: "badge text-bg-secondary ms-1 d-none" }, "0");
+    counts[t.id] = cnt;
+    const link = el("button", {
+      class: "nav-link" + (t.id === active ? " active" : ""),
+      type: "button", "data-tab": t.id,
+    }, [el("i", { class: `bi bi-${t.icon} me-1` }), t.label, cnt]);
+    link.onclick = () => show(t.id);
+    nav.appendChild(el("li", { class: "nav-item" }, link));
+    panes[t.id] = el("div", { class: t.id === active ? "" : "d-none" }, [
+      t.note ? el("div", { class: "small text-secondary mb-2", html: t.note }) : null,
+      el("div", { class: "pane-body" }),
+    ]);
+  });
+  return {
+    nav, panes, show,
+    mount(parent) { parent.append(nav, ...defs.map((t) => panes[t.id])); },
+    /** 탭 본문 교체. count 를 주면 탭 제목에 개수 뱃지를 단다. */
+    set(id, node, count) {
+      const body = panes[id].querySelector(".pane-body");
+      body.innerHTML = "";
+      body.appendChild(node);
+      const cnt = counts[id];
+      cnt.classList.toggle("d-none", count == null);
+      if (count == null) return;
+      cnt.textContent = String(count);
+      cnt.className = "badge ms-1 " + (count ? "text-bg-primary" : "text-bg-secondary");
+    },
+  };
+}
 
 // 변경 감지 메모 팩토리: 폴링 데이터가 실제로 바뀔 때만 DOM 재렌더(깜빡임 제거).
 export function makeChanged() {

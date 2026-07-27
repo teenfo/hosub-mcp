@@ -162,34 +162,61 @@ class KiwoomClient:
             log.warning("키움 API 한도 초과(429) — 자동 감속: %.2f rps",
                         self._limiter.effective_rps)
 
-    async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N") -> dict:
+    async def _request(self, path: str, tr_id: str, body: dict,
+                       cont: str = "N", next_key: str = "") -> tuple[dict, str]:
+        """호출 + 연속조회 키 반환 → (응답 JSON, 다음 페이지 키).
+
+        키움은 이어질 데이터가 있으면 응답 헤더에 cont-yn=Y 와 next-key 를 준다.
+        cont-yn 이 Y 가 아니면 빈 문자열을 돌려 호출부가 루프를 끝내게 한다.
+        """
         await self._limiter.wait()
         token = await token_manager.get()
+        headers = {
+            "authorization": f"Bearer {token}",
+            "api-id": tr_id,
+            "cont-yn": cont,
+        }
+        if next_key:
+            headers["next-key"] = next_key
         # base URL 은 호출 시점에 읽는다 — 설정 화면에서 mock/real 전환 즉시 반영
         try:
             resp = await self._http.post(
-                settings.REST_BASE + path,
-                json=body,
-                headers={
-                    "authorization": f"Bearer {token}",
-                    "api-id": tr_id,
-                    "cont-yn": cont,
-                },
+                settings.REST_BASE + path, json=body, headers=headers,
             )
         except httpx.HTTPError:
             self._record(599)               # 네트워크 실패도 부하 지표에 포함
             raise
         self._record(resp.status_code)
         resp.raise_for_status()
-        return resp.json()
+        nxt = ""
+        if str(resp.headers.get("cont-yn", "N")).upper() == "Y":
+            nxt = resp.headers.get("next-key", "") or ""
+        return resp.json(), nxt
+
+    async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N") -> dict:
+        data, _ = await self._request(path, tr_id, body, cont)
+        return data
 
     # --- 시세 ---
+    def _minute_body(self, symbol: str, interval: int) -> dict:
+        return {"stk_cd": symbol, "tic_scope": str(interval), "upd_stkpc_tp": "1"}
+
     async def minute_chart(self, symbol: str, interval: int = 1) -> dict:
-        """분봉차트. interval: 1/3/5/... 분."""
+        """분봉차트 최신 1페이지(900봉 ≈ 2.4거래일). interval: 1/3/5/... 분."""
         return await self._call(
-            PATH_CHART,
-            TR_MINUTE_CHART,
-            {"stk_cd": symbol, "tic_scope": str(interval), "upd_stkpc_tp": "1"},
+            PATH_CHART, TR_MINUTE_CHART, self._minute_body(symbol, interval),
+        )
+
+    async def minute_chart_page(self, symbol: str, interval: int = 1,
+                                next_key: str = "") -> tuple[dict, str]:
+        """분봉차트 연속조회 1페이지 → (응답, 다음 페이지 키).
+
+        next_key 가 비면 최신 페이지, 있으면 그보다 과거 900봉을 받는다.
+        더 이상 과거가 없으면 두 번째 값이 빈 문자열이다.
+        """
+        return await self._request(
+            PATH_CHART, TR_MINUTE_CHART, self._minute_body(symbol, interval),
+            cont="Y" if next_key else "N", next_key=next_key,
         )
 
     async def daily_chart(self, symbol: str, base_date: str = "") -> dict:

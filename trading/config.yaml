@@ -117,6 +117,16 @@ collection:
   # 백테스트 리포트(15:40)보다 앞서야 완결된 데이터로 평가된다.
   eod_backfill: true
   eod_backfill_after: "15:35"
+  # 신규 편입 종목 심층 백필(연속조회) — 종목당 1회, 편입 직후.
+  # 분봉 API 는 언제 부르든 '최근 900봉(≈2.4거래일)'만 준다. 마감 후로 미뤄도
+  # 과거가 늘지 않으므로, 응답 헤더의 next-key 를 물고 되부르는 연속조회로만
+  # 과거를 확장할 수 있다. 5페이지 ≈ 4,500봉 ≈ 12거래일이라 편입 당일부터
+  # backtest.min_days 를 채운다. 완료 여부는 market.db 의 deep_backfill 에 남아
+  # 감시목록에서 빠졌다 재편입돼도 다시 부르지 않는다.
+  deep_backfill: true
+  deep_backfill_pages: 5        # 종목당 최대 페이지(1페이지=900봉)
+  deep_backfill_per_cycle: 3    # 장중 사이클당 종목 수 상한(레이트리밋 방어)
+  deep_backfill_eod_max: 30     # 마감 후 회수 상한(장중 실패·상한 초과분)
   roster_enabled: true
   roster_retention_days: 30     # 마지막 감시 후 이 기간까지 계속 수집(초과 시 중단)
   roster_backfill_max: 200      # 이탈 종목 1회 백필 상한(레이트리밋 방어)
