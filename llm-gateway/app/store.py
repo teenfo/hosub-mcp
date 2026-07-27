@@ -61,7 +61,46 @@ CREATE TABLE IF NOT EXISTS model_requests (
   decided_at   TEXT,
   finished_at  TEXT
 );
+
+-- 역할 런타임 오버라이드. roles.yaml 이 기본값, 이 표가 그 위에 얹힌다.
+-- 개별 컬럼이 아니라 fields_json 인 이유: 나중에 덮어쓸 수 있는 필드를 늘려도
+-- 스키마가 안 바뀐다. 검증은 SQL 이 아니라 config.validate_role_fields 가 한다.
+CREATE TABLE IF NOT EXISTS role_overrides (
+  role        TEXT PRIMARY KEY,
+  origin      TEXT NOT NULL,           -- yaml(=기존 역할 덮어쓰기) | db(=신규 역할)
+  fields_json TEXT NOT NULL,
+  note        TEXT,
+  updated_by  TEXT,
+  updated_at  TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+
+-- 관리 작업 감사 로그. 대시보드 감사와 별개로 게이트웨이가 직접 남긴다
+-- (MCP·curl 로도 들어올 수 있으므로 두 기록은 다른 질문에 답한다).
+CREATE TABLE IF NOT EXISTS admin_audit (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts          TEXT NOT NULL,
+  actor       TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  target      TEXT,
+  detail_json TEXT,
+  outcome     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_audit_ts ON admin_audit(ts DESC);
+
+CREATE INDEX IF NOT EXISTS idx_usage_model_ts ON usage(model, ts);
 """
+
+# 기존 표에 **덧붙이는** 컬럼. CREATE TABLE IF NOT EXISTS 로는 못 하므로
+# _migrate() 가 PRAGMA 로 확인 후 ALTER TABLE 한다.
+# 추가 전용·NULL 기본값만 허용한다(재작성·삭제 금지) — SQLite 의 ADD COLUMN 은
+# 메타데이터 연산이라 WAL 라이브 DB 에서 안전하다.
+_ADD_COLUMNS = (
+    # 잡을 자기완결형으로: 실행 시점이 아니라 **생성 시점**의 역할 설정을 쓴다.
+    # 안 그러면 역할 모델을 바꿨을 때 큐에 있던 잡이 옛 모델 + 새 옵션으로 돈다.
+    ("jobs", "options_json", "TEXT"),
+    ("jobs", "timeout_s", "INTEGER"),
+)
 
 MR_PENDING = "pending"
 MR_APPROVED = "approved"
@@ -82,9 +121,23 @@ def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _loads_dict(text) -> dict | None:
+    """JSON 매핑으로만 받는다. 손상된 값이 잡을 죽이지 않도록 None 으로 떨어뜨린다."""
+    if not text:
+        return None
+    try:
+        v = json.loads(text)
+    except ValueError:
+        return None
+    return v if isinstance(v, dict) else None
+
+
 def _row_to_job(row: sqlite3.Row) -> dict:
     d = dict(row)
-    d["metadata"] = json.loads(d.pop("metadata_json") or "{}")
+    d["metadata"] = _loads_dict(d.pop("metadata_json", None)) or {}
+    # 옛 행에는 스냅샷 컬럼이 없다(NULL) — 호출부가 "없으면 live 역할"로 폴백한다
+    if "options_json" in d:
+        d["options"] = _loads_dict(d.pop("options_json"))
     return d
 
 
@@ -95,12 +148,28 @@ class Store:
         self._lock = threading.Lock()
         with self._lock, self._connect() as conn:
             conn.executescript(_SCHEMA)
+            self._migrate(conn)
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=15)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
+
+    @staticmethod
+    def _migrate(conn: sqlite3.Connection) -> None:
+        """기존 DB 에 신규 컬럼을 덧붙인다(추가 전용).
+
+        운영 DB 에는 이미 잡·사용량이 쌓여 있어 재생성이 불가능하다. 표를
+        다시 쓰지 않고 ALTER TABLE ADD COLUMN 만 쓰므로 기존 행은 그대로 남고
+        새 컬럼은 NULL 이 된다.
+        """
+        for table, column, decl in _ADD_COLUMNS:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if not cols:
+                continue  # 표 자체가 없다 = _SCHEMA 가 만들 것
+            if column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
     # --- 복구 ---
     def recover_running(self) -> int:
@@ -124,17 +193,27 @@ class Store:
         system: str | None,
         priority: int = 0,
         metadata: dict | None = None,
+        options: dict | None = None,
+        timeout: int | None = None,
     ) -> dict:
+        """잡 하나를 큐에 넣는다.
+
+        model 뿐 아니라 options·timeout 도 **생성 시점에 스냅샷**한다. 역할의
+        모델을 런타임에 바꿀 수 있게 되면서, 큐에 있던 잡이 옛 모델 + 새 옵션으로
+        도는 조용한 오염 경로가 생기기 때문이다. 잡은 자기완결형이어야 한다.
+        """
         job_id = secrets.token_hex(6)
         now = utcnow()
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO jobs (id, service, role, model, lane, status, priority,"
-                " prompt, system, metadata_json, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                " prompt, system, metadata_json, created_at, options_json, timeout_s)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     job_id, service, role, model, lane, QUEUED, priority,
                     prompt, system, json.dumps(metadata or {}, ensure_ascii=False), now,
+                    json.dumps(options, ensure_ascii=False) if options is not None else None,
+                    int(timeout) if timeout is not None else None,
                 ),
             )
         return self.get_job(job_id)
@@ -370,6 +449,63 @@ class Store:
         with self._lock, self._connect() as conn:
             rows = conn.execute("SELECT model, status FROM model_requests").fetchall()
         return {r["model"]: r["status"] for r in rows}
+
+    # --- 역할 오버라이드 ---
+    def list_role_overrides(self) -> list[dict]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM role_overrides ORDER BY role"
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["fields"] = _loads_dict(d.pop("fields_json")) or {}
+            out.append(d)
+        return out
+
+    def set_role_override(self, role: str, *, origin: str, fields: dict,
+                          note: str | None = None,
+                          updated_by: str | None = None) -> None:
+        now = utcnow()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO role_overrides (role, origin, fields_json, note,"
+                " updated_by, updated_at, created_at) VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(role) DO UPDATE SET origin=excluded.origin,"
+                " fields_json=excluded.fields_json, note=excluded.note,"
+                " updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+                (role, origin, json.dumps(fields, ensure_ascii=False), note,
+                 updated_by, now, now),
+            )
+
+    def delete_role_override(self, role: str) -> bool:
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("DELETE FROM role_overrides WHERE role=?", (role,))
+            return cur.rowcount == 1
+
+    # --- 감사 로그 ---
+    def record_audit(self, *, actor: str, action: str, target: str | None = None,
+                     detail: dict | None = None, outcome: str = "ok") -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO admin_audit (ts, actor, action, target, detail_json,"
+                " outcome) VALUES (?,?,?,?,?,?)",
+                (utcnow(), actor, action, target,
+                 json.dumps(detail or {}, ensure_ascii=False), outcome),
+            )
+
+    def list_audit(self, limit: int = 50) -> list[dict]:
+        limit = max(1, min(int(limit), 200))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM admin_audit ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r)
+            d["detail"] = _loads_dict(d.pop("detail_json")) or {}
+            out.append(d)
+        return out
 
     def purge_old(self, days: int = 30) -> dict:
         """오래된 잡·사용량 정리. 반환: {"jobs": n, "usage": n}

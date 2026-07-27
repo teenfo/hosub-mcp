@@ -61,6 +61,37 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `POST /v1/models/requests` | 승인/거부 — `{"model":…, "action":"approve"\|"reject"}` (admin 서비스만) |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
 
+**관리 전용** — `127.0.0.1:8603` 으로만 닿는다. Caddy 가 공개 경로에서 404 로 잘라내고,
+앱 안에서도 `admin: true` 서비스만 통과시킨다(두 겹).
+
+| 엔드포인트 | 설명 |
+|---|---|
+| `GET /v1/admin/roles` | 역할별 유효값 + 기본값 대비 차이 + roles.yaml 스니펫 |
+| `POST /v1/admin/roles` | 역할 오버라이드 저장 — `{"role":…, "fields":{"model":…}}`. 없는 이름이면 신규 역할 |
+| `DELETE /v1/admin/roles?role=` | 오버라이드 해제(기본값 복귀). 신규 역할이면 삭제 |
+| `GET /v1/admin/audit` | 관리 작업 감사 로그 |
+
+## 역할 모델을 재배포 없이 바꾼다
+
+`roles.yaml` 은 **기본값**이고, 대시보드에서 건 오버라이드가 그 위에 얹힌다.
+모델 교체에 PR → 머지 → 배포가 필요 없다.
+
+지킨 것:
+
+- **잡은 자기완결형이다.** 모델뿐 아니라 `options`·`timeout` 도 생성 시점에 못박는다.
+  큐에 있던 잡이 "옛 모델 + 새 옵션" 으로 도는 일이 없다
+- **`kind`·`system` 은 못 바꾼다.** `kind` 를 embed 로 바꾸면 그 역할이 큐와 메모리
+  예산을 우회하는 동기 경로로 넘어가고, `system` 은 "프롬프트는 호출자 소유" 와 충돌한다
+- **잘못된 오버라이드 행이 기동을 막지 않는다.** 건너뛰고 `/v1/status.overrides.invalid` 로 알린다
+- **드리프트가 보인다.** `/v1/status.overrides.count` 가 0보다 크면 프로덕션이 레포와
+  다르다는 뜻이다. `GET /v1/admin/roles` 의 `yaml_snippet` 을 `roles.yaml` 에 반영하면 0으로 돌아온다
+
+> **롤백 레버.** 오버라이드는 코드가 아니라 데이터다. 이상하면
+> `sqlite3 /data/llm-gateway/llmgw.db "DELETE FROM role_overrides;"` 후
+> `sudo systemctl restart llm-gateway` — 순수 `roles.yaml` 동작으로 즉시 복귀한다.
+>
+> ⚠️ 뒤집어 말하면 **DB 를 백업본으로 되돌리면 모델 선택도 조용히 되돌아간다.**
+
 ## 새 소비자 추가 (예: BCL)
 
 1. `config/services.yaml` 에 블록 추가

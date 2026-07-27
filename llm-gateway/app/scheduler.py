@@ -23,7 +23,7 @@ import asyncio
 import logging
 import time
 
-from .config import RoleConfig
+from .config import RoleConfig, model_matches
 from .notify import SlackNotifier
 from .ollama import BackendError, OllamaClient
 from .store import (
@@ -47,11 +47,9 @@ LANES = ("interactive", "batch")
 DEAD_STATUSES = {MR_REJECTED, MR_FAILED}
 
 
-def model_matches(wanted: str, available: str) -> bool:
-    """태그 표기 차이를 흡수한다. "qwen2.5" 는 "qwen2.5:latest" 와 같다."""
-    if wanted == available:
-        return True
-    return available.startswith(wanted + ":") or wanted.startswith(available + ":")
+# model_matches 는 config 로 옮겼다(역할 조회·삭제 차단도 같은 규칙을 써야 한다).
+# 기존 임포트 경로를 깨지 않도록 여기서 재수출한다.
+__all__ = ["LANES", "DEAD_STATUSES", "Scheduler", "model_matches"]
 
 
 class Scheduler:
@@ -93,6 +91,8 @@ class Scheduler:
         # 맥이 보유한 모델. None = 아직 모름 → 아무 잡도 건너뛰지 않는다
         # (백엔드가 잠깐 죽었다고 큐 전체를 멈추면 안 되기 때문)
         self._available: list[str] | None = None
+        # 마지막으로 읽은 모델 상세(크기·양자화). 백엔드가 죽어도 직전 값을 남긴다.
+        self._models_detail: list[dict] = []
         # 설치 대기 중이라 건너뛴 모델들 (상태 표시용)
         self._pulling: dict[str, int] = {}
         # _triage_missing(동기)이 만든 알림 대기열 — _models_loop 에서 비운다
@@ -197,6 +197,10 @@ class Scheduler:
     @property
     def available_models(self) -> list[str] | None:
         return self._available
+
+    @property
+    def models_detail(self) -> list[dict]:
+        return list(self._models_detail)
 
     def pulling_snapshot(self) -> dict[str, int]:
         return dict(self._pulling)
@@ -315,7 +319,7 @@ class Scheduler:
 
     async def _refresh_models(self) -> None:
         try:
-            self._available = await self.client.tags()
+            detail = await self.client.tags_detailed()
         except BackendError as exc:
             # 목록을 모르면 "없다"고 단정하지 않는다. 백엔드가 잠깐 죽었다고
             # 큐 전체를 설치 대기로 돌려버리면 안 되기 때문.
@@ -325,6 +329,12 @@ class Scheduler:
             # 전이 시점에만 한 번 알린다(30초마다 알리면 아무도 안 본다).
             await self.notifier.backend_offline(self.client.base_url, str(exc))
         else:
+            self._available = [d["name"] for d in detail]
+            self._models_detail = detail
+            # 크기를 몰라 20GB 로 가정하는 일이 줄어든다(config.model_size_gb 4순위).
+            self.roles.set_measured_sizes(
+                {d["name"]: d["size_gb"] for d in detail if d.get("size_gb")}
+            )
             await self.notifier.backend_online(self.client.base_url)
 
     def _triage_missing(self) -> None:
@@ -408,19 +418,29 @@ class Scheduler:
         self._notify(job["id"])
 
     async def _run(self, lane: str, job: dict) -> None:
-        role = self.roles.role(job["role"])
         model = job["model"]
         size = self.roles.model_size_gb(model)
         self._running[lane] = (job["id"], model, size)
         self._last_model = model
         started = time.monotonic()
+        # 잡은 자기완결형이다 — 생성 시점의 options/timeout 을 쓴다.
+        # 역할을 실행 시점에 다시 읽으면 큐에 있던 잡이 "옛 모델 + 새 옵션" 으로
+        # 돈다(모델은 이미 job 에 스냅샷돼 있으므로). 스냅샷이 없는 옛 행만
+        # 현재 역할로 폴백한다.
+        role = self.roles.role(job["role"])
+        options = job.get("options")
+        if options is None and role is not None:
+            options = role.options
+        timeout = job.get("timeout_s")
+        if timeout is None:
+            timeout = role.timeout if role else 180
         try:
             result = await self.client.generate(
                 model=model,
                 prompt=job["prompt"],
                 system=job["system"],
-                options=(role.options if role else None),
-                timeout=(role.timeout if role else 180),
+                options=options,
+                timeout=timeout,
             )
         except BackendError as exc:
             await self._handle_failure(job, exc)

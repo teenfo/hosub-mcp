@@ -34,7 +34,9 @@ ROLES_RAW = {
 
 SERVICES_RAW = {
     "services": {
-        "alpha": {"token_env": "TOK_ALPHA", "allow_roles": ["*"], "rate_limit_per_min": 100},
+        # alpha = 운영 주체(hosub 대응). 관리 API·모델 승인을 쓸 수 있다.
+        "alpha": {"token_env": "TOK_ALPHA", "allow_roles": ["*"],
+                  "rate_limit_per_min": 100, "admin": True},
         "beta":  {"token_env": "TOK_BETA", "allow_roles": ["fast"], "rate_limit_per_min": 100},
         "slow":  {"token_env": "TOK_SLOW", "allow_roles": ["*"], "rate_limit_per_min": 2},
     }
@@ -74,6 +76,10 @@ class FakeOllama:
         self.embed_calls: list[tuple] = []
         self.embed_fail = False
         self.embed_delay = 0.0
+        # delete 제어 + tags_detailed 가 돌려줄 디스크 크기
+        self.deleted: list[str] = []
+        self.delete_fail = False
+        self.model_disk_gb: dict[str, float] = {}
 
     async def generate(self, *, model, prompt, system=None, options=None,
                        timeout=180, client=None) -> GenerateResult:
@@ -103,10 +109,27 @@ class FakeOllama:
         return EmbedResult(embeddings=[[0.1, 0.2, 0.3] for _ in inputs],
                            prompt_eval_count=len(inputs), duration_ms=3)
 
-    async def tags(self, timeout: int = 5) -> list[str]:
+    async def tags_detailed(self, timeout: int = 5) -> list[dict]:
         if self.tags_fail:
             raise BackendError("백엔드 다운")
-        return sorted(self._models)
+        return [
+            {"name": n, "size_bytes": None,
+             "size_gb": self.model_disk_gb.get(n),
+             "parameter_size": None, "quantization": None,
+             "family": None, "modified_at": None}
+            for n in sorted(self._models)
+        ]
+
+    async def tags(self, timeout: int = 5) -> list[str]:
+        return [m["name"] for m in await self.tags_detailed(timeout=timeout)]
+
+    async def delete(self, model: str, *, timeout: int = 30) -> bool:
+        if self.delete_fail:
+            raise BackendError("가짜 삭제 실패", retryable=False)
+        self.deleted.append(model)
+        before = len(self._models)
+        self._models = [m for m in self._models if m != model]
+        return len(self._models) < before
 
     async def pull(self, model, *, progress_cb=None, timeout: int = 3600) -> None:
         self.pulled.append(model)

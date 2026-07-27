@@ -18,7 +18,14 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from .auth import RateLimiter, authenticate
-from .config import RoleConfig, ServiceConfig
+from .config import (
+    OVERRIDABLE_FIELDS,
+    ROLE_NAME_RE,
+    ConfigError,
+    RoleConfig,
+    ServiceConfig,
+    validate_role_fields,
+)
 from .notify import SlackNotifier
 from .ollama import BackendError, InputTooLong, OllamaClient
 from .scheduler import LANES, Scheduler
@@ -104,6 +111,9 @@ def build_app(
     roles = roles or RoleConfig.load(cfg_dir / "roles.yaml")
     services = services or ServiceConfig.load(cfg_dir / "services.yaml")
     store = store or Store(os.environ.get("LLMGW_DB", "/data/llmgw.db"))
+    # roles.yaml 은 기본값, DB 의 런타임 오버라이드가 그 위에 얹힌다.
+    # 주입된 테스트 픽스처도 같은 경로를 타게 여기서 한 번만 적용한다.
+    roles.apply_overrides(store.list_role_overrides())
     client = client or OllamaClient(roles.backend.base_url, roles.backend.keep_alive)
     scheduler = scheduler or Scheduler(
         store, roles, client,
@@ -141,6 +151,28 @@ def build_app(
                 status_code=429,
             )
         return svc, None
+
+    def _require_admin(request: Request):
+        """관리 엔드포인트 게이트.
+
+        Caddy 가 /v1/admin/* 을 공개 경로에서 404 로 막지만 프록시만 믿지 않는다
+        (설정 실수·직접 접근이 있을 수 있다). 두 겹 다 있어야 한다.
+        """
+        svc, err = _auth(request)
+        if err:
+            return None, err
+        if not svc.admin:
+            log.warning("관리 API 거부: %s %s (service=%s)",
+                        request.method, request.url.path, svc.name)
+            return None, JSONResponse(
+                {"error": "forbidden", "detail": "관리 권한이 없는 서비스입니다"},
+                status_code=403,
+            )
+        return svc, None
+
+    def _reload_overrides() -> list[dict]:
+        """DB → 유효 역할 맵. 쓰기 직후 항상 이 한 경로로만 반영한다."""
+        return roles.apply_overrides(store.list_role_overrides())
 
     # --- 엔드포인트 ---
     async def healthz(request: Request):
@@ -199,10 +231,14 @@ def build_app(
         except (TypeError, ValueError):
             priority = 0
 
+        # 모델뿐 아니라 options·timeout 도 지금 값으로 못박는다. 역할의 모델을
+        # 런타임에 바꿀 수 있으므로, 큐에 남아 있던 잡이 "옛 모델 + 새 옵션" 으로
+        # 도는 일이 없어야 한다.
         job = store.create_job(
             service=svc.name, role=role_name, model=role.model, lane=role.lane,
             prompt=prompt, system=system, priority=priority,
             metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+            options=dict(role.options), timeout=role.timeout,
         )
         await scheduler.wait_for(job["id"], wait)
         job = store.get_job(job["id"])
@@ -439,6 +475,139 @@ def build_app(
         log.info("모델 요청 %s → %s (by %s)", model, action, svc.name)
         return JSONResponse({"request": store.get_model_request(model)})
 
+    # --- 관리 API (/v1/admin/*) ---
+    #
+    # Caddy 는 이 접두사를 공개 경로에서 404 로 잘라낸다 — 즉 127.0.0.1:8603 으로만
+    # 닿는다. 토큰 하나로 "모든 역할을 엉뚱한 모델로" 가 가능해지는 것을 구조로 막는다.
+    async def admin_list_roles(request: Request):
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        views = []
+        for name in roles.role_names:
+            v = roles.role_view(name)
+            v["model_ready"] = scheduler.model_ready(v["model"])
+            v["est_size_gb"] = roles.model_size_gb(v["model"])
+            v["yaml_snippet"] = roles.yaml_snippet(name)
+            views.append(v)
+        return JSONResponse({
+            "roles": views,
+            "overrides": roles.override_summary(),
+            "overridable_fields": list(OVERRIDABLE_FIELDS),
+            "lanes": list(LANES),
+        })
+
+    async def admin_set_role(request: Request):
+        """역할 오버라이드 저장(모델 교체 등). 없는 역할이면 신규 생성(origin=db)."""
+        svc, err = _require_admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        name = str(body.get("role") or "").strip()
+        if not name:
+            return JSONResponse(
+                {"error": "invalid_request", "detail": "role 이 필요합니다"},
+                status_code=400,
+            )
+        fields = body.get("fields")
+        base = roles.base_role(name)
+        existing = roles.role(name)
+        # roles.yaml 역할이면 부분 덮어쓰기, 없는 이름이면 새 역할(model 필수)
+        origin = "yaml" if base is not None else "db"
+        if origin == "db" and not ROLE_NAME_RE.match(name):
+            return JSONResponse(
+                {"error": "invalid_role_name",
+                 "detail": "새 역할 이름은 소문자·숫자·밑줄 2~32자여야 합니다"},
+                status_code=400,
+            )
+        if origin == "db" and existing is not None and not roles.is_db_role(name):
+            # 이론상 도달 불가지만, 이름 충돌로 YAML 역할을 덮어쓰는 일은 막는다
+            return JSONResponse({"error": "conflict", "role": name}, status_code=409)
+        try:
+            clean = validate_role_fields(
+                fields, require_model=(origin == "db" and existing is None),
+                allow_kind=(origin == "db"),
+            )
+            if origin == "db" and existing is not None:
+                # kind 는 생성 시에만 정한다 — 나중에 generate→embed 로 바뀌면
+                # 그 역할이 큐와 메모리 예산을 우회하는 동기 경로로 넘어간다.
+                clean.pop("kind", None)
+        except ConfigError as exc:
+            return JSONResponse(
+                {"error": "invalid_fields", "detail": str(exc)}, status_code=400
+            )
+
+        # **부분 수정은 병합이다.** 보낸 필드만 저장하면 model 을 바꾼 뒤 timeout 만
+        # 다시 바꿨을 때 모델 교체가 조용히 사라진다.
+        prev = next((o for o in store.list_role_overrides() if o["role"] == name), None)
+        merged = dict((prev or {}).get("fields") or {})
+        merged.update(clean)
+
+        if origin == "yaml":
+            # 기본값과 같아진 필드는 오버라이드가 아니다. 남겨 두면
+            # overridden_fields 와 드리프트 배지가 "바뀐 게 있다"고 거짓말한다.
+            merged = {k: v for k, v in merged.items()
+                      if v != getattr(base, k, object())}
+
+        if origin == "yaml" and not merged:
+            # 전부 기본값으로 되돌아왔다 = 오버라이드 없음
+            store.delete_role_override(name)
+        else:
+            store.set_role_override(
+                name, origin=origin, fields=merged,
+                note=(str(body.get("note")) if body.get("note") else None),
+                updated_by=svc.name,
+            )
+        clean = merged
+        invalid = _reload_overrides()
+        view = roles.role_view(name)
+        store.record_audit(actor=svc.name, action="role_override", target=name,
+                           detail={"origin": origin, "fields": clean})
+        log.info("역할 오버라이드 %s ← %s (by %s)", name, clean, svc.name)
+        out = {"role": view, "overrides": roles.override_summary(),
+               "invalid": invalid}
+        # 바꿨는데 아무 일도 안 일어나는 상황을 막는다 — 미설치면 UI 가 설치를 권한다
+        if view and not scheduler.model_ready(view["model"]):
+            out["install_required"] = {
+                "model": view["model"],
+                "est_size_gb": roles.model_size_gb(view["model"]),
+            }
+        return JSONResponse(out)
+
+    async def admin_revert_role(request: Request):
+        """오버라이드 제거 → roles.yaml 기본값 복귀. db 역할이면 역할 자체가 사라진다."""
+        svc, err = _require_admin(request)
+        if err:
+            return err
+        name = str(request.query_params.get("role") or "").strip()
+        if not roles.has_override(name):
+            return JSONResponse(
+                {"error": "not_found", "detail": "오버라이드가 없습니다", "role": name},
+                status_code=404,
+            )
+        was_db = roles.is_db_role(name)
+        store.delete_role_override(name)
+        _reload_overrides()
+        store.record_audit(actor=svc.name,
+                           action="role_delete" if was_db else "role_revert",
+                           target=name, detail={"origin": "db" if was_db else "yaml"})
+        log.info("역할 오버라이드 해제 %s (by %s)", name, svc.name)
+        return JSONResponse({
+            "role": roles.role_view(name),
+            "removed": was_db,
+            "overrides": roles.override_summary(),
+        })
+
+    async def admin_audit(request: Request):
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        try:
+            limit = int(request.query_params.get("limit", 50))
+        except ValueError:
+            limit = 50
+        return JSONResponse({"audit": store.list_audit(limit)})
+
     async def status(request: Request):
         svc, err = _auth(request)
         if err:
@@ -478,6 +647,9 @@ def build_app(
             "running": scheduler.running_snapshot(),
             "mem_budget_gb": roles.mem_budget_gb,
             "roles": role_status,
+            # 0 보다 크면 프로덕션이 roles.yaml 과 다르다는 뜻 — 대시보드가 배너를 띄운다.
+            # 이게 없으면 반년 뒤 레포와 실제 동작이 왜 다른지 아무도 설명 못 한다.
+            "overrides": roles.override_summary(),
             "usage": store.usage_summary(),
             "model_requests": {
                 "pending": len(store.list_model_requests(MR_PENDING)),
@@ -497,6 +669,11 @@ def build_app(
         Route("/v1/models/requests", list_model_requests, methods=["GET"]),
         Route("/v1/models/requests", decide_model_request, methods=["POST"]),
         Route("/v1/integration", integration_doc, methods=["GET"]),
+        # 관리 전용 — Caddy 가 공개 경로에서 404 로 잘라낸다(deploy/Caddyfile)
+        Route("/v1/admin/roles", admin_list_roles, methods=["GET"]),
+        Route("/v1/admin/roles", admin_set_role, methods=["POST"]),
+        Route("/v1/admin/roles", admin_revert_role, methods=["DELETE"]),
+        Route("/v1/admin/audit", admin_audit, methods=["GET"]),
     ]
 
     @asynccontextmanager
