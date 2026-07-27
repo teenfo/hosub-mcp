@@ -69,6 +69,8 @@ async def test_collect_only_skipped_but_backfilled(monkeypatch):
     monkeypatch.setattr(settings, "WATCHLIST",
                         {"005930": "삼성전자", "006400": "삼성SDI"})
     monkeypatch.setattr(settings, "COLLECT_ONLY", {"006400"})
+    monkeypatch.setitem(settings.CONFIG, "collection",
+                        {"realtime_trading_only": True})
 
     async def _noop_sync():
         return None
@@ -90,8 +92,10 @@ async def test_collect_only_skipped_but_backfilled(monkeypatch):
     monkeypatch.setattr(engine_mod.rules, "evaluate_all", lambda df, cfg, prev: [])
 
     await eng.run_once()
-    assert set(backfilled) == {"005930", "006400"}   # 둘 다 데이터 수집
-    assert evaluated == ["005930"]                    # 매매 평가는 006400 제외
+    # 장중 실시간 백필은 매매 대상만 — 수집전용은 마감 백필(eod_backfill_once)에서
+    # 하루치를 통째로 받는다(분봉 API 1회 = 900봉 ≈ 2.3거래일).
+    assert backfilled == ["005930"]
+    assert evaluated == ["005930"]                    # 매매 평가도 006400 제외
 
 
 @pytest.mark.asyncio

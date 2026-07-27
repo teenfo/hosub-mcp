@@ -127,3 +127,66 @@ def test_config_wires_active_auto_watch():
 def test_config_gainers_cover_both_markets():
     mk = settings.CONFIG["gainers"].get("markets")
     assert mk and "001" in mk and "101" in mk   # 코스피 + 코스닥
+
+
+# --- ③ 수집전용은 장중 실시간 백필에서 제외, 마감 후 일괄 ---
+# 매매하지 않는 종목을 30초마다 부를 이유가 없다. 분봉 API 가 1회에 900봉
+# (≈2.3거래일)을 주므로 마감 후 한 번이면 그날치가 통째로 들어온다.
+
+def test_realtime_targets_exclude_collect_only(monkeypatch):
+    from app.signals.engine import SignalEngine
+
+    monkeypatch.setattr(settings, "WATCHLIST",
+                        {"000001": "매매", "000002": "매매", "000003": "수집"})
+    monkeypatch.setattr(settings, "COLLECT_ONLY", {"000003"})
+    monkeypatch.setitem(settings.CONFIG, "collection",
+                        {"realtime_trading_only": True})
+    assert SignalEngine._collect_targets() == ["000001", "000002"]
+
+    # 끄면 종전대로 전체
+    monkeypatch.setitem(settings.CONFIG, "collection",
+                        {"realtime_trading_only": False})
+    assert set(SignalEngine._collect_targets()) == {"000001", "000002", "000003"}
+
+
+@pytest.mark.asyncio
+async def test_eod_backfill_covers_everything(monkeypatch):
+    """마감 백필은 수집전용을 포함한 감시목록 전체를 훑는다."""
+    from app.signals import engine as engine_mod
+    from app.signals.engine import SignalEngine
+
+    monkeypatch.setattr(settings, "WATCHLIST",
+                        {"000001": "매매", "000002": "수집"})
+    monkeypatch.setattr(settings, "COLLECT_ONLY", {"000002"})
+    called = []
+
+    async def fake(sym):
+        called.append(sym)
+
+    monkeypatch.setattr(engine_mod.collector, "backfill_minutes", fake)
+    assert await SignalEngine().eod_backfill_once() == 2
+    assert set(called) == {"000001", "000002"}
+
+
+@pytest.mark.asyncio
+async def test_eod_backfill_survives_symbol_failure(monkeypatch):
+    """한 종목이 실패해도 나머지는 계속 — 마감 확정이 통째로 날아가지 않게."""
+    from app.signals import engine as engine_mod
+    from app.signals.engine import SignalEngine
+
+    monkeypatch.setattr(settings, "WATCHLIST", {"000001": "a", "000002": "b"})
+    monkeypatch.setattr(settings, "COLLECT_ONLY", set())
+
+    async def boom(sym):
+        if sym == "000001":
+            raise RuntimeError("조회 실패")
+
+    monkeypatch.setattr(engine_mod.collector, "backfill_minutes", boom)
+    assert await SignalEngine().eod_backfill_once() == 1
+
+
+def test_config_eod_backfill_precedes_backtest_report():
+    """마감 백필이 백테스트 리포트보다 앞서야 완결된 데이터로 평가된다."""
+    c = settings.CONFIG
+    assert c["collection"]["eod_backfill"] is True
+    assert c["collection"]["eod_backfill_after"] < c["backtest"]["run_after"]

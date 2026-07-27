@@ -139,6 +139,7 @@ async def lifespan(app: FastAPI):
     tasks = [
         asyncio.create_task(engine.loop()),
         asyncio.create_task(engine.roster_loop()),   # 감시목록 이탈 종목 수집 연속성
+        asyncio.create_task(engine.eod_backfill_loop()),  # 마감 후 그날 분봉 확정
         asyncio.create_task(_feed_starter()),
         asyncio.create_task(scanner.loop()),
         asyncio.create_task(discovery.loop()),
