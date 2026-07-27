@@ -135,6 +135,54 @@ def _ic(df: pd.DataFrame) -> list[dict]:
     return sorted(out, key=lambda r: -abs(r["t_stat"]))
 
 
+TREND_DAYS = 20        # 사전 국면 판정에 쓰는 직전 시장 추세 구간
+MIN_REGIME_DAYS = 20   # 이보다 짧은 국면은 비교 대상으로 삼지 않는다
+
+
+def market_daily(df: pd.DataFrame) -> pd.Series:
+    """날짜별 시장 수익률(전 종목 횡단면 평균 일간 등락률)."""
+    if "ret_1d" not in df.columns:
+        return pd.Series(dtype=float)
+    return df.groupby("date")["ret_1d"].mean().sort_index()
+
+
+def label_regimes(df: pd.DataFrame) -> pd.DataFrame:
+    """두 가지 국면 라벨을 붙인다 — 목적이 다르다.
+
+    trend  : 직전 TREND_DAYS 일 시장 누적 등락의 부호. **그날 이미 알 수 있는**
+             정보라 실전 적용이 가능하다.
+    fwd_dir: 익일 시장이 실제로 올랐는가. 사전에 알 수 없으므로 매매에는 못
+             쓰지만, 어떤 피처의 예측력이 **알파인지 단순 저베타 효과인지**를
+             가르는 데 필요하다. 저베타라면 시장이 오르는 날 부호가 뒤집힌다.
+    """
+    out = df.copy()
+    m = market_daily(df)
+    trail = m.rolling(TREND_DAYS).sum()
+    out["trend"] = out["date"].map(
+        trail.apply(lambda x: "상승추세" if x > 0 else "하락추세" if x < 0 else None))
+    fwd_mkt = df.groupby("date")["fwd_1"].mean()
+    out["fwd_dir"] = out["date"].map(
+        fwd_mkt.apply(lambda x: "익일 상승" if x > 0 else "익일 하락"))
+    return out
+
+
+def _split(df: pd.DataFrame, col: str, cost_pct: float) -> dict:
+    """국면별 재측정 — 매수 가능 종목만 본다(판단에 쓰이는 표본)."""
+    out = {}
+    for label, g in df.dropna(subset=[col]).groupby(col):
+        days = int(g["date"].nunique())
+        if days < MIN_REGIME_DAYS:
+            continue
+        out[str(label)] = {
+            "days": days,
+            "rows": len(g),
+            "market_pct": round(float(g["fwd_1"].mean()), 3),
+            "buckets": _buckets(g, cost_pct),
+            "ic": _ic(g),
+        }
+    return out
+
+
 def analyze(df: pd.DataFrame, cost_pct: float) -> dict:
     """긴 표 → 버킷 성적 + IC. 순수 함수(테스트 용이)."""
     if df.empty:
@@ -142,7 +190,10 @@ def analyze(df: pd.DataFrame, cost_pct: float) -> dict:
     # 시장 효과 제거 — 같은 날 전 종목 평균을 뺀다
     df = df.copy()
     df["excess_1"] = df["fwd_1"] - df.groupby("date")["fwd_1"].transform("mean")
+    df = label_regimes(df)
     liq = df[df["liquid"] == 1]
+    # 국면 분리는 매수 가능 표본에서만 — 못 사는 종목의 성적은 판단에 쓰지 않는다
+    base = liq if len(liq) >= MIN_BUCKET else df
     return {
         "rows": len(df),
         "symbols": int(df["symbol"].nunique()),
@@ -156,6 +207,10 @@ def analyze(df: pd.DataFrame, cost_pct: float) -> dict:
         "liquid_rows": len(liq),
         "ic": _ic(df),
         "ic_liquid": _ic(liq) if len(liq) else [],
+        # 사전에 알 수 있는 국면 — 실전 적용 가능
+        "by_trend": _split(base, "trend", cost_pct),
+        # 사후 분해 — 매매에는 못 쓰지만 알파/베타를 가른다
+        "by_fwd_dir": _split(base, "fwd_dir", cost_pct),
     }
 
 
@@ -164,6 +219,9 @@ CAVEATS = [
     "표본 기간이 일봉 보관분(약 1년)이라 시장 국면이 한두 개밖에 들어가지 않는다.",
     "수익률은 t+1 시가 진입 기준이다. t 종가→t+1 시가 갭(gap_pct)은 배치가 끝난 뒤 열리므로 잡을 수 없다.",
     f"표본 {MIN_BUCKET}건 미만 버킷은 reliable=false — 수치를 믿지 않는다.",
+    "'익일 상승/하락' 분해는 사전에 알 수 없는 정보다. 매매 규칙으로 쓸 수 없고, "
+    "어떤 피처가 알파인지 단순 저베타 효과인지 가르는 용도로만 본다 — "
+    "저베타라면 시장이 오르는 날 부호가 뒤집힌다.",
 ]
 
 

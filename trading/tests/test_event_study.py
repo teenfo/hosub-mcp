@@ -215,7 +215,107 @@ def test_empty_input_is_safe():
     assert eventstudy.analyze(pd.DataFrame(), cost_pct=0.28) == {"rows": 0}
 
 
-# --- ⑥ 배선 ---
+# --- ⑥ 국면 분리 — 알파인가 저베타 효과인가 ---
+# 하락장 한 국면만 담긴 표본에서 '덜 움직인 종목이 이겼다' 는 자동으로 성립한다.
+# 그건 예측력이 아니라 베타 노출이 낮았던 것이다. 시장이 오르는 날 부호가
+# 뒤집히는지 보면 둘을 가를 수 있다.
+
+def _regime_rows(n_days=60, beta_only=True, seed=1):
+    """저베타 피처를 심어 둔 가짜 패널.
+
+    beta_only=True  : 저변동성 종목이 시장 등락의 절반만 따라간다(순수 베타)
+    beta_only=False : 시장과 무관하게 항상 +2%p 더 번다(순수 알파)
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for d in range(n_days):
+        mkt = 2.0 if d % 2 == 0 else -2.0          # 상승·하락 날이 번갈아
+        for k in range(30):
+            low_vol = k < 15
+            if beta_only:
+                fwd = mkt * (0.5 if low_vol else 1.5)
+            else:
+                fwd = mkt + (2.0 if low_vol else 0.0)
+            rows.append({
+                "date": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}",
+                "symbol": f"S{k}", "score": 1, "liquid": 1, "gap_pct": 0.0,
+                "atr_pct": 1.0 if low_vol else 5.0,
+                "ret_1d": mkt + rng.normal(0, 0.01),
+                "fwd_1": fwd, "fwd_3": fwd, "fwd_5": fwd,
+            })
+    return pd.DataFrame(rows)
+
+
+def _ic_of(section, label, feature):
+    return next(r for r in section[label]["ic"] if r["feature"] == feature)["mean_ic"]
+
+
+def test_regime_split_exposes_beta():
+    """저베타 피처는 익일 시장 방향에 따라 IC 부호가 뒤집혀야 한다."""
+    out = eventstudy.analyze(_regime_rows(beta_only=True), cost_pct=0.28)
+    up = _ic_of(out["by_fwd_dir"], "익일 상승", "atr_pct")
+    down = _ic_of(out["by_fwd_dir"], "익일 하락", "atr_pct")
+    assert up > 0 > down          # 오르는 날엔 고변동성이 이긴다 = 알파가 아니다
+
+
+def test_regime_split_keeps_alpha_stable():
+    """진짜 알파는 국면이 바뀌어도 부호가 유지된다."""
+    out = eventstudy.analyze(_regime_rows(beta_only=False), cost_pct=0.28)
+    up = _ic_of(out["by_fwd_dir"], "익일 상승", "atr_pct")
+    down = _ic_of(out["by_fwd_dir"], "익일 하락", "atr_pct")
+    assert up < 0 and down < 0    # 저변동성이 양쪽 다 이긴다 = 알파
+
+
+def test_trend_label_uses_only_past():
+    """사전 국면(trend)은 그날 이미 알 수 있는 정보로만 매겨져야 한다."""
+    df = _regime_rows(n_days=60)
+    labeled = eventstudy.label_regimes(df)
+    # 앞 TREND_DAYS 일은 추세를 셀 수 없어 라벨이 비어야 한다
+    dates = sorted(df["date"].unique())
+    early = labeled[labeled["date"] == dates[0]]
+    assert early["trend"].isna().all()
+    assert labeled[labeled["date"] == dates[-1]]["trend"].notna().all()
+
+
+def test_trend_split_is_reported():
+    out = eventstudy.analyze(_regime_rows(n_days=90), cost_pct=0.28)
+    assert out["by_trend"], "사전 국면 분리 결과가 있어야 한다"
+    for sec in out["by_trend"].values():
+        assert sec["days"] >= eventstudy.MIN_REGIME_DAYS
+
+
+def test_short_regime_dropped():
+    """표본이 짧은 국면은 비교 대상에서 뺀다 — 우연을 국면 차이로 읽지 않게."""
+    df = _regime_rows(n_days=30)
+    out = eventstudy.analyze(df, cost_pct=0.28)
+    for sec in out["by_fwd_dir"].values():
+        assert sec["days"] >= eventstudy.MIN_REGIME_DAYS
+
+
+def test_regime_split_uses_liquid_sample():
+    """국면 분리는 매수 가능 표본으로 — 못 사는 종목 성적은 판단에 안 쓴다."""
+    df = _regime_rows(n_days=60)
+    df.loc[df["symbol"] == "S0", "liquid"] = 0
+    df.loc[df["symbol"] == "S0", "fwd_1"] = 99.0      # 못 사는 종목에 큰 값
+    out = eventstudy.analyze(df, cost_pct=0.28)
+    for sec in out["by_fwd_dir"].values():
+        assert sec["market_pct"] < 10          # 99% 짜리가 섞이지 않았다
+
+
+def test_caveat_warns_fwd_dir_not_tradable():
+    assert any("사전에 알 수 없" in c for c in eventstudy.CAVEATS)
+
+
+def test_market_daily_is_cross_sectional_mean():
+    df = pd.DataFrame([
+        {"date": "2026-07-01", "ret_1d": 1.0}, {"date": "2026-07-01", "ret_1d": 3.0},
+        {"date": "2026-07-02", "ret_1d": -2.0},
+    ])
+    m = eventstudy.market_daily(df)
+    assert m["2026-07-01"] == 2.0 and m["2026-07-02"] == -2.0
+
+
+# --- ⑦ 배선 ---
 
 def test_job_knows_study():
     from app.backtest import job

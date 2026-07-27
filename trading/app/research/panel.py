@@ -59,6 +59,7 @@ def panel(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     out["near_high60_pct"] = (c / high60 * 100).where(high60 > 0, 0.0)
     out["rsi14"] = rsi(c, 14)
     out["atr_pct"] = (atr(df, 14) / c * 100).where(c > 0, 0.0)
+    out["ret_1d"] = (c / c.shift(1) - 1) * 100      # 국면 판정용 시장 수익률 재료
     out["ret_20d"] = (c / c.shift(20) - 1) * 100
     out["disparity20"] = (c / ma20 * 100).where(ma20 > 0, 0.0)
     # 피처가 서지 않는 앞 구간은 버린다(60행 규칙)
