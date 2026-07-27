@@ -233,6 +233,8 @@ async def test_eod_recovers_symbols_missed_intraday(monkeypatch):
     monkeypatch.setitem(settings.CONFIG, "collection",
                         {"deep_backfill": True, "deep_backfill_per_cycle": 2,
                          "deep_backfill_eod_max": 30})
+    from app.data import roster
+    monkeypatch.setattr(roster, "active", lambda days: {})
     deep = []
 
     async def fake_deep(sym, pages):

@@ -103,16 +103,34 @@ def remove(code: str) -> bool:
     return bool(cur.rowcount)
 
 
+def _held() -> set[str]:
+    """지금 포지션이 열려 있는 종목 — 자동 교체에서 절대 빼면 안 되는 집합.
+
+    감시목록에서 빠지면 WS 구독이 해제되고(`aggregator.snapshot()` → None),
+    장중 분봉 백필 대상(`engine._collect_targets`)에서도 제외된다. 그러면
+    청산 감시(30초)가 `ledger.latest_price` 로 폴백하는데 그 값은 이탈 종목
+    수집 루프(15분 주기)로만 갱신된다 — **손절이 최대 15분 묵은 가격으로
+    판정된다.** 실거래 손실로 직결되므로 여기서 원천 차단한다.
+    """
+    try:
+        from ..trade import ledger      # 지연 임포트 — 순환 참조 방지
+
+        return ledger.open_symbols()
+    except Exception:  # noqa: BLE001 - 조회 실패 시 아무것도 지우지 않는 쪽이 안전
+        log.exception("보유 종목 조회 실패 — 자동 교체를 보수적으로 처리")
+        return {r["code"] for r in entries()}
+
+
 def replace_auto(picks: list[dict]) -> None:
-    """auto 항목을 새 발굴 상위로 교체. seed/manual 항목은 건드리지 않는다."""
-    codes = [p["code"] for p in picks]
+    """auto 항목을 새 발굴 상위로 교체. seed/manual·보유 종목은 건드리지 않는다."""
+    keep = [p["code"] for p in picks] + sorted(_held())
     now = datetime.now(UTC).isoformat()
     with _conn() as conn:
-        if codes:
-            ph = ",".join("?" * len(codes))
+        if keep:
+            ph = ",".join("?" * len(keep))
             conn.execute(
                 f"DELETE FROM watchlist WHERE source='auto' AND code NOT IN ({ph})",
-                codes,
+                keep,
             )
         else:
             conn.execute("DELETE FROM watchlist WHERE source='auto'")
@@ -122,7 +140,7 @@ def replace_auto(picks: list[dict]) -> None:
             [(p["code"], p.get("name") or p["code"], "auto", now) for p in picks],
         )
         _rebuild_runtime(conn)
-    log.info("발굴 자동 편입: %s", codes)
+    log.info("발굴 자동 편입: %s", [p["code"] for p in picks])
 
 
 def replace_scanned(source: str, picks: list[dict]) -> None:
@@ -130,10 +148,20 @@ def replace_scanned(source: str, picks: list[dict]) -> None:
 
     seed/manual/auto 로 이미 감시 중인 종목은 건드리지 않는다(중복 편입 방지).
     각 pick 의 collect_only 로 매매/수집전용 tier 를 지정한다.
+    **보유 종목은 순위에서 밀려도 남긴다** — 빠지면 손절 감시가 묵은 가격으로
+    돈다(_held 참조).
     """
     now = datetime.now(UTC).isoformat()
+    held = _held()
     with _conn() as conn:
-        conn.execute("DELETE FROM watchlist WHERE source=?", (source,))
+        if held:
+            ph = ",".join("?" * len(held))
+            conn.execute(
+                f"DELETE FROM watchlist WHERE source=? AND code NOT IN ({ph})",
+                (source, *sorted(held)),
+            )
+        else:
+            conn.execute("DELETE FROM watchlist WHERE source=?", (source,))
         existing = {r["code"] for r in conn.execute("SELECT code FROM watchlist")}
         added = 0
         for p in picks:

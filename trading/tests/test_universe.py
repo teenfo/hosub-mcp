@@ -19,6 +19,13 @@ def _reset_equity():
     settings.set_equity(before)
 
 
+def _no_roster(monkeypatch):
+    """마감 백필은 이탈 종목(로스터)도 훑는다 — 여기선 관심사가 아니라 비운다."""
+    from app.data import roster
+
+    monkeypatch.setattr(roster, "active", lambda days: {})
+
+
 def _item(code, name="종목", price=10_000, chg=5.0, tv=50_000, vol=500_000):
     return {"code": code, "name": name, "price": price, "change_pct": chg,
             "trade_value": tv, "volume": vol}
@@ -160,6 +167,7 @@ async def test_eod_backfill_covers_everything(monkeypatch):
     monkeypatch.setattr(settings, "COLLECT_ONLY", {"000002"})
     # 심층 백필은 여기 관심사가 아니다(test_deep_backfill.py) — 실 DB·실호출 차단
     monkeypatch.setitem(settings.CONFIG, "collection", {"deep_backfill": False})
+    _no_roster(monkeypatch)
     called = []
 
     async def fake(sym):
@@ -179,6 +187,7 @@ async def test_eod_backfill_survives_symbol_failure(monkeypatch):
     monkeypatch.setattr(settings, "WATCHLIST", {"000001": "a", "000002": "b"})
     monkeypatch.setattr(settings, "COLLECT_ONLY", set())
     monkeypatch.setitem(settings.CONFIG, "collection", {"deep_backfill": False})
+    _no_roster(monkeypatch)
 
     async def boom(sym):
         if sym == "000001":
