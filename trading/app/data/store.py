@@ -1,5 +1,6 @@
 """SQLite 시세·주문 저장소. 홈서버에서는 DATA_DIR=/data/trading 권장."""
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -18,6 +19,13 @@ def _conn() -> sqlite3.Connection:
             ts TEXT NOT NULL,          -- ISO8601 (KST)
             open REAL, high REAL, low REAL, close REAL, volume INTEGER,
             PRIMARY KEY (symbol, tf, ts)
+        )"""
+    )
+    # 심층 백필(연속조회) 완료 표시 — 종목당 1회만 과거를 끌어오기 위한 기록.
+    # 감시목록에서 빠졌다 재편입돼도 다시 받지 않도록 watchlist 와 분리해 둔다.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS deep_backfill (
+            symbol TEXT PRIMARY KEY, done TEXT, bars INTEGER
         )"""
     )
     return conn
@@ -69,6 +77,21 @@ def prune_minutes(keep_days: int) -> int:
             "DELETE FROM bars WHERE tf='1m' AND substr(ts,1,10) < ?", (cutoff,)
         )
         return cur.rowcount or 0
+
+
+def deep_backfilled() -> set[str]:
+    """연속조회 심층 백필을 이미 마친 종목 코드."""
+    with _conn() as conn:
+        return {r[0] for r in conn.execute("SELECT symbol FROM deep_backfill")}
+
+
+def mark_deep_backfill(symbol: str, bars: int) -> None:
+    """심층 백필 완료 기록. 0봉(상장폐지·거래정지 등)도 남겨 재시도 폭주를 막는다."""
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO deep_backfill VALUES (?,?,?)",
+            (symbol, datetime.now(UTC).isoformat(timespec="seconds"), int(bars)),
+        )
 
 
 def load_bars(symbol: str, tf: str = "1m", limit: int = 2000) -> pd.DataFrame:

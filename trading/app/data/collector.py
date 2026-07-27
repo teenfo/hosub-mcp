@@ -103,3 +103,32 @@ async def backfill_minutes(symbol: str) -> int:
     if df.empty:
         return 0
     return store.upsert_bars(symbol, "1m", df)
+
+
+async def deep_backfill(symbol: str, pages: int = 5) -> int:
+    """연속조회로 과거 분봉을 여러 페이지 확보한다 (신규 편입 시 종목당 1회).
+
+    분봉 API 는 호출 시각 기준 최근 900봉(≈2.4거래일)만 준다. 언제 부르든
+    '최근'이라 마감 후에 불러도 과거가 늘지 않는다. 과거를 늘리는 유일한 길이
+    응답 헤더의 next-key 를 물고 다시 부르는 연속조회다. 5페이지면 약 2주치라
+    편입 당일부터 백테스트 최소 일수(backtest.min_days)를 채울 수 있다.
+
+    반환: 저장한 봉 수. 첫 페이지 실패는 올려 보내 호출부가 재시도하게 하고,
+    2페이지 이후 실패는 확보한 만큼만 남기고 멈춘다.
+    """
+    total, next_key = 0, ""
+    for i in range(max(1, int(pages))):
+        try:
+            data, next_key = await client.minute_chart_page(symbol, 1, next_key)
+        except Exception as e:  # noqa: BLE001
+            if i == 0:
+                raise                       # 조회 자체 실패 → 완료로 기록하지 않는다
+            log.warning("연속조회 중단 %s p%d: %s", symbol, i + 1, e)
+            break
+        df = parse_chart_response(data)
+        if df.empty:
+            break
+        total += store.upsert_bars(symbol, "1m", df)
+        if not next_key:
+            break                           # 더 과거가 없다
+    return total

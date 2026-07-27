@@ -364,10 +364,13 @@ async def api_backtest_coverage(_=Depends(require_auth)):
     from .data import symbols
 
     counts = dict(store.minute_symbols(1))   # {code: 축적 일수}
+    deep = store.deep_backfilled()           # 연속조회로 과거를 끌어온 종목
     rows = [{"code": c, "name": n or symbols.name_of(c) or c,
-             "days": counts.get(c, 0)} for c, n in settings.WATCHLIST.items()]
+             "days": counts.get(c, 0), "deep": c in deep}
+            for c, n in settings.WATCHLIST.items()]
     rows.sort(key=lambda x: -x["days"])
-    return {"symbols": rows}
+    return {"symbols": rows,
+            "deep_pending": sum(1 for r in rows if not r["deep"])}
 
 
 @app.get("/api/backtest/{symbol}")

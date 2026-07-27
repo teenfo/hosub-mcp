@@ -158,6 +158,8 @@ async def test_eod_backfill_covers_everything(monkeypatch):
     monkeypatch.setattr(settings, "WATCHLIST",
                         {"000001": "매매", "000002": "수집"})
     monkeypatch.setattr(settings, "COLLECT_ONLY", {"000002"})
+    # 심층 백필은 여기 관심사가 아니다(test_deep_backfill.py) — 실 DB·실호출 차단
+    monkeypatch.setitem(settings.CONFIG, "collection", {"deep_backfill": False})
     called = []
 
     async def fake(sym):
@@ -176,6 +178,7 @@ async def test_eod_backfill_survives_symbol_failure(monkeypatch):
 
     monkeypatch.setattr(settings, "WATCHLIST", {"000001": "a", "000002": "b"})
     monkeypatch.setattr(settings, "COLLECT_ONLY", set())
+    monkeypatch.setitem(settings.CONFIG, "collection", {"deep_backfill": False})
 
     async def boom(sym):
         if sym == "000001":
