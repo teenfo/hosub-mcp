@@ -58,18 +58,39 @@ def test_market_status_scan_age(monkeypatch):
     assert eng.market_status()["last_scan_age_sec"] is None
 
 
-def test_bars_day_filter():
-    """분봉은 날짜 단위로 끊어서 본다 — 지정 없으면 최근 거래일."""
+def _pick(df, date=None):
+    """api_bars 의 날짜 필터와 동일한 로직 (문자열 비교 — tz 무관)."""
+    days = [str(d.date()) for d in df.index]
+    want = date if (date and date in days) else max(days)
+    return df[[d == want for d in days]]
+
+
+def _sample(tz=None):
     idx = pd.to_datetime([
         "2026-07-24 09:00", "2026-07-24 09:01",
         "2026-07-27 09:00", "2026-07-27 09:01", "2026-07-27 09:02",
     ])
-    df = pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
-                       "volume": 1}, index=idx)
-    days = df.index.normalize()
-    latest = df[days == days.max()]
-    assert len(latest) == 3                                   # 최근일(7/27)만
-    picked = df[days == pd.Timestamp("2026-07-24").normalize()]
-    assert len(picked) == 2                                   # 과거 날짜 지정
+    if tz:
+        idx = idx.tz_localize(tz)
+    return pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0,
+                         "volume": 1}, index=idx)
+
+
+def test_bars_day_filter():
+    """분봉은 날짜 단위 — 지정 없으면 최근 거래일, 지정하면 그 날짜."""
+    df = _sample()
+    assert len(_pick(df)) == 3                                # 최근일(7/27)만
+    assert len(_pick(df, "2026-07-24")) == 2                  # 과거 날짜 지정
+    assert len(_pick(df, "2026-07-01")) == 3                  # 데이터 없는 날 → 최근일
     assert sorted({str(d.date()) for d in df.index}, reverse=True) == \
         ["2026-07-27", "2026-07-24"]                          # dates API 형식
+
+
+def test_bars_day_filter_tz_aware():
+    """tz-aware 인덱스(KST 저장분)에서도 과거 날짜 조회가 동작해야 한다.
+
+    (회귀: tz-naive Timestamp 와 비교해 0봉이 반환되던 버그)
+    """
+    df = _sample(tz="Asia/Seoul")
+    assert len(_pick(df)) == 3
+    assert len(_pick(df, "2026-07-24")) == 2
