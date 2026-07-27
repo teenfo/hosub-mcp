@@ -123,7 +123,7 @@ async def fetch_market(cursor: str | None, initial_days: int = 3,
     else:
         bgn_de = (datetime.now(KST) - timedelta(days=initial_days)).strftime("%Y%m%d")
     pairs: list[tuple[str, RawDoc]] = []
-    new_cursor = cursor
+    max_seen = cursor or ""
     more = False
     async with httpx.AsyncClient(timeout=30) as client:
         for page in range(1, max_pages + 1):
@@ -137,14 +137,20 @@ async def fetch_market(cursor: str | None, initial_days: int = 3,
             })
             r.raise_for_status()
             payload = r.json()
-            got, new_cursor = parse_market_payload(payload, new_cursor)
+            # 필터 기준은 **진입 시점 커서로 고정**한다. 페이지마다 갱신하면
+            # sort=date 가 날짜순이지 rcept_no 순이 아니라서, 앞 페이지의 큰
+            # 일련번호가 뒤 페이지의 작은 번호를 통째로 걸러 버린다.
+            # (실측 2026-07-27: 1,175건 중 291건만 통과했다)
+            got, page_max = parse_market_payload(payload, cursor)
             pairs.extend(got)
+            if page_max and page_max > max_seen:
+                max_seen = page_max
             total_page = int(payload.get("total_page", 1) or 1)
             if page >= total_page:
                 break
             if page >= max_pages:
                 more = True
-    return pairs, new_cursor, more
+    return pairs, (max_seen or cursor), more
 
 
 class DartCollector:
@@ -162,7 +168,7 @@ class DartCollector:
         else:
             bgn_de = (datetime.now(KST) - timedelta(days=initial_days)).strftime("%Y%m%d")
         all_docs: list[RawDoc] = []
-        new_cursor = cursor
+        max_seen = cursor or ""
         async with httpx.AsyncClient(timeout=30) as client:
             for page in range(1, _MAX_PAGES + 1):
                 await _limiter.wait()
@@ -177,9 +183,12 @@ class DartCollector:
                 })
                 r.raise_for_status()
                 payload = r.json()
-                docs, new_cursor = parse_list_payload(payload, new_cursor)
+                # 전종목 모드와 같은 이유로 필터 기준은 진입 커서로 고정한다
+                docs, page_max = parse_list_payload(payload, cursor)
                 all_docs.extend(docs)
+                if page_max and page_max > max_seen:
+                    max_seen = page_max
                 total_page = int(payload.get("total_page", 1) or 1)
                 if page >= total_page:
                     break
-        return all_docs, new_cursor
+        return all_docs, (max_seen or cursor)
