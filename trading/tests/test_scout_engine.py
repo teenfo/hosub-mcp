@@ -15,7 +15,7 @@ from app.scout import engine as eng
 from app.scout import model, promote, store
 from app.scout.model import Signal
 
-NOW = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)
+NOW = datetime(2026, 7, 27, 1, 0, tzinfo=UTC)      # 월 10:00 KST — 장중
 
 
 @pytest.fixture(autouse=True)
@@ -170,10 +170,10 @@ async def test_shrink_circuit_breaker(monkeypatch, spy_watchlist):
     codes = [f"00000{i}" for i in range(1, 9)]
     monkeypatch.setattr(eng, "snapshot_current", lambda: promote.Current(
         tier={c: promote.COLLECT for c in codes},
-        since={c: datetime.now(UTC) - timedelta(hours=2) for c in codes},
+        since={c: NOW - timedelta(hours=2) for c in codes},
         protected=frozenset(), names={c: c for c in codes}))
     e = _engine([_Src(model.VOLUME, [])])
-    rows = e.project()
+    rows = e.project(NOW)          # 강등은 장중에만 — 시각을 못박는다
     assert len([r for r in rows if r["to_tier"] == promote.NONE]) == 3
 
 

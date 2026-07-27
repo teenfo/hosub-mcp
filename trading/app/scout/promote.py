@@ -33,11 +33,22 @@
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from .. import settings
 from .scoring import Candidate
 
 log = logging.getLogger(__name__)
+KST = ZoneInfo("Asia/Seoul")
+# 장중 판정 — signals/engine.py·scanner.py 와 같은 조건이다. 그쪽은 실거래
+# 경로라 이번 범위에서 건드리지 않고 여기 복제해 둔다(엔진이 그 루프들을
+# 흡수하는 시점에 한 군데로 모은다).
+SESSION = ("09:00", "15:30")
+
+
+def in_session(now: datetime | None = None) -> bool:
+    t = (now or datetime.now(UTC)).astimezone(KST)
+    return t.weekday() < 5 and SESSION[0] <= t.strftime("%H:%M") <= SESSION[1]
 
 # tier 이름 — decisions 에 그대로 들어간다
 NONE, COLLECT, TRADE = "none", "collect", "trade"
@@ -120,8 +131,18 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
             out.append(_dec(c, "promote_trade", tier, TRADE,
                             f"체결가능 {c.price:,.0f}원 · 수집 체류 완료"))
 
-    # --- 강등: 점수 미달 ---
+    # --- 강등 ---
+    # **장 마감 후에는 강등하지 않는다.** 장중 소스는 시장이 닫히면 보고할 수가
+    # 없다. 그때의 '신호 없음' 은 "더는 후보가 아니다" 가 아니라 "확인할 수
+    # 없다" 다 — TTL 을 넣은 이유와 같은 구분이다. 이걸 빼먹으면 매일 저녁
+    # 거래대금·등락률 편입분이 전멸하고 다음 날 아침 다시 들어온다. 없애려던
+    # 바로 그 회전이다.
+    #
+    # 2026-07-27 22:01 shadow 실측: 감시목록 72종목 중 22종목에 대해 강등
+    # 결정이 나왔다(전부 장중 소스 편입분). 축소 폭 상한이 10건에서 끊었을 뿐이다.
     dropped: set[str] = set()
+    if not in_session(now):
+        return out
     for code, tier in cur.tier.items():
         if tier == NONE or code in cur.protected:
             continue

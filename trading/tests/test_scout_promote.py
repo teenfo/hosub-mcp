@@ -14,7 +14,10 @@ from app.scout import promote
 from app.scout.promote import COLLECT, NONE, TRADE, Current
 from app.scout.scoring import Candidate
 
-NOW = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)
+# 2026-07-27(월) 10:00 KST = 장중. 강등은 장중에만 일어나므로 픽스처 시각이
+# 세션 안이어야 한다 — 밖이면 강등 테스트가 전부 무효가 된다.
+NOW = datetime(2026, 7, 27, 1, 0, tzinfo=UTC)
+AFTER_CLOSE = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)     # 19:00 KST
 LONG_AGO = NOW - timedelta(hours=2)
 
 
@@ -200,3 +203,39 @@ def test_plan_writes_nothing():
     before = dict(cur.tier)
     _plan([_c(code="000002", score=3.0)], cur)
     assert cur.tier == before
+
+
+# --- ⑥ 장 마감 후에는 강등하지 않는다 ---
+# 장중 소스는 시장이 닫히면 보고할 수가 없다. 그때의 '신호 없음' 은
+# "더는 후보가 아니다" 가 아니라 "확인할 수 없다" 다 — TTL 을 넣은 이유와 같다.
+
+def test_in_session_covers_korean_hours():
+    assert promote.in_session(NOW) is True                     # 월 10:00 KST
+    assert promote.in_session(AFTER_CLOSE) is False            # 월 19:00 KST
+    # 토요일 10:00 KST
+    assert promote.in_session(datetime(2026, 8, 1, 1, 0, tzinfo=UTC)) is False
+
+
+def test_no_demotion_after_close():
+    """실측 2026-07-27 22:01 shadow: 감시목록 72종목 중 22종목에 강등 결정이
+    나왔다 — 전부 장중 소스 편입분이다. 매일 저녁 전멸하고 아침에 다시 들어오는
+    회전이 되는데, 그건 이 엔진이 없애려던 바로 그 문제다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO},
+               names={"000001": "가"})
+    assert _plan([], cur, now=AFTER_CLOSE) == []               # 마감 후: 아무 일 없음
+    assert _by(_plan([], cur, now=NOW), "drop")                # 장중: 강등된다
+
+
+def test_promotion_still_works_after_close():
+    """야간 발굴·뉴스는 마감 후에 나온다 — 편입까지 막으면 안 된다."""
+    rows = _plan([_c(score=3.0)], _cur(), now=AFTER_CLOSE)
+    assert [r["action"] for r in rows] == ["promote_collect"]
+
+
+def test_cap_overflow_also_waits_for_the_session():
+    """상한 초과 정리도 다음 장으로 미룬다 — 마감 후엔 매매가 없어 급할 것이 없다."""
+    codes = ["000001", "000002", "000003"]
+    cur = _cur(tier={c: COLLECT for c in codes}, since={c: LONG_AGO for c in codes})
+    cands = [_c(code=c, score=2.0 - i) for i, c in enumerate(codes)]
+    assert _by(_plan(cands, cur, now=AFTER_CLOSE, max_total=2), "drop") == []
+    assert _by(_plan(cands, cur, now=NOW, max_total=2), "drop")
