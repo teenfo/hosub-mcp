@@ -201,6 +201,20 @@ def test_fetch_uses_the_tnm_token_not_our_own(monkeypatch):
     assert seen[0]["headers"]["X-Internal-Token"] == "tnm-token"
 
 
+def test_fetch_asks_for_the_right_status(monkeypatch):
+    """'done' 으로 잘못 쓰면 필터가 **조용히 0건**을 돌려주고 오류도 안 난다.
+
+    실제로 이 함수와 발굴 엔진 news 어댑터가 둘 다 그렇게 만들어졌다
+    (2026-07-27). TNM 의 성공 상태값은 'ok' 이고 나머지는
+    skipped_duplicate / llm_failed 다.
+    """
+    seen = []
+    _install_httpx(monkeypatch, [[]], seen)
+    monkeypatch.setattr(settings, "TNM_TOKEN", "t")
+    ni.fetch_analyses()
+    assert seen[0]["params"]["status"] == "ok" == settings.TNM_STATUS_OK
+
+
 def test_no_token_means_no_fetch(monkeypatch):
     monkeypatch.setattr(settings, "TNM_TOKEN", "")
     assert ni.fetch_analyses() == []

@@ -111,6 +111,11 @@ INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 # TNM 이 trading 을 부를 때 쓰는 TRADING_TOKEN 의 반대 방향이다.
 TNM_URL = os.environ.get("TNM_URL", "http://127.0.0.1:8602")
 TNM_TOKEN = os.environ.get("TNM_TOKEN", "")
+# TNM 분석 레코드의 '성공' 상태값. 다른 값은 skipped_duplicate / llm_failed 다.
+# 상수로 뺀 이유: 'done' 으로 잘못 쓰면 필터가 **조용히 0건**을 돌려주고
+# 아무 오류도 안 난다 — 실제로 발굴 엔진 news 어댑터와 소급 측정 양쪽이
+# 그렇게 만들어졌다(2026-07-27). 한 곳에서 틀리면 한 곳만 고치면 된다.
+TNM_STATUS_OK = "ok"
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)

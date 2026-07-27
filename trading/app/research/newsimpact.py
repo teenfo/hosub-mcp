@@ -73,7 +73,8 @@ def fetch_analyses(limit: int = 5000, min_score: int = 0) -> list[dict]:
         while len(out) < limit:
             res = c.get(
                 f"{settings.TNM_URL}/api/items",
-                params={"limit": PAGE, "offset": len(out), "status": "done",
+                params={"limit": PAGE, "offset": len(out),
+                        "status": settings.TNM_STATUS_OK,
                         "min_score": min_score},
                 headers={"X-Internal-Token": settings.TNM_TOKEN})
             res.raise_for_status()

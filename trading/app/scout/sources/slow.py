@@ -82,7 +82,8 @@ class NewsSource:
         async with httpx.AsyncClient(timeout=10.0) as c:
             res = await c.get(
                 f"{url}/api/items",
-                params={"min_score": min_score, "limit": limit, "status": "done"},
+                params={"min_score": min_score, "limit": limit,
+                        "status": settings.TNM_STATUS_OK},
                 headers={"X-Internal-Token": settings.TNM_TOKEN},
             )
             res.raise_for_status()
