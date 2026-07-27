@@ -70,13 +70,14 @@ _TRADING_GET_RE = re.compile(
     r"|prices|rules|performance|risk|journal|journal/history"
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
-    r"|research/event-study|research/ranking)$"
+    r"|research/event-study|research/ranking|scout)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
     r"|rules/[a-z_]{1,30}/toggle"
     r"|discovery/run|symbols/refresh|backtest/report/run|backtest/sweep/run|risk"
     r"|journal/run|guard/override(/clear)?|research/(event-study|ranking)/run"
+    r"|scout/(mode|run)"
     r"|positions/[0-9a-f]{12}/close)$"
 )
 # 백테스트는 오래 걸린다(전 종목 리포트 수십 초, 종목별 재생도 봉이 쌓일수록·
