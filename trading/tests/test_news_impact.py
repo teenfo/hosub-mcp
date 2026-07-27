@@ -63,13 +63,40 @@ def test_join_matches_event_date_to_forward_returns():
     assert df["horizon"].iloc[0] == "immediate"
 
 
+MKT = {"2026-07-01": 99.0, "2026-07-02": 4.0, "2026-07-03": 1.0,
+       "2026-07-06": 2.0, "2026-07-07": 3.0, "2026-07-08": 5.0}
+
+
 def test_excess_removes_the_market_move():
-    """뉴스는 시장이 크게 움직인 날에 몰린다 — 그날 시장을 뉴스의 공으로 세지 않는다."""
+    """뉴스는 시장이 크게 움직인 날에 몰린다 — 시장 몫을 뉴스의 공으로 세지 않는다.
+
+    빼는 것은 **이벤트 당일(t0)이 아니라 종목과 같은 구간(t+1~t+k)** 이다.
+    t0 의 99% 는 종목 수익률 구간 밖이라 섞이면 안 된다.
+    """
     items = [{"ticker": "000001", "published_at": "2026-07-01T10:00:00+09:00",
               "impact_horizon": "short", "impact_direction": "positive"}]
-    df = ni.join(items, _fwd(), market={"2026-07-01": 4.0})
+    df = ni.join(items, _fwd(), market=MKT)
     assert df["fwd_1"].iloc[0] == pytest.approx(10.0)     # 원시는 그대로 보고
-    assert df["exc_fwd_1"].iloc[0] == pytest.approx(6.0)  # 초과수익만 규칙의 공
+    assert df["exc_fwd_1"].iloc[0] == pytest.approx(6.0)  # 10 − 4(t+1 하루치)
+
+
+def test_excess_matches_the_holding_period():
+    """3일 수익률에서 하루치 시장만 빼면 시장 노출이 남는다 — 초안이 그랬다."""
+    items = [{"ticker": "000001", "published_at": "2026-07-01T10:00:00+09:00",
+              "impact_horizon": "long", "impact_direction": "positive"}]
+    df = ni.join(items, _fwd(), market=MKT)
+    # 종목 fwd_3: t+1 시가 100 → 07-06 종가 130 = +30%
+    # 시장 3일 누적: 07-02 4 + 07-03 1 + 07-06 2 = 7
+    assert df["fwd_3"].iloc[0] == pytest.approx(30.0)
+    assert df["exc_fwd_3"].iloc[0] == pytest.approx(23.0)
+
+
+def test_market_forward_needs_a_full_window():
+    """거래일이 모자라면 반쪽 창으로 빼지 않는다 — 0으로 채우면 시장 몫이 남는다."""
+    mf = ni.market_forward({"2026-07-01": 1.0, "2026-07-02": 2.0}, horizons=(1, 3))
+    assert mf["2026-07-01"][1] == 2.0
+    assert mf["2026-07-01"][3] is None
+    assert mf["2026-07-02"][1] is None
 
 
 def test_symbols_without_bars_are_dropped_not_zeroed():
