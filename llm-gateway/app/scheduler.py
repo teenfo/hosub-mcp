@@ -24,10 +24,12 @@ import logging
 import time
 
 from .config import RoleConfig
+from .notify import SlackNotifier
 from .ollama import BackendError, OllamaClient
 from .store import (
     FAILED,
     MR_FAILED,
+    MR_PENDING,
     MR_PULLING,
     MR_READY,
     MR_REJECTED,
@@ -66,6 +68,7 @@ class Scheduler:
         auto_install: bool = True,
         models_refresh: float = 30.0,
         retention_days: int = 30,
+        notifier: SlackNotifier | None = None,
     ) -> None:
         self.store = store
         self.roles = roles
@@ -77,6 +80,9 @@ class Scheduler:
         self.auto_install = auto_install
         self.models_refresh = models_refresh
         self.retention_days = retention_days
+        # 사람이 개입해야 하는 순간(승인 대기·백엔드 다운)에만 알린다.
+        # 웹훅이 없으면 no-op 이라 호출부가 분기할 필요가 없다.
+        self.notifier = notifier or SlackNotifier()
 
         # 잡 완료 알림 (동기 대기 중인 요청을 깨운다)
         self._events: dict[str, asyncio.Event] = {}
@@ -89,6 +95,8 @@ class Scheduler:
         self._available: list[str] | None = None
         # 설치 대기 중이라 건너뛴 모델들 (상태 표시용)
         self._pulling: dict[str, int] = {}
+        # _triage_missing(동기)이 만든 알림 대기열 — _models_loop 에서 비운다
+        self._pending_notices: list[dict] = []
         self._tasks: list[asyncio.Task] = []
         self._stopping = False
 
@@ -292,6 +300,10 @@ class Scheduler:
                     last_refresh = time.monotonic()
                     await self._refresh_models()
                     self._triage_missing()
+                    # _triage_missing 은 동기라 알림을 모아 뒀다 여기서 보낸다
+                    while self._pending_notices:
+                        await self.notifier.model_approval_needed(
+                            self._pending_notices.pop(0))
                 if await self._pull_next():
                     last_refresh = 0.0  # 설치 직후 목록을 즉시 다시 읽는다
                     continue
@@ -309,6 +321,11 @@ class Scheduler:
             # 큐 전체를 설치 대기로 돌려버리면 안 되기 때문.
             log.warning("모델 목록 조회 실패 — 자동 설치 판단 보류: %s", exc)
             self._available = None
+            # 맥이 잠들거나 정전으로 꺼지면 야간 배치가 조용히 실패한다.
+            # 전이 시점에만 한 번 알린다(30초마다 알리면 아무도 안 본다).
+            await self.notifier.backend_offline(self.client.base_url, str(exc))
+        else:
+            await self.notifier.backend_online(self.client.base_url)
 
     def _triage_missing(self) -> None:
         """대기 잡 중 모델이 없는 것들을 설치 요청으로 올리거나 실패시킨다."""
@@ -338,6 +355,8 @@ class Scheduler:
                     est_size_gb=self.roles.model_size_gb(model),
                 )
                 statuses[model] = req["status"]
+                if req["status"] == MR_PENDING:
+                    self._pending_notices.append(req)
                 log.warning(
                     "미설치 모델 '%s' (요청: %s, 역할: %s) — 승인 대기",
                     model, job["service"], ", ".join(req["roles"]) or "-",
@@ -366,12 +385,15 @@ class Scheduler:
         except BackendError as exc:
             log.error("모델 설치 실패 %s: %s", model, exc)
             self.store.set_model_request_status(model, MR_FAILED, error=str(exc))
+            await self.notifier.model_install_finished(model, ok=False, error=str(exc))
         except Exception as exc:
             log.exception("모델 설치 중 예외 %s", model)
             self.store.set_model_request_status(model, MR_FAILED, error=str(exc))
+            await self.notifier.model_install_finished(model, ok=False, error=str(exc))
         else:
             self.store.set_model_request_status(model, MR_READY, progress=100)
             log.info("모델 설치 완료: %s — 대기하던 잡이 이어서 실행됩니다", model)
+            await self.notifier.model_install_finished(model, ok=True)
         finally:
             self._pulling.pop(model, None)
         return True
