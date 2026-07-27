@@ -109,10 +109,10 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
     async def index(request):
         if not _is_authed(request):
             return RedirectResponse("/login", status_code=302)
-        return FileResponse(STATIC_DIR / "index.html")
+        return FileResponse(STATIC_DIR / "index.html", headers=_NO_CACHE)
 
     async def login_page(request):
-        return FileResponse(STATIC_DIR / "login.html")
+        return FileResponse(STATIC_DIR / "login.html", headers=_NO_CACHE)
 
     async def login_submit(request):
         form = await request.form()
@@ -381,7 +381,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         target = (STATIC_DIR / name).resolve()
         if STATIC_DIR not in target.parents or not target.is_file():
             return Response(status_code=404)
-        return FileResponse(target)
+        return FileResponse(target, headers=_cache_headers(name))
 
     return [
         Route("/", index),
@@ -409,6 +409,20 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
 
 
 _PUBLIC_ASSETS = {"style.css", "login.js"}
+
+# 캐시 정책.
+# 우리 자산(app.js·pages/*.js·style.css)은 배포마다 바뀐다. Cache-Control 이
+# 없으면 브라우저가 휴리스틱 캐싱(대략 Last-Modified 경과의 10%)을 적용해,
+# 배포 후에도 옛 모듈 그래프를 계속 쓴다 — 새 페이지를 추가해도 사이드바에
+# 나타나지 않는 증상이 여기서 나온다. no-cache 는 '쓰지 말라'가 아니라 '쓰기 전에
+# 반드시 확인하라'는 뜻이라, ETag 로 304 가 떨어져 전송량은 그대로 아낀다.
+_NO_CACHE = {"Cache-Control": "no-cache"}
+# vendor/ 는 버전 고정된 서드파티라 오래 캐시해도 안전하다(용량이 크다).
+_VENDOR_CACHE = {"Cache-Control": "public, max-age=604800"}
+
+
+def _cache_headers(name: str) -> dict:
+    return _VENDOR_CACHE if name.startswith("vendor/") else _NO_CACHE
 
 
 def _int_param(request, name: str, default: int) -> int:

@@ -128,3 +128,41 @@ def test_weather_graceful_on_network_failure():
 def test_weather_requires_auth():
     with _client() as c:
         assert c.get("/api/weather").status_code == 401
+
+
+# --- 정적 자산 캐시 정책 ---
+# 배포마다 바뀌는 우리 자산이 브라우저 휴리스틱 캐싱에 걸려, 새 페이지를 추가해도
+# 사이드바에 나타나지 않던 문제의 회귀 방지.
+
+def test_own_assets_are_revalidated():
+    with _client() as c:
+        _login(c)
+        for path in ("/static/app.js", "/static/pages/index.js", "/static/style.css"):
+            r = c.get(path)
+            assert r.status_code == 200, path
+            assert r.headers["cache-control"] == "no-cache", path
+
+
+def test_vendor_assets_cached_long():
+    """버전 고정된 서드파티는 오래 캐시 — 매 요청 재검증하지 않는다."""
+    with _client() as c:
+        r = c.get("/static/vendor/bootstrap/bootstrap.bundle.min.js")
+        assert r.status_code == 200
+        assert "max-age=604800" in r.headers["cache-control"]
+
+
+def test_html_shell_revalidated():
+    with _client() as c:
+        _login(c)
+        assert c.get("/").headers["cache-control"] == "no-cache"
+        assert c.get("/login").headers["cache-control"] == "no-cache"
+
+
+def test_journal_page_is_registered():
+    """매매일지 페이지가 라우팅 레지스트리에 실제로 실려 나가는지."""
+    with _client() as c:
+        _login(c)
+        idx = c.get("/static/pages/index.js").text
+        assert 'import journal from "./journal.js"' in idx
+        assert "journal," in idx.split("export const PAGES")[1]
+        assert c.get("/static/pages/journal.js").status_code == 200
