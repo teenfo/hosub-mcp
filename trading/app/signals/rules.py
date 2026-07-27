@@ -11,8 +11,8 @@ Exit 우선 원칙: stop/target 없는 신호는 존재할 수 없다.
    `@register("my_rule", needs_prev_close=True)`) 데코레이터를 붙인다.
 3. config.yaml `rules:` 에 `my_rule: {enabled: true, ...}` 블록을 추가한다.
 끝. evaluate_all 이 레지스트리를 순회하므로 다른 코드는 수정할 필요 없다.
-공통 안전장치(손절폭 상한 max_stop_pct)와 엔진 게이트(롱 전용·국면·잔고·
-리스크 사이징)는 모든 규칙에 자동 적용된다.
+공통 안전장치(손절폭 대역 min_stop_pct~max_stop_pct, 돌파 확인 confirm_on_close)와
+엔진 게이트(롱 전용·국면·잔고·리스크 사이징·종목 중복)는 모든 규칙에 자동 적용된다.
 """
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -92,6 +92,15 @@ def _atr_buffer(df: pd.DataFrame, cfg: dict, fallback: float) -> float:
         return fallback
     a = ind.atr(df, cfg.get("atr_period", 14)).iloc[-1]
     return float(mult * a) if a and not pd.isna(a) and a > 0 else fallback
+
+
+def _stop_bound(rule_cfg: dict, rules_cfg: dict, key: str) -> float:
+    """손절폭 경계(%) — 규칙별 설정 우선, 없으면 전역. 잘못된 값은 미적용(0)."""
+    v = rule_cfg.get(key, rules_cfg.get(key, 0))
+    try:
+        return max(0.0, float(v or 0))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def bar_closed(ts: datetime | None, now: datetime) -> bool:
@@ -473,10 +482,25 @@ def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
         if eb and s.ts is not None and s.ts.time() >= _hhmm(eb):
             continue
         out.append(s)
-    # 손절폭 상한 필터: 손절 거리가 과도한(고변동성·와이드스탑) 신호는 버린다.
-    # OCI 사례처럼 손절이 6% 떨어진 곳에 잡히는 저품질·휩쏘 거래를 애초에 차단.
-    max_stop = rules_cfg.get("max_stop_pct", 0)
-    if max_stop:
-        out = [s for s in out
-               if s.entry and abs(s.entry - s.stop) / s.entry * 100 <= max_stop]
-    return out
+    # 손절폭 대역 필터 — 양쪽 끝이 모두 손해다.
+    #  · 너무 좁으면(하한 미만) 왕복 비용이 목표 이익을 먹는다. 실측 2026-07-27:
+    #    손절폭 0.31% → 목표 0.47% 인데 비용 0.28% → 목표에 닿고도 -0.03%.
+    #  · 너무 넓으면(상한 초과) 목표(target_r×손절)가 하루 변동폭 밖으로 나가
+    #    애초에 닿을 수 없다. 실측: ORB 손절폭이 일중 변동폭의 48~73% → 목표 도달 0건.
+    # 규칙별 설정이 전역값을 덮어쓴다. 0 이면 그 방향은 미적용.
+    kept: list[Signal] = []
+    for s in out:
+        cfg = rules_cfg.get(s.rule) or {}
+        lo = _stop_bound(cfg, rules_cfg, "min_stop_pct")
+        hi = _stop_bound(cfg, rules_cfg, "max_stop_pct")
+        if not (lo or hi):
+            kept.append(s)
+            continue
+        if not s.entry:
+            continue                      # 경계가 있는데 계산 불가 → 폐기
+        # 부동소수 오차로 경계값(정확히 2.5%)이 튕기지 않게 반올림해 비교한다
+        pct = round(abs(s.entry - s.stop) / s.entry * 100, 4)
+        if (lo and pct < lo) or (hi and pct > hi):
+            continue
+        kept.append(s)
+    return kept
