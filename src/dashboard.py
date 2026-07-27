@@ -93,7 +93,7 @@ _TNM_GET_RE = re.compile(
 )
 _TNM_POST_RE = re.compile(
     r"^(items/\d+/label|watch|watch/sync|watch/\d{6}/(exclude|include|settings)"
-    r"|settings|collect/run|notify/test|reclassify_failed)$"
+    r"|settings|collect/run|promote/run|notify/test|reclassify_failed)$"
 )
 
 

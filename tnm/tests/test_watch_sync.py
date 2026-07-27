@@ -11,7 +11,8 @@ def test_parse_trading_watchlist():
         {"code": "011200", "name": "HMM"},
         {"code": "", "name": "무시"},
     ]}
-    assert parse_trading_watchlist(payload) == {"005930": "삼성전자", "011200": "HMM"}
+    assert parse_trading_watchlist(payload) == {
+        "005930": ("삼성전자", "collect"), "011200": ("HMM", "trade")}
 
 
 def test_parse_holdings_variants():
@@ -23,9 +24,10 @@ def test_parse_holdings_variants():
 
 
 def test_merge_auto_holding_wins():
-    auto = merge_auto({"005930": "삼성전자", "011200": "HMM"}, {"005930": "삼성전자"})
-    assert auto["005930"] == ("삼성전자", "holding")   # 보유가 우선
-    assert auto["011200"] == ("HMM", "trading")
+    auto = merge_auto({"005930": ("삼성전자", "trade"), "011200": ("HMM", "collect")},
+                      {"005930": "삼성전자"})
+    assert auto["005930"] == ("삼성전자", "holding", "trade")   # 보유가 우선
+    assert auto["011200"] == ("HMM", "trading", "collect")
 
 
 def test_sync_skips_when_trading_down(monkeypatch):
@@ -100,10 +102,10 @@ def _sync_handler(state, ops):
         if low.startswith("insert into tnm_watchlist"):
             ops["inserted"].append(args[0])
         elif low.startswith("update tnm_watchlist set last_seen_at"):
-            # (name, origin, ticker) — 경합 방어 WHERE 포함 UPDATE
+            # (name, origin, tier, ticker) — 경합 방어 WHERE 포함 UPDATE
             assert "not is_excluded" in low and "origin <> 'manual'" in low
-            ops["updated"].append(args[2])
-            ops["origins"].append((args[2], args[1]))
+            ops["updated"].append(args[3])
+            ops["origins"].append((args[3], args[1]))
         elif "is_active = false" in low:
             assert "not is_excluded" in low
             ops["deactivated"].extend(args[0])
@@ -199,7 +201,7 @@ def test_run_once_account_soft_failure(monkeypatch):
     monkeypatch.setattr(watch.corp_codes, "mapping_for_missing", no_corp)
     asyncio.run(ws.run_once())
     assert captured["ok_origins"] == {"trading"}         # holding 은 판정 제외
-    assert captured["auto"] == {"011200": ("HMM", "trading")}
+    assert captured["auto"] == {"011200": ("HMM", "trading", "trade")}
 
 
 def test_add_manual_conflict_contract(monkeypatch):

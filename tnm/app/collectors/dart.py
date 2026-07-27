@@ -23,7 +23,8 @@ KST = ZoneInfo("Asia/Seoul")
 
 _LIST_URL = "https://opendart.fss.or.kr/api/list.json"
 _VIEWER_URL = "https://dart.fss.or.kr/dsaf001/main.do?rcpNo={rcept_no}"
-_MAX_PAGES = 5           # 한 사이클 안전 상한 (100건/페이지)
+_MAX_PAGES = 5            # 종목별 모드 한 사이클 안전 상한 (100건/페이지)
+_MARKET_MAX_PAGES = 40    # 전종목 모드 상한 — 4,000건/사이클
 
 
 class _RateLimiter:
@@ -45,43 +46,105 @@ class _RateLimiter:
 _limiter = _RateLimiter()
 
 
-def parse_list_payload(payload: dict, cursor: str | None) -> tuple[list[RawDoc], str | None]:
-    """list.json 응답 → cursor(rcept_no) 초과분만 RawDoc 으로. 새 커서 = 최대 rcept_no."""
+def _to_doc(it: dict) -> RawDoc:
+    report_nm = str(it.get("report_nm", "")).strip()
+    corp_name = str(it.get("corp_name", "")).strip()
+    flr_nm = str(it.get("flr_nm", "")).strip()
+    rm = str(it.get("rm", "")).strip()
+    rcept_dt = str(it.get("rcept_dt", "")).strip()   # YYYYMMDD
+    try:
+        published = datetime.strptime(rcept_dt, "%Y%m%d").replace(tzinfo=KST)
+    except ValueError:
+        published = datetime.now(KST)
+    body = f"{corp_name} 공시 — {report_nm}. 제출인: {flr_nm}."
+    if rm:
+        body += f" 비고: {rm}"
+    return RawDoc(
+        source_uid=str(it.get("rcept_no", "")).strip(),
+        title=report_nm or f"{corp_name} 공시",
+        body=body,
+        url=_VIEWER_URL.format(rcept_no=it.get("rcept_no")),
+        published_at=published,
+    )
+
+
+def _new_items(payload: dict, cursor: str | None) -> list[dict]:
+    """응답에서 커서 초과분만. status 013(결과 없음)은 정상으로 본다."""
     status = str(payload.get("status", ""))
-    if status == "013":              # 조회 결과 없음 — 정상
-        return [], cursor
+    if status == "013":
+        return []
     if status != "000":
         raise RuntimeError(f"DART 오류 status={status}: {payload.get('message', '')}")
-    docs: list[RawDoc] = []
-    max_rcept = cursor or ""
+    out = []
     for it in payload.get("list", []) or []:
         rcept_no = str(it.get("rcept_no", "")).strip()
-        if not rcept_no:
+        if not rcept_no or (cursor and rcept_no <= cursor):
             continue
-        if cursor and rcept_no <= cursor:
-            continue
-        report_nm = str(it.get("report_nm", "")).strip()
-        corp_name = str(it.get("corp_name", "")).strip()
-        flr_nm = str(it.get("flr_nm", "")).strip()
-        rm = str(it.get("rm", "")).strip()
-        rcept_dt = str(it.get("rcept_dt", "")).strip()   # YYYYMMDD
-        try:
-            published = datetime.strptime(rcept_dt, "%Y%m%d").replace(tzinfo=KST)
-        except ValueError:
-            published = datetime.now(KST)
-        body = f"{corp_name} 공시 — {report_nm}. 제출인: {flr_nm}."
-        if rm:
-            body += f" 비고: {rm}"
-        docs.append(RawDoc(
-            source_uid=rcept_no,
-            title=report_nm or f"{corp_name} 공시",
-            body=body,
-            url=_VIEWER_URL.format(rcept_no=rcept_no),
-            published_at=published,
-        ))
-        if rcept_no > max_rcept:
-            max_rcept = rcept_no
+        out.append(it)
+    return out
+
+
+def parse_list_payload(payload: dict, cursor: str | None) -> tuple[list[RawDoc], str | None]:
+    """list.json 응답 → cursor(rcept_no) 초과분만 RawDoc 으로. 새 커서 = 최대 rcept_no."""
+    items = _new_items(payload, cursor)
+    docs = [_to_doc(it) for it in items]
+    max_rcept = max([str(it["rcept_no"]).strip() for it in items] + [cursor or ""])
     return docs, (max_rcept or cursor)
+
+
+def parse_market_payload(payload: dict, cursor: str | None
+                         ) -> tuple[list[tuple[str, RawDoc]], str | None]:
+    """전종목 응답 → [(corp_code, RawDoc)] + 새 커서.
+
+    종목별 모드와 달리 어느 회사 공시인지 응답의 corp_code 로 판별한다.
+    호출자가 corp_code → 감시종목 매핑으로 걸러 적재한다.
+    """
+    items = _new_items(payload, cursor)
+    pairs = [(str(it.get("corp_code", "")).strip(), _to_doc(it))
+             for it in items if it.get("corp_code")]
+    max_rcept = max([str(it["rcept_no"]).strip() for it in items] + [cursor or ""])
+    return pairs, (max_rcept or cursor)
+
+
+async def fetch_market(cursor: str | None, initial_days: int = 3,
+                       max_pages: int = _MARKET_MAX_PAGES
+                       ) -> tuple[list[tuple[str, RawDoc]], str | None, bool]:
+    """corp_code 없이 날짜 범위로 **전체 공시**를 받아온다.
+
+    종목당 1콜(감시 65종목 = 65콜/사이클)에서 목록 몇 콜로 바뀐다. 같은 비용에
+    감시목록 밖 종목까지 커버되고, 종목이 늘어도 호출 수가 늘지 않는다.
+
+    오름차순으로 훑고 커서는 **실제로 받아온 최대 rcept_no** 까지만 전진시킨다.
+    페이지 상한에 걸려 중간에 끊겨도 건너뛴 구간이 생기지 않는다(다음 사이클이
+    이어받는다). 반환 3번째 값은 '아직 남았는가'.
+    """
+    if cursor and len(cursor) >= 8 and cursor[:8].isdigit():
+        bgn_de = cursor[:8]
+    else:
+        bgn_de = (datetime.now(KST) - timedelta(days=initial_days)).strftime("%Y%m%d")
+    pairs: list[tuple[str, RawDoc]] = []
+    new_cursor = cursor
+    more = False
+    async with httpx.AsyncClient(timeout=30) as client:
+        for page in range(1, max_pages + 1):
+            await _limiter.wait()
+            r = await client.get(_LIST_URL, params={
+                "crtfc_key": settings.DART_API_KEY,
+                "bgn_de": bgn_de,
+                "end_de": datetime.now(KST).strftime("%Y%m%d"),
+                "page_no": page, "page_count": 100,
+                "sort": "date", "sort_mth": "asc",
+            })
+            r.raise_for_status()
+            payload = r.json()
+            got, new_cursor = parse_market_payload(payload, new_cursor)
+            pairs.extend(got)
+            total_page = int(payload.get("total_page", 1) or 1)
+            if page >= total_page:
+                break
+            if page >= max_pages:
+                more = True
+    return pairs, new_cursor, more
 
 
 class DartCollector:

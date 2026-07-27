@@ -27,6 +27,33 @@ def is_market_hours(now: datetime) -> bool:
     return now.weekday() < 5 and "09:00" <= now.strftime("%H:%M") <= "16:00"
 
 
+DART_CURSOR_KEY = "dart_market_rcept_no"
+# 계층별 뉴스 수집 주기(분). 구글 RSS 는 종목명 검색이라 종목당 1콜이 강제돼
+# 전종목이 불가능하다. 대신 매매 대상은 자주, 그 외는 드물게 본다.
+DEFAULT_TIER_INTERVAL = {"trade": 30, "collect": 120, "other": 720}
+
+
+def tier_interval(tier: str, cfg: dict) -> int:
+    table = {**DEFAULT_TIER_INTERVAL, **(cfg.get("tier_interval_min") or {})}
+    return int(table.get(tier) or table.get("other", 720))
+
+
+def is_due(stock: dict, source: str, cfg: dict, now: datetime) -> bool:
+    """이 종목을 지금 수집할 차례인가. 시도 이력이 없으면 항상 대상."""
+    raw = (stock.get("last_attempt") or {}).get(source)
+    if not raw:
+        return True
+    try:
+        last = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=KST)
+    gap_min = (now - last).total_seconds() / 60
+    # 경계에서 한 주기를 통째로 미루지 않도록 여유를 둔다(루프 지터 흡수)
+    return gap_min >= tier_interval(stock.get("tier", "trade"), cfg) - 0.5
+
+
 def doc_to_row(doc: RawDoc) -> dict:
     norm = normalize((doc.title or "") + " " + (doc.body or ""))
     return {
@@ -57,12 +84,23 @@ class CollectRunner:
             return {"skipped": "DB 미준비"}
         self.running.add(kind)
         try:
+            if kind == "dart" and settings.COLLECT.get("dart", {}).get("market_mode", True):
+                return await self._run_dart_market()
             stocks = await db.active_watch_for_collect()
-            counts = {"stocks": 0, "fetched": 0, "inserted": 0, "errors": 0}
+            cfg = settings.COLLECT.get(kind, {})
+            now = datetime.now(KST)
+            counts = {"stocks": 0, "fetched": 0, "inserted": 0, "errors": 0,
+                      "skipped_not_due": 0}
+            attempted: list[str] = []
             for col in self.collectors.get(kind, []):
                 for stock in stocks:
                     if not col.enabled(stock):
                         continue
+                    # 계층별 주기 — 매매 대상은 자주, 수집전용·기타는 드물게
+                    if not is_due(stock, kind, cfg, now):
+                        counts["skipped_not_due"] += 1
+                        continue
+                    attempted.append(stock["ticker"])
                     cursors = stock.get("last_collected_at") or {}
                     try:
                         docs, new_cursor = await col.fetch(stock, cursors.get(col.name))
@@ -79,6 +117,7 @@ class CollectRunner:
                         counts["inserted"] += n
                     if new_cursor and new_cursor != cursors.get(col.name):
                         await db.set_cursor(stock["ticker"], col.name, new_cursor)
+            await db.mark_attempt(sorted(set(attempted)), kind)
             self.last_run[kind] = datetime.now(KST).isoformat(timespec="seconds")
             self.last_result[kind] = counts
             if counts["fetched"] or counts["errors"]:
@@ -86,6 +125,56 @@ class CollectRunner:
             return counts
         finally:
             self.running.discard(kind)
+
+    async def _run_dart_market(self) -> dict:
+        """DART 전종목 모드 — 날짜 범위로 전체 공시를 받아 우리 종목만 적재한다.
+
+        종목별 모드는 감시 65종목 = 65콜/사이클이고 종목이 늘면 그대로 늘어난다.
+        전종목 모드는 목록 몇 콜로 끝나고 종목 수와 무관하다. 감시목록 밖 공시는
+        지금은 세기만 한다 — 후보 편입은 별도 판단이 필요하다.
+        """
+        from .collectors import dart as dart_mod
+
+        cfg = settings.COLLECT.get("dart", {})
+        counts = {"mode": "market", "stocks": 0, "fetched": 0, "inserted": 0,
+                  "errors": 0, "unmatched": 0, "more": False}
+        if not settings.DART_API_KEY:
+            return counts | {"skipped": "DART 키 없음"}
+        cursor = await db.get_state(DART_CURSOR_KEY)
+        try:
+            pairs, new_cursor, more = await dart_mod.fetch_market(
+                cursor, initial_days=int(cfg.get("market_initial_days", 3)))
+        except Exception as e:  # noqa: BLE001 — 사이클 격리
+            log.warning("dart 전종목 수집 실패: %s", e)
+            return counts | {"errors": 1}
+        by_corp = await db.watch_by_corp_code()
+        grouped: dict[int, list[dict]] = {}
+        tickers: list[str] = []
+        for corp_code, doc in pairs:
+            stock = by_corp.get(corp_code)
+            if not stock:
+                counts["unmatched"] += 1
+                continue
+            grouped.setdefault(stock["id"], []).append(doc_to_row(doc))
+            tickers.append(stock["ticker"])
+        for wid, rows in grouped.items():
+            counts["fetched"] += len(rows)
+            try:
+                counts["inserted"] += await db.insert_raw_items(wid, "dart", rows)
+                counts["stocks"] += 1
+            except Exception as e:  # noqa: BLE001 — 종목 단위 격리
+                counts["errors"] += 1
+                log.warning("dart 적재 실패 watchlist_id=%s: %s", wid, e)
+        await db.mark_attempt(sorted(set(tickers)), "dart")
+        # 커서는 적재 성공 여부와 무관하게 '받아온 만큼' 전진한다. 적재는 멱등이라
+        # 다음 사이클이 같은 구간을 다시 봐도 중복이 생기지 않는다.
+        if new_cursor and new_cursor != cursor:
+            await db.set_state(DART_CURSOR_KEY, new_cursor)
+        counts["more"] = more
+        self.last_run["dart"] = datetime.now(KST).isoformat(timespec="seconds")
+        self.last_result["dart"] = counts
+        log.info("dart 전종목 수집: %s", counts)
+        return counts
 
     async def dart_loop(self) -> None:
         cfg = settings.COLLECT.get("dart", {})
