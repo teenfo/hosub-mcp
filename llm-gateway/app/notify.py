@@ -60,6 +60,14 @@ class SlackNotifier:
         self._last[key] = state
         return True
 
+    def forget(self, key: str) -> None:
+        """전이 기록을 지운다.
+
+        모델을 삭제할 때 반드시 불러야 한다. 안 지우면 그 모델이 나중에 진짜로
+        다시 필요해졌을 때 "이미 pending 을 알렸다" 며 알림이 **억제**된다.
+        """
+        self._last.pop(key, None)
+
     # ---------- 1) 모델 설치 승인 ----------
     async def model_approval_needed(self, req: dict) -> None:
         model = req.get("model", "?")
@@ -99,6 +107,14 @@ class SlackNotifier:
             await self._post(
                 f"[LLM 게이트웨이] 모델 설치 실패: {model} — {error or '원인 미상'}"
             )
+
+    async def model_deleted(self, model: str, *, freed_gb: float | None = None,
+                            actor: str | None = None) -> None:
+        """모델 삭제는 상태 전이가 아니라 **사건**이라 _changed 를 거치지 않는다.
+        (거쳤다면 지웠다가 다시 깔았을 때 두 번째 삭제가 조용히 묻힌다)"""
+        freed = f" (~{freed_gb}GB 확보)" if freed_gb else ""
+        by = f" by {actor}" if actor else ""
+        await self._post(f"[LLM 게이트웨이] 모델 삭제: {model}{freed}{by}")
 
     # ---------- 2) 백엔드 장애 ----------
     async def backend_offline(self, base_url: str, error: str) -> None:

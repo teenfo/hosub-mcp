@@ -235,7 +235,9 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
     async def api_llm_models_decide(request):
         """모델 설치 승인/거부 — 조회 전용 대시보드의 의도된 예외.
 
-        승인해도 설치되는 것은 PR 리뷰를 거친 역할이 참조하는 모델뿐이다.
+        경계는 세 겹이다: (1) 게이트웨이가 admin 토큰(hosub)만 통과시키고,
+        (2) 관리 계열 경로는 Caddy 가 공개 노출에서 잘라내며,
+        (3) 모든 변경이 대시보드 감사와 게이트웨이 admin_audit 양쪽에 남는다.
         """
         if (d := _require_auth_json(request)):
             return d
@@ -254,6 +256,57 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
             params={"model": model, "action": action, "via": "dashboard"},
             risk="medium", outcome=result.get("status", "error"),
             result_summary=str(result.get("request") or result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
+    # --- 모델 운영 (게이트웨이 /v1/admin/*) ---
+    async def api_llm_installed(request):
+        """맥에 설치된 모델 + 용량 + 쓰는 역할 + 최근 사용 + 삭제 차단 사유."""
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(gateway.list_installed_models))
+
+    async def api_llm_catalog(request):
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(
+            gateway.search_catalog,
+            request.query_params.get("q") or "",
+            request.query_params.get("kind"),
+        ))
+
+    async def api_llm_model_install(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        model = (body.get("model") or "").strip()
+        if not model:
+            return JSONResponse({"status": "rejected", "reason": "model 이 필요합니다."},
+                                status_code=400)
+        result = await run_in_threadpool(gateway.install_model, model)
+        ctx.audit.log(
+            tool="llm_install_model", params={"model": model, "via": "dashboard"},
+            risk="medium", outcome=result.get("status", "error"),
+            result_summary=str(result.get("detail") or result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
+    async def api_llm_model_delete(request):
+        """맥에서 모델을 지운다 — 되돌리려면 수십 GB 를 다시 받아야 하므로 high."""
+        if (d := _require_auth_json(request)):
+            return d
+        model = (request.query_params.get("model") or "").strip()
+        if not model:
+            return JSONResponse({"status": "rejected", "reason": "model 이 필요합니다."},
+                                status_code=400)
+        result = await run_in_threadpool(gateway.delete_model, model)
+        ctx.audit.log(
+            tool="llm_delete_model", params={"model": model, "via": "dashboard"},
+            risk="high", outcome=result.get("status", "error"),
+            result_summary=str(result.get("error") or result.get("freed_gb") or "")[:300],
         )
         return JSONResponse(result)
 
@@ -402,6 +455,10 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/llm/jobs/{job_id}", api_llm_job),
         Route("/api/llm/models", api_llm_models),
         Route("/api/llm/models/decide", api_llm_models_decide, methods=["POST"]),
+        Route("/api/llm/installed", api_llm_installed),
+        Route("/api/llm/catalog", api_llm_catalog),
+        Route("/api/llm/models/install", api_llm_model_install, methods=["POST"]),
+        Route("/api/llm/models/delete", api_llm_model_delete, methods=["DELETE"]),
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),

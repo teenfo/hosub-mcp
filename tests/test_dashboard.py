@@ -184,3 +184,79 @@ def test_llm_generate_rejects_empty_prompt(client):
     client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
     r = client.post("/api/llm/generate", json={"prompt": "   "})
     assert r.status_code == 400
+
+
+# --- 모델 운영 (게이트웨이 /v1/admin/* 프록시) ---
+def test_model_ops_routes_need_login(client):
+    assert client.get("/api/llm/installed").status_code == 401
+    assert client.get("/api/llm/catalog").status_code == 401
+    assert client.post("/api/llm/models/install", json={"model": "m"}).status_code == 401
+    assert client.delete("/api/llm/models/delete?model=m").status_code == 401
+
+
+def test_installed_models_proxied(client, monkeypatch):
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "list_installed_models", lambda: {
+        "status": "ok", "total_size_gb": 12.5,
+        "models": [{"name": "qwen2.5:7b", "size_gb": 4.5, "roles": ["summarize"],
+                    "blockers": [{"kind": "roles", "message": "쓰는 역할이 있습니다"}],
+                    "calls_30d": 3, "last_used": None}],
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/llm/installed").json()
+    assert d["total_size_gb"] == 12.5
+    assert d["models"][0]["blockers"][0]["kind"] == "roles"
+
+
+def test_model_install_is_audited_as_medium(client, monkeypatch):
+    from src import gateway
+
+    calls = []
+    monkeypatch.setattr(gateway, "install_model",
+                        lambda m: calls.append(m) or {"status": "approved"})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    assert client.post("/api/llm/models/install",
+                       json={"model": "qwen3:4b"}).status_code == 200
+    assert calls == ["qwen3:4b"]
+    row = next(r for r in client.get("/api/audit?limit=5").json()["audit"]
+               if r["tool"] == "llm_install_model")
+    assert row["risk"] == "medium"
+
+
+def test_model_delete_is_audited_as_high(client, monkeypatch):
+    """되돌리려면 수십 GB 를 다시 받아야 한다 — 감사 등급이 승인보다 높아야 한다."""
+    from src import gateway
+
+    calls = []
+    monkeypatch.setattr(gateway, "delete_model",
+                        lambda m: calls.append(m) or
+                        {"status": "deleted", "model": m, "freed_gb": 4.5})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.delete("/api/llm/models/delete?model=old:7b")
+    assert r.status_code == 200 and r.json()["status"] == "deleted"
+    assert calls == ["old:7b"]
+    row = next(r for r in client.get("/api/audit?limit=5").json()["audit"]
+               if r["tool"] == "llm_delete_model")
+    assert row["risk"] == "high"
+
+
+def test_model_ops_require_model_param(client):
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    assert client.post("/api/llm/models/install", json={}).status_code == 400
+    assert client.delete("/api/llm/models/delete?model=").status_code == 400
+
+
+def test_catalog_search_passes_query(client, monkeypatch):
+    from src import gateway
+
+    seen = {}
+
+    def fake(query="", kind=None):
+        seen.update(query=query, kind=kind)
+        return {"status": "ok", "models": [], "installed": []}
+
+    monkeypatch.setattr(gateway, "search_catalog", fake)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    client.get("/api/llm/catalog?q=qwen&kind=embed")
+    assert seen == {"query": "qwen", "kind": "embed"}

@@ -10,9 +10,10 @@ import journal from "./journal.js";
 import tnm from "./tnm.js";
 import tnmSettings from "./tnm-settings.js";
 import llm from "./llm.js";
+import llmModels from "./llm-models.js";
 import briefing from "./briefing.js";
 import weather from "./weather.js";
 import docker from "./docker.js";
 
 export const PAGES = [dashboard, trading, discover, rules, backtest, journal,
-  tnm, tnmSettings, llm, briefing, weather, docker];
+  tnm, tnmSettings, llm, llmModels, briefing, weather, docker];

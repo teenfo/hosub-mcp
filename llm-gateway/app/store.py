@@ -322,6 +322,25 @@ class Store:
                 (utcnow(), service, role, model, eval_count, duration_ms, status),
             )
 
+    def usage_by_model(self, days: int = 30, limit: int = 50) -> list[dict]:
+        """모델별 사용 이력. "이 모델을 정말 쓰고 있나" 를 삭제 전에 확인한다.
+
+        usage.model 컬럼은 예전부터 있었는데 usage_summary 가 서비스로만 묶어서
+        쓰이지 않고 있었다. 스키마 변경 없이 다른 각도로 집계한다.
+        보존 기간(purge_old, 기본 30일)을 넘는 이력은 남아 있지 않다.
+        """
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT model, COUNT(*) calls, SUM(eval_count) tokens,"
+                " SUM(duration_ms) total_ms,"
+                " SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END) ok,"
+                " MAX(ts) last_used FROM usage"
+                " WHERE model IS NOT NULL AND ts >= datetime('now', ?)"
+                " GROUP BY model ORDER BY calls DESC LIMIT ?",
+                (f"-{int(days)} days", max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def usage_summary(self, limit_services: int = 20) -> list[dict]:
         with self._lock, self._connect() as conn:
             rows = conn.execute(
@@ -443,6 +462,34 @@ class Store:
             if cur.rowcount != 1:
                 return None
         return self.get_model_request(row["model"])
+
+    def set_model_request_size(self, model: str, est_size_gb: float) -> None:
+        """추정 크기만 갱신. ensure_model_request 는 기존 행의 크기를 안 고친다 —
+        실측·카탈로그로 추정이 좋아졌는데 옛 값이 UI 에 남으면 안 된다."""
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE model_requests SET est_size_gb=? WHERE model=?",
+                         (float(est_size_gb), model))
+
+    def delete_model_request(self, model: str) -> bool:
+        """요청 행 자체를 지운다(모델을 삭제했을 때).
+
+        ready 로 남기면 _triage_missing 이 ready→pending 으로 되살리고 Slack 까지
+        쏜다. rejected 로 바꾸는 것도 답이 아니다 — DEAD_STATUSES 라 이후 잡이
+        "설치가 거부됨" 이라는 **거짓 사유**로 하드 실패한다. 행이 없는 것이
+        의미상 정확하다("미결 요청 없음"). 이력은 admin_audit 에 남는다.
+        """
+        with self._lock, self._connect() as conn:
+            cur = conn.execute("DELETE FROM model_requests WHERE model=?", (model,))
+            return cur.rowcount == 1
+
+    def queued_job_models(self) -> dict[str, int]:
+        """대기 중인 잡의 모델별 개수. 느슨한 매칭은 SQL 이 아니라 파이썬에서 한다."""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT model, COUNT(*) c FROM jobs WHERE status=? AND model IS NOT NULL"
+                " GROUP BY model", (QUEUED,),
+            ).fetchall()
+        return {r["model"]: int(r["c"]) for r in rows}
 
     def model_request_statuses(self) -> dict[str, str]:
         """모델 → 요청 상태. 스케줄러가 잡을 대기시킬지/실패시킬지 판단한다."""

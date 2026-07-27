@@ -205,6 +205,19 @@ class Scheduler:
     def pulling_snapshot(self) -> dict[str, int]:
         return dict(self._pulling)
 
+    def forget_model(self, model: str) -> None:
+        """맥에서 지운 모델을 보유 목록에서 즉시 뺀다.
+
+        다음 _refresh_models(최대 30초 뒤)까지 기다리면 /v1/status 가 그동안
+        "설치됨" 이라고 거짓말을 하고, _pick 이 없는 모델의 잡을 낙관적으로
+        실행해 404 로 죽인다.
+        """
+        if self._available is not None:
+            self._available = [m for m in self._available
+                               if not model_matches(model, m)]
+        self._models_detail = [d for d in self._models_detail
+                               if not model_matches(model, d["name"])]
+
     def _model_ready(self, model: str) -> bool:
         """맥에 이 모델이 있나. 목록을 모르면(백엔드 다운) 낙관적으로 True."""
         if self._available is None:
