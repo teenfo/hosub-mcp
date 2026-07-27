@@ -217,28 +217,70 @@ export default {
     mBB.onclick = () => { mBBon = !mBBon; mBB.classList.toggle("active", mBBon); mChart.setIndicator("bb", mBBon); };
     const mLegend = el("div", { class: "small d-flex gap-2 flex-wrap align-items-center ms-auto" },
       MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`)));
+    // 분봉은 하루 단위로 본다 — 기본 오늘(최근 거래일), 데이터 있는 날짜만 선택 가능
+    const mDate = el("input", { type: "date", class: "form-control form-control-sm w-auto",
+                                title: "데이터가 있는 날짜만 선택됩니다" });
+    const mDateList = el("datalist", { id: "bar-dates" });
+    const mToday = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "오늘");
     chart.body.append(
       el("div", { class: "d-flex align-items-center gap-2 flex-wrap mb-2" },
-        [symbolSel, mPeriodGroup, mBB, el("span", { class: "small text-secondary" }, "휠 확대·드래그 이동·더블클릭 리셋"), mLegend]),
+        [symbolSel, mDate, mToday, mDateList, mPeriodGroup, mBB,
+         el("span", { class: "small text-secondary" }, "휠 확대·드래그 이동·더블클릭 리셋"), mLegend]),
       mHost,
     );
 
     let watch = {};
     let mCurSym = "";
-    const loadChart = async () => {
+    let mCurDate = "";          // "" = 오늘(최근 거래일)
+    let mDates = [];            // 데이터 보유 날짜 (최신순)
+
+    const loadDates = async () => {
       if (!symbolSel.value) return;
       try {
-        const bars = await fetchJSON("/api/trading/bars/" + symbolSel.value + "?tf=1m&live=1");
-        if (symbolSel.value !== mCurSym) {
-          mCurSym = symbolSel.value;
-          mChart.setData(bars);                       // 종목 전환 → 새로 그림(확대 리셋)
+        const d = await fetchJSON(`/api/trading/bars/${symbolSel.value}/dates`);
+        mDates = d.dates || [];
+      } catch (e) { mDates = []; }
+      // 데이터 있는 날짜만 선택 가능하도록 범위·목록 제한 (브라우저 기본 표기)
+      mDateList.innerHTML = "";
+      for (const day of mDates) mDateList.appendChild(el("option", { value: day }));
+      mDate.setAttribute("list", "bar-dates");
+      if (mDates.length) {
+        mDate.min = mDates[mDates.length - 1];
+        mDate.max = mDates[0];
+      }
+      mDate.value = mCurDate || (mDates[0] || "");
+      mDate.title = mDates.length
+        ? `데이터 보유 ${mDates.length}일 (${mDates[mDates.length - 1]} ~ ${mDates[0]})`
+        : "저장된 분봉 없음";
+    };
+
+    const loadChart = async (force = false) => {
+      if (!symbolSel.value) return;
+      try {
+        const q = mCurDate ? `?tf=1m&date=${mCurDate}` : "?tf=1m&live=1";
+        const bars = await fetchJSON(`/api/trading/bars/${symbolSel.value}${q}`);
+        const key = symbolSel.value + "|" + mCurDate;
+        if (force || key !== mCurSym) {
+          mCurSym = key;
+          mChart.setData(bars);                       // 종목·날짜 전환 → 새로 그림
           mPeriodBtns.forEach((x) => x.classList.remove("active"));
         } else {
           mChart.update(bars);                        // 실시간 갱신 → 확대/이동 보존
         }
       } catch (e) { /* 서비스 다운 시 상태 카드에 표시됨 */ }
     };
-    symbolSel.onchange = loadChart;
+    symbolSel.onchange = async () => { mCurDate = ""; await loadDates(); loadChart(true); };
+    mDate.onchange = () => {
+      const v = mDate.value;
+      if (v && mDates.length && !mDates.includes(v)) {
+        alert("해당 날짜의 분봉 데이터가 없습니다 (보유: " + mDates.slice(0, 5).join(", ") + " …)");
+        mDate.value = mCurDate || mDates[0] || "";
+        return;
+      }
+      mCurDate = (v && v === mDates[0]) ? "" : v;     // 최신일이면 실시간 모드
+      loadChart(true);
+    };
+    mToday.onclick = () => { mCurDate = ""; mDate.value = mDates[0] || ""; loadChart(true); };
 
     const loadStatus = async () => {
       let s;
@@ -259,6 +301,24 @@ export default {
       // 상태+계좌가 직전과 동일하면 다시 그리지 않는다 (깜빡임 제거)
       if (!changed("status", [s, a])) return;
       status.body.innerHTML = "";
+      // --- 감시 상태(장중 스캔 중인지) — 가장 먼저, 크게 ---
+      const mk = s.market || {};
+      const TONE = { open: "success", pre: "warning", closed: "secondary", disabled: "danger" };
+      const ICON = { open: "🟢", pre: "🟡", closed: "⚪", disabled: "🔴" };
+      const ageTxt = mk.last_scan_age_sec == null ? "스캔 기록 없음"
+        : mk.last_scan_age_sec < 120 ? `${mk.last_scan_age_sec}초 전 스캔`
+        : `${Math.floor(mk.last_scan_age_sec / 60)}분 전 스캔`;
+      const stale = mk.scanning && mk.last_scan_age_sec != null && mk.last_scan_age_sec > 180;
+      status.body.appendChild(el("div", {
+        class: `alert alert-${stale ? "danger" : (TONE[mk.phase] || "secondary")} py-2 px-3 mb-2`,
+      }, [
+        el("div", { class: "fw-semibold" },
+          `${ICON[mk.phase] || "⚪"} ${mk.label || "상태 미상"}` +
+          (mk.scanning ? ` · ${mk.watch_count ?? "-"}종목 · ${mk.scan_interval_sec ?? 60}초 주기` : "")),
+        el("div", { class: "small" },
+          (mk.scanning ? ageTxt + (stale ? " ⚠ 스캔이 멈춘 것 같습니다" : "")
+                       : `정규장 ${mk.session || "09:00~15:30"}`)),
+      ]));
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
       const clockBadge = s.server_time
         ? [" ", badge(s.clock_synced ? "동기화 ✓" : "미동기화 ⚠", s.clock_synced ? "success" : "danger")]
@@ -321,7 +381,7 @@ export default {
           symbolSel.appendChild(el("option", { value: code }, `${name} (${code})`));
         }
         if (keep && watch[keep]) symbolSel.value = keep;
-        loadChart();
+        loadDates().then(() => loadChart(true));
       }
     };
 
@@ -523,6 +583,6 @@ export default {
     ctx.addTimer(setInterval(refreshPrices, 2_000));   // 현재가 셀만 2초 갱신
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); }, 10_000));
     ctx.addTimer(setInterval(loadRisk, 30_000));
-    ctx.addTimer(setInterval(loadChart, 5_000)); // 실시간 분봉 (WS 집계 + 형성 중 봉 포함)
+    ctx.addTimer(setInterval(() => { if (!mCurDate) loadChart(); }, 5_000)); // 실시간 분봉(오늘일 때만)
   },
 };

@@ -353,6 +353,42 @@ class SignalEngine:
             self.last_signals = (found + self.last_signals)[:50]
         return found
 
+    def market_status(self) -> dict:
+        """지금 감시(신호 스캔)가 도는 상태인지 — 매매 데스크 표시용.
+
+        엔진 루프와 같은 조건(평일 09:00-15:30 + 키 설정)을 그대로 계산한다.
+        phase: closed(장 마감·주말) | pre(개장 전) | open(감시 중) | disabled(키 없음)
+        """
+        now = datetime.now(KST)
+        hhmm = now.strftime("%H:%M")
+        weekday = now.weekday() < 5
+        if not settings.KIWOOM_APP_KEY:
+            phase, label = "disabled", "API 키 미설정 — 감시 중지"
+        elif not weekday:
+            phase, label = "closed", "휴장(주말)"
+        elif hhmm < "09:00":
+            phase, label = "pre", "개장 전 대기"
+        elif hhmm <= "15:30":
+            phase, label = "open", "장중 감시 중"
+        else:
+            phase, label = "closed", "장 마감"
+        # 마지막 스캔 이후 경과(초) — 루프가 실제로 돌고 있는지의 근거
+        age = None
+        if self.last_run:
+            try:
+                age = int((now - datetime.fromisoformat(self.last_run)).total_seconds())
+            except ValueError:
+                age = None
+        return {
+            "phase": phase,
+            "label": label,
+            "scanning": phase == "open",
+            "scan_interval_sec": 60,
+            "last_scan_age_sec": age,
+            "watch_count": len(settings.WATCHLIST) - len(settings.COLLECT_ONLY),
+            "session": "09:00~15:30",
+        }
+
     async def loop(self, interval_sec: int = 60) -> None:
         while True:
             try:
