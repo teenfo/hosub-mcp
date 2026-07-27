@@ -28,6 +28,7 @@ def _pair(corp="AAA", ticker="005930", name="삼성전자", report="단일판매
     ("매출액또는손익구조30%(대규모법인은15%)이상변경", "실적"),
     ("연결재무제표기준영업(잠정)실적(공정공시)", "실적"),
     ("매매거래정지", "거래정지"),
+    ("[기재정정]연결재무제표기준영업(잠정)실적(공정공시)", "실적"),   # 정정은 본문으로 판정
     ("유상증자결정", "자본변동"),
     ("자기주식취득결정", "자본변동"),
 ])
@@ -51,6 +52,30 @@ def test_deny_wins_over_allow():
     assert discover.classify_report("[기재정정]단일판매ㆍ공급계약체결") == "공급계약"
 
 
+def test_correction_is_judged_by_what_was_corrected():
+    """정정을 통째로 통과시키면 일상 공시의 정정판이 다 들어온다.
+
+    실서버 예행(2026-07-27): 후보 191건 중 59건(31%)이 그런 것들이었다 —
+    대규모기업집단현황공시 정정 같은 것. 앞머리를 떼고 본 보고서명으로 판정한다.
+    """
+    assert discover.strip_correction("[기재정정]단일판매ㆍ공급계약체결") == \
+           ("단일판매ㆍ공급계약체결", True)
+    assert discover.strip_correction("단일판매ㆍ공급계약체결")[1] is False
+    assert discover.classify_report("[기재정정]대규모기업집단현황공시") is None
+    assert discover.classify_report("[첨부정정]분기보고서") is None
+
+
+@pytest.mark.parametrize("report", [
+    "증권발행실적보고서",           # '실적' 두 글자에 걸리던 자금조달 사후보고
+    "대규모기업집단현황공시",
+    "기업지배구조보고서",
+    "특수관계인과의내부거래",
+])
+def test_false_positives_from_the_live_dry_run(report):
+    """실서버 예행에서 실제로 통과했던 것들 — 회귀로 못박는다."""
+    assert discover.classify_report(report) is None
+
+
 def test_empty_report_name_is_rejected():
     assert discover.classify_report("") is None
     assert discover.classify_report(None) is None
@@ -63,7 +88,7 @@ def test_allowlist_centres_on_measured_categories():
     들어가 있다. 목록이 근거 없이 늘어나는 것을 막는다.
     """
     assert {"실적", "공급계약"} <= set(discover.ALLOW)
-    assert set(discover.ALLOW) == {"실적", "공급계약", "거래정지", "정정공시", "자본변동"}
+    assert set(discover.ALLOW) == {"실적", "공급계약", "거래정지", "자본변동"}
 
 
 # --- ② 후보 추출 ---
