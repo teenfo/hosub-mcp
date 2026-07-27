@@ -250,6 +250,7 @@ rules:
   # RSI 급락 눌림(롱) — Connors RSI-2 계열의 장중 적응(주식 승률 75%+ 문헌 엣지).
   # 연구 후보(주간 스윕 검증 후 활성).
   rsi_dip:
+    priority: 0.30          # 발주 우선순위(스윕 −0.66R)
     enabled: false
     rsi_period: 3
     oversold: 15              # 직전 봉 RSI 가 이 이하로 급락했을 때
@@ -261,6 +262,7 @@ rules:
   # 갭필 평균회귀(롱) — 갭하락 후 반전 확인 시 전일종가까지 되메우기 목표.
   # 문헌 검증 엣지(지수·대형주 ~0.5%/건). 연구 후보(우리 데이터 검증 후 활성).
   gap_fill:
+    priority: 0.25          # 발주 우선순위(스윕 표본 0)
     enabled: false
     min_gap_pct: 1.0          # 갭하락 최소 크기(%)
     confirm_bars: 5           # 반전 확인용 초반 봉수(이 고가 돌파 시 진입)
@@ -270,6 +272,7 @@ rules:
     atr_period: 14
   # VWAP 되찾기(롱) — VWAP 아래 체류 후 위로 복귀+양봉. 연구 후보(데이터 검증 후 활성).
   vwap_reclaim:
+    priority: 0.35          # 발주 우선순위(스윕 −0.43R)
     enabled: false
     min_bars: 30
     below_lookback: 15        # 최근 N봉 중
@@ -281,6 +284,7 @@ rules:
     target_r: 1.5
   # 박스 돌파 리테스트(롱) — 상단 돌파 후 되돌림 지지. 연구 후보(데이터 검증 후 활성).
   range_break_retest:
+    priority: 0.20          # 발주 우선순위(스윕 −1.63R)
     enabled: false
     range_lookback: 60
     retest_tolerance_pct: 0.3
@@ -290,6 +294,7 @@ rules:
   # 반등 페이드 — 딥리서치 검증 결론(하락장 단타의 추세 정렬 방향)을 코드화한 규칙.
   # 숏 전용 규칙 → 롱 전용 모드에선 발주되지 않으므로 비활성(신호 산출도 생략).
   bounce_fade:
+    priority: 0.25          # 발주 우선순위(스윕 표본 0)
     enabled: false
     rsi_hot: 60               # 반등 과열 하한 (딥리서치: RSI 60~70 도달이 매도 기회)
     rsi_max: 100              # 반등 과열 상한 (필요 시 70 으로 좁힘)
@@ -300,6 +305,7 @@ rules:
     require_downtrend: true   # 1단계 추세 게이트: 일봉 하락(역배열/장기선 하회)일 때만
     require_volume_dry: false # 반등 거래량 소진 조건(옵션)
   breakdown_retest:              # 숏 전용 규칙 → 롱 전용 모드에선 비활성
+    priority: 0.25          # 발주 우선순위(스윕 표본 0)
     enabled: false
     support_lookback: 60      # 지지선 산출용 봉 수
     retest_tolerance_pct: 0.3
