@@ -94,3 +94,44 @@ def test_bars_day_filter_tz_aware():
     df = _sample(tz="Asia/Seoul")
     assert len(_pick(df)) == 3
     assert len(_pick(df, "2026-07-24")) == 2
+
+
+# --- 감시 주기 설정 ---
+
+def test_scan_interval_clamped(monkeypatch):
+    """UI 값은 안전 범위로 클램프 — 키움 레이트리밋 보호."""
+    eng = SignalEngine()
+    for raw, want in [(30, 30), (5, 10), (9999, 300), ("bad", 60), (None, 60)]:
+        monkeypatch.setattr(settings, "RISK", {"scan_interval_sec": raw})
+        assert eng.scan_interval() == want, raw
+    monkeypatch.setattr(settings, "RISK", {})            # 미설정 → 기본 60
+    assert eng.scan_interval() == 60
+
+
+def test_save_risk_persists_scan_interval(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "RISK_FILE", tmp_path / "risk.json")
+    monkeypatch.setattr(settings, "RISK", {})
+    settings.save_risk(scan_interval_sec=20)
+    assert settings.RISK["scan_interval_sec"] == 20
+    settings.RISK.clear()
+    settings._load_risk_overrides()
+    assert settings.RISK["scan_interval_sec"] == 20      # 재기동 후에도 유지
+
+
+def test_save_risk_rejects_out_of_range(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "RISK_FILE", tmp_path / "risk.json")
+    monkeypatch.setattr(settings, "RISK", {})
+    for bad in (1, 5, 301, 1000):
+        try:
+            settings.save_risk(scan_interval_sec=bad)
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised, bad
+
+
+def test_market_status_reports_configured_interval(monkeypatch):
+    eng = SignalEngine()
+    monkeypatch.setattr(settings, "RISK", {"scan_interval_sec": 15})
+    _at(monkeypatch, datetime(2026, 7, 27, 10, 30, tzinfo=KST))
+    assert eng.market_status()["scan_interval_sec"] == 15
