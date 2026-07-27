@@ -312,24 +312,34 @@ class SignalEngine:
         if not self._fired_restored:
             self._restore_fired()
             self._fired_restored = True
+        # 수집: 전체 감시목록 백필(매매·수집전용 공통). 수집전용 종목도 데이터는 모은다.
+        # 매매 판단보다 **앞에** 둔다 — 잔고 조회 실패나 일일 가드로 매매가 멈춰도
+        # 분봉 축적은 이어져야 한다(차트·백테스트·다음 날 지표가 이 데이터를 쓴다).
+        for symbol in settings.WATCHLIST:
+            await collector.backfill_minutes(symbol)
         # 실계좌 자산 동기화 — 포지션 사이징이 가짜 기본값(1천만원)으로 계산되는 것 방지
         await self._sync_equity()
         if not self.equity_synced:
             self.last_run = datetime.now(KST).isoformat(timespec="seconds")
             log.warning("실계좌 자산 미확인 — 신규 신호 보류(포지션 사이징 불가)")
             return found
-        # 일일 목표·손실 가드: 목표 도달(이익 확정) 또는 손실 한도 도달 시 신규 진입 중단
-        self.guard = self.day_guard_status()
-        if self.guard["halted"]:
-            self.last_run = datetime.now(KST).isoformat(timespec="seconds")
-            log.info("일일 가드 작동: %s (오늘 %+.2f%%)",
-                     self.guard["reason"], self.guard["pct"])
-            return found
-        # 수집: 전체 감시목록 백필(매매·수집전용 공통). 수집전용 종목도 데이터는 모은다.
-        for symbol in settings.WATCHLIST:
-            await collector.backfill_minutes(symbol)
         # 유효 국면 갱신 — 백필 뒤에 계산해야 첫 사이클에도 '오늘 시가갭'이 반영된다.
         self._effective_regime()
+        # 일일 목표·손실 가드 — **완전 자동 발주를 위한 안전장치**다.
+        # 사람이 개입하지 않고 주문이 나가는 모드에서만 신규 진입을 끊는다.
+        # 자동 발주를 끄면 모든 주문이 사용자 승인을 거치므로 가드가 진입을 막지
+        # 않고, 대신 신호에 경고를 달아 판단을 사용자에게 넘긴다.
+        self.guard = self.day_guard_status()
+        auto = bool(settings.RISK.get("auto_approve", False))
+        if self.guard["halted"] and auto:
+            self.last_run = datetime.now(KST).isoformat(timespec="seconds")
+            log.info("일일 가드 작동(자동 발주 모드): %s (오늘 %+.2f%%)",
+                     self.guard["reason"], self.guard["pct"])
+            return found
+        guard_warn = self.guard["reason"] if self.guard["halted"] else ""
+        if guard_warn:
+            log.info("일일 가드 도달했으나 수동 승인 모드 — 신호 평가 계속: %s",
+                     guard_warn)
         # 매매: 수집전용(COLLECT_ONLY)을 제외한 트레이딩 대상만 규칙 평가·주문 제안.
         risk_pct = settings.RISK.get("risk_per_trade_pct", 0.5)
         max_w = self.max_position_weight_pct()
@@ -406,6 +416,10 @@ class SignalEngine:
             if actionable:
                 rec["order_id"] = orders.propose(sig, qty)
                 rec["actionable"] = True
+                if guard_warn:
+                    # 가드 도달 상태에서 만든 승인대기 주문 — 화면·일지에 표시해
+                    # 사용자가 '오늘 한도를 넘긴 뒤의 진입'임을 알고 승인하게 한다.
+                    rec["guard_warn"] = guard_warn
                 avail = max(0.0, avail - qty * sig.entry)   # 남은 현금에서 차감
                 # 같은 사이클에서 한도를 넘어 발주하지 않도록 즉시 반영(보수적 계산 —
                 # 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음 사이클에
@@ -438,7 +452,9 @@ class SignalEngine:
         """지금 감시(신호 스캔)가 도는 상태인지 — 매매 데스크 표시용.
 
         엔진 루프와 같은 조건(평일 09:00-15:30 + 키 설정)을 그대로 계산한다.
-        phase: closed(장 마감·주말) | pre(개장 전) | open(감시 중) | disabled(키 없음)
+        phase: closed(장 마감·주말) | pre(개장 전) | open(감시 중)
+             | halted(자동 발주 모드에서 일일 가드가 신규 진입을 막는 중)
+             | disabled(키 없음)
         """
         now = datetime.now(KST)
         hhmm = now.strftime("%H:%M")
@@ -453,6 +469,15 @@ class SignalEngine:
             phase, label = "open", "장중 감시 중"
         else:
             phase, label = "closed", "장 마감"
+        # 일일 가드 — 직전 사이클이 계산한 값(조회 비용 없이 재사용).
+        # 자동 발주 모드에서만 신규 진입을 막으므로, '막고 있는지'까지 구분해 알린다.
+        guard = self.guard or {}
+        halted = bool(guard.get("halted"))
+        auto = bool(settings.RISK.get("auto_approve", False))
+        blocking = halted and auto and phase == "open"
+        if blocking:
+            phase = "halted"
+            label = "신규 진입 중단 — " + (guard.get("reason") or "일일 가드 도달")
         # 마지막 스캔 이후 경과(초) — 루프가 실제로 돌고 있는지의 근거
         age = None
         if self.last_run:
@@ -464,7 +489,19 @@ class SignalEngine:
         return {
             "phase": phase,
             "label": label,
+            # scanning = 신호를 평가·발주하는가 / collecting = 루프가 돌며 분봉을
+            # 모으는가. 가드가 걸리면 앞은 멈추고 뒤는 계속된다 — 구분해서 알린다.
             "scanning": phase == "open",
+            "collecting": phase in ("open", "halted"),
+            "entries_blocked": blocking,
+            "guard": {
+                "halted": halted,
+                "reason": guard.get("reason", ""),
+                "pct": guard.get("pct"),
+                "auto_approve": auto,
+                # 가드 도달 + 수동 승인 = 사용자 책임으로 매매 계속
+                "manual_override": halted and not auto,
+            },
             "scan_interval_sec": interval,
             "last_scan_age_sec": age,
             # 다음 스캔까지 남은 초 — 화면 카운트다운의 기준점(브라우저가 1초씩 감산).
