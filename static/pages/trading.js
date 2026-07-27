@@ -30,9 +30,11 @@ export default {
     const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
     const guardC = card("일일 목표·가드", null, { icon: "bi-shield-check" });
+    const posC = card("보유 포지션 · 청산 관리", null, { wide: true, icon: "bi-briefcase" });
     // 각 카드를 독립 그리드 아이템으로 등록(id·기본 폭). 편집 모드에서 자유 배치·크기조절.
     const CARDS = [
       ["status", status, 6], ["guard", guardC, 6],
+      ["positions", posC, 12],
       ["pending", pending, 12], ["signals", signals, 12],
       ["chart", chart, 12],
     ];
@@ -282,6 +284,97 @@ export default {
     };
     mToday.onclick = () => { mCurDate = ""; mDate.value = mDates[0] || ""; loadChart(true); };
 
+    // --- 보유 포지션 · 청산 관리 ---
+    // 실제 계좌 보유(키움)와 시스템 추적 포지션(손절/목표 감시 대상)을 나란히 본다.
+    // 둘이 어긋나면(체결 실패·수동 매매 등) 경고를 띄운다 — 유령 포지션 감시 방지.
+    const posBody = el("div", { class: "small" });
+    posC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-shield-check"></i> 장중 30초마다 <b>손절·목표</b>를 감시해 도달 시 자동 시장가 청산하고, <b>15:30 이후</b> 남은 물량은 종가로 정리합니다(오버나이트 없음).' })),
+      posBody);
+
+    const closePos = async (id, name) => {
+      if (!confirm(`${name} 추적 포지션을 청산 처리할까요? (장부 기록 — 실제 매도 주문은 별도)`)) return;
+      try { await postJSON(`/api/trading/positions/${id}/close`); changed("pos", null); await loadPositions(); }
+      catch (e) { alert("실패: " + e.message); }
+    };
+
+    const loadPositions = async () => {
+      let perf = null, acct = null;
+      try { perf = await fetchJSON("/api/trading/performance"); } catch (e) { return; }
+      try { acct = await fetchJSON("/api/trading/account"); } catch (e) { acct = null; }
+      if (!changed("positions", [perf, acct])) return;
+      posBody.innerHTML = "";
+      const open = (perf && perf.open) || [];
+      const holds = (acct && acct.ok && acct.holdings) || [];
+      const holdBy = {};
+      for (const h of holds) holdBy[h.code] = h;
+      const trackBy = {};
+      for (const p of open) trackBy[p.symbol] = p;
+
+      // 불일치 경고 — 계좌엔 있는데 미추적 / 추적 중인데 계좌에 없음
+      const untracked = holds.filter((h) => !trackBy[h.code]);
+      const ghost = open.filter((p) => !holdBy[p.symbol]);
+      if (acct && acct.ok && (untracked.length || ghost.length)) {
+        const msgs = [];
+        if (ghost.length) msgs.push(`추적 중이나 계좌에 없음 ${ghost.length}건 (${ghost.map((p) => p.name || p.symbol).join(", ")}) — 미체결·수동매도 가능성`);
+        if (untracked.length) msgs.push(`계좌 보유이나 미추적 ${untracked.length}건 (${untracked.map((h) => h.name).join(", ")}) — 손절·목표 감시 대상 아님`);
+        posBody.appendChild(el("div", { class: "alert alert-warning py-2 px-3 mb-2" },
+          [el("div", { class: "fw-semibold" }, "⚠ 계좌와 추적 포지션 불일치"),
+           ...msgs.map((m) => el("div", { class: "small" }, m))]));
+      }
+
+      // 계좌 실보유 (진짜 돈이 들어간 것)
+      posBody.appendChild(el("div", { class: "fw-semibold mb-1" },
+        `계좌 보유 ${holds.length}건` + (acct && acct.ok ? ` · 평가 ${won(acct.total_eval)} · 손익 ${won(acct.total_pl)}` : "")));
+      if (holds.length) {
+        const t = el("table", { class: "table table-sm align-middle mb-3 small" });
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>수량</th><th>평단</th><th>현재가</th><th>평가손익</th><th>손절/목표</th><th></th></tr>" }));
+        const tb = el("tbody");
+        for (const h of holds) {
+          const p = trackBy[h.code];
+          const tone = h.pl_amt >= 0 ? "text-danger" : "text-primary";   // 한국식
+          const tr = el("tr", { html:
+            `<td>${h.name || h.code}</td><td>${fmt(h.qty)}</td><td>${fmt(h.avg_price)}</td>` +
+            `<td>${fmt(h.cur_price)}</td>` +
+            `<td class="${tone}">${won(h.pl_amt)} (${(h.pl_rt ?? 0).toFixed(2)}%)</td>` +
+            `<td>${p ? `${fmt(p.stop)} / ${fmt(p.target)}` : '<span class="text-warning">감시 없음</span>'}</td>` });
+          const td = el("td");
+          if (p) {
+            const b = el("button", { class: "btn btn-sm btn-outline-secondary py-0", type: "button" }, "청산");
+            b.onclick = () => closePos(p.id, h.name || h.code);
+            td.appendChild(b);
+          }
+          tr.appendChild(td);
+          tb.appendChild(tr);
+        }
+        t.appendChild(tb);
+        posBody.appendChild(el("div", { class: "table-responsive" }, t));
+      } else {
+        posBody.appendChild(el("div", { class: "text-secondary mb-3" },
+          acct && acct.ok ? "계좌 보유 종목 없음" : "계좌 조회 불가"));
+      }
+
+      // 추적 중이나 계좌에 없는 포지션(유령) — 별도 표시
+      if (ghost.length) {
+        posBody.appendChild(el("div", { class: "fw-semibold mb-1" }, `추적 전용 ${ghost.length}건 (계좌 미보유)`));
+        const t = el("table", { class: "table table-sm align-middle mb-0 small" });
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>진입</th><th>손절</th><th>목표</th><th></th></tr>" }));
+        const tb = el("tbody");
+        for (const p of ghost) {
+          const tr = el("tr", { class: "table-warning", html:
+            `<td>${p.name || p.symbol}</td><td>${p.rule}</td><td>${fmt(p.entry)}</td>` +
+            `<td>${fmt(p.stop)}</td><td>${fmt(p.target)}</td>` });
+          const td = el("td");
+          const b = el("button", { class: "btn btn-sm btn-outline-danger py-0", type: "button" }, "추적 종료");
+          b.onclick = () => closePos(p.id, p.name || p.symbol);
+          td.appendChild(b); tr.appendChild(td); tb.appendChild(tr);
+        }
+        t.appendChild(tb);
+        posBody.appendChild(el("div", { class: "table-responsive" }, t));
+      }
+    };
+
     const loadStatus = async () => {
       let s;
       try {
@@ -382,6 +475,7 @@ export default {
         }
         if (keep && watch[keep]) symbolSel.value = keep;
         loadDates().then(() => loadChart(true));
+        loadPositions();
       }
     };
 
@@ -583,6 +677,7 @@ export default {
     ctx.addTimer(setInterval(refreshPrices, 2_000));   // 현재가 셀만 2초 갱신
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); }, 10_000));
     ctx.addTimer(setInterval(loadRisk, 30_000));
+    ctx.addTimer(setInterval(loadPositions, 15_000));
     ctx.addTimer(setInterval(() => { if (!mCurDate) loadChart(); }, 5_000)); // 실시간 분봉(오늘일 때만)
   },
 };
