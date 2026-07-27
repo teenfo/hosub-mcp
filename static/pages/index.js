@@ -6,6 +6,7 @@ import trading from "./trading.js";
 import discover from "./discover.js";
 import rules from "./rules.js";
 import backtest from "./backtest.js";
+import journal from "./journal.js";
 import tnm from "./tnm.js";
 import tnmSettings from "./tnm-settings.js";
 import llm from "./llm.js";
@@ -13,5 +14,5 @@ import briefing from "./briefing.js";
 import weather from "./weather.js";
 import docker from "./docker.js";
 
-export const PAGES = [dashboard, trading, discover, rules, backtest,
+export const PAGES = [dashboard, trading, discover, rules, backtest, journal,
   tnm, tnmSettings, llm, briefing, weather, docker];

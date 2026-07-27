@@ -22,6 +22,7 @@ from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .trade import orders
+from . import journal
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("trading")
@@ -141,6 +142,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(discovery.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
+        asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
         asyncio.create_task(_ledger_loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
@@ -394,6 +396,39 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
             "tf": tf, "days": days, "stats": result.stats(), "trades": trades}
 
 
+@app.get("/api/journal")
+async def api_journal(date: str | None = None, _=Depends(require_auth)):
+    """하루치 매매일지. 저장본이 있으면 그대로, 없으면 즉석 계산(요약은 제외).
+
+    저장본을 우선하는 이유: LLM 요약은 생성 시점에 한 번만 만들고, 조회할 때마다
+    게이트웨이를 부르지 않는다.
+    """
+    day = date or datetime.now(KST).date().isoformat()
+    saved = await asyncio.to_thread(journal.load, day)
+    if saved:
+        return saved
+    entry = await asyncio.to_thread(journal.build, day)
+    entry["saved"] = False          # 아직 마감 잡이 돌지 않은 오늘치
+    return entry
+
+
+@app.get("/api/journal/history")
+async def api_journal_history(days: int = 30, _=Depends(require_auth)):
+    """일자별 요약 + 기간 누적(매매 경과 추이)."""
+    rows = await asyncio.to_thread(journal.history, max(1, min(365, days)))
+    return {"rows": rows, "cumulative": journal.cumulative(rows)}
+
+
+@app.post("/api/journal/run")
+async def api_journal_run(payload: dict | None = Body(None),
+                          _=Depends(require_auth)):
+    """일지 수동 생성·재작성(조회성 — 주문 없음). summary=false 면 LLM 생략."""
+    payload = payload or {}
+    day = payload.get("date") or datetime.now(KST).date().isoformat()
+    entry = await journal.generate(day, with_summary=payload.get("summary", True))
+    return entry
+
+
 @app.get("/api/backtest/report/latest")
 async def api_backtest_report(_=Depends(require_auth)):
     """분봉 축적분 주기 백테스트 최신 리포트(전체 요약 + 종목별). 종목명 포함."""
@@ -480,6 +515,8 @@ async def api_risk(_=Depends(require_auth)):
         "scan_interval_range": [settings.SCAN_INTERVAL_MIN_SEC,
                                 settings.SCAN_INTERVAL_MAX_SEC],
         "max_position_weight_pct": engine.max_position_weight_pct(),
+        "long_only": bool(settings.RISK.get("long_only", False)),
+        "signal_ttl_min": settings.RISK.get("signal_ttl_min", 10),
         # 돌파 확인: risk.json 오버라이드가 없으면 config.yaml 의 rules 기본값
         "confirm_on_close": bool(settings.RISK.get(
             "confirm_on_close", settings.RULES.get("confirm_on_close", False))),
@@ -498,6 +535,9 @@ async def api_risk_save(payload: dict, _=Depends(require_auth)):
             scan_interval_sec=payload.get("scan_interval_sec"),
             max_position_weight_pct=payload.get("max_position_weight_pct"),
             confirm_on_close=payload.get("confirm_on_close"),
+            max_positions=payload.get("max_positions"),
+            long_only=payload.get("long_only"),
+            signal_ttl_min=payload.get("signal_ttl_min"),
         )
     except (OSError, ValueError, TypeError) as e:
         return JSONResponse({"ok": False, "error": str(e)}, 400)

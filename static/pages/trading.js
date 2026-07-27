@@ -48,64 +48,111 @@ export default {
     // 저장된 배치·크기 복원 + '레이아웃 편집' 툴바 (브라우저별 localStorage)
     makeLayoutEditable(row, { key: "trading" });
 
-    // --- 일일 목표·가드 (목표값 설정 가능) ---
-    const gTarget = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
-    const gLoss = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
-    const gRisk = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", max: "50", style: "max-width:88px" });
-    const gWeight = el("input", { class: "form-control form-control-sm", type: "number", step: "1", min: "0", max: "100", style: "max-width:88px" });
-    const gAuto = el("input", { class: "form-check-input", type: "checkbox", id: "gAutoChk" });
-    const gScan = el("input", { class: "form-control form-control-sm", type: "number",
-                                step: "5", min: "10", max: "300", style: "max-width:88px" });
-    const gConfirm = el("input", { class: "form-check-input", type: "checkbox", id: "gConfirmChk" });
-    const gSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "저장");
+    // --- 매매 설정 입력 ---
+    // 값 편집은 전부 기어 모달(섹션별 접이식)로 모으고, 카드에는 상태만 남긴다.
+    const numIn = (attrs) => el("input", Object.assign(
+      { class: "form-control form-control-sm", type: "number", style: "max-width:96px" },
+      attrs));
+    const chk = (id) => el("input", { class: "form-check-input", type: "checkbox", id });
+    const gTarget = numIn({ step: "0.1", min: "0", max: "50" });
+    const gLoss = numIn({ step: "0.1", min: "0", max: "50" });
+    const gRisk = numIn({ step: "0.1", min: "0", max: "50" });
+    const gWeight = numIn({ step: "1", min: "0", max: "100" });
+    const gMaxPos = numIn({ step: "1", min: "1", max: "20" });
+    const gTtl = numIn({ step: "1", min: "1", max: "240" });
+    const gScan = numIn({ step: "5", min: "10", max: "300" });
+    const gAuto = chk("gAutoChk");
+    const gLongOnly = chk("gLongOnlyChk");
+    const gConfirm = chk("gConfirmChk");
     const gStatus = el("div", { class: "mt-2 small" });
-    const saveRisk = async () => {
+    const fld = (lbl, input, hint) => el("div", {}, [
+      el("label", { class: "form-label small text-secondary mb-0" }, lbl),
+      input,
+      hint ? el("div", { class: "form-text small lh-sm", style: "max-width:120px" }, hint) : null,
+    ]);
+    const sw = (input, label, desc) => el("div", { class: "mb-2" }, [
+      el("div", { class: "form-check form-switch" }, [
+        input,
+        el("label", { class: "form-check-label small fw-semibold", for: input.id }, label),
+      ]),
+      el("div", { class: "small text-secondary lh-sm" }, desc),
+    ]);
+
+    // 저장 — 섹션별로 나눠 실수로 다른 값까지 덮어쓰지 않게 한다.
+    const saveMsg = (box, ok, text) => {
+      box.className = "small mt-2 " + (ok ? "text-success" : "text-danger");
+      box.textContent = text;
+    };
+    const fundMsg = el("div", { class: "small mt-2" });
+    const gSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "자금·리스크 저장");
+    gSave.onclick = async () => {
       gSave.disabled = true;
       try {
         await postJSON("/api/trading/risk", {
-          daily_target_pct: parseFloat(gTarget.value),
-          daily_loss_limit_pct: parseFloat(gLoss.value),
           risk_per_trade_pct: parseFloat(gRisk.value),
           max_position_weight_pct: parseFloat(gWeight.value),
+          max_positions: parseInt(gMaxPos.value, 10),
+          daily_target_pct: parseFloat(gTarget.value),
+          daily_loss_limit_pct: parseFloat(gLoss.value),
+          signal_ttl_min: parseInt(gTtl.value, 10),
           auto_approve: gAuto.checked,
+          long_only: gLongOnly.checked,
         });
         _memo["risk"] = undefined;
         await loadRisk();
-      } catch (e) { alert("저장 실패: " + e.message); }
+        saveMsg(fundMsg, true, "저장됨 — 다음 신호부터 적용");
+      } catch (e) { saveMsg(fundMsg, false, "저장 실패: " + e.message); }
       finally { gSave.disabled = false; }
     };
-    gSave.onclick = saveRisk;
-    const fld = (lbl, input) => el("div", {}, [el("label", { class: "form-label small text-secondary mb-0" }, lbl), input]);
+
+    const scanMsg = el("div", { class: "small mt-2" });
+    const scanSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "감시·신호 저장");
+    scanSave.onclick = async () => {
+      scanSave.disabled = true;
+      try {
+        await postJSON("/api/trading/risk", {
+          scan_interval_sec: parseInt(gScan.value, 10),
+          confirm_on_close: gConfirm.checked,
+        });
+        _memo["risk"] = undefined;
+        await loadRisk();
+        saveMsg(scanMsg, true,
+          `저장됨 — ${gScan.value}초 주기 · 돌파 확인 ${gConfirm.checked ? "켜짐" : "꺼짐"} (다음 스캔부터)`);
+      } catch (e) { saveMsg(scanMsg, false, "저장 실패: " + e.message); }
+      finally { scanSave.disabled = false; }
+    };
+
+    // --- 일일 목표·가드 카드: 상태 표시 전용 ---
+    const openCfgBtn = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" },
+      [el("i", { class: "bi bi-gear" }), " 매매 설정"]);
     guardC.body.append(
-      el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-shield-check"></i> <b>거래당 리스크</b> = 1회 손절 시 계좌 대비 최대 손실 %(주문 수량을 정함). <b>종목당 비중</b> = 한 종목이 계좌에서 차지할 수 있는 최대 %(0=상한 없음). <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춤. (실거래 성과 로그 기준)' })),
-      el("div", { class: "d-flex gap-3 flex-wrap align-items-end" },
-        [fld("거래당 리스크 %", gRisk), fld("종목당 비중 %", gWeight),
-         fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss),
-         el("div", {}, gSave)]),
-      el("div", { class: "form-check form-switch mt-2" }, [
-        gAuto,
-        el("label", { class: "form-check-label small fw-semibold", for: "gAutoChk" },
-          "⚡ 완전 자동 발주 — 신호를 승인 없이 즉시 발주, 목표 청산도 자동 (저장 필요)"),
+      el("div", { class: "d-flex justify-content-between align-items-start gap-2 mb-2" }, [
+        el("div", { class: "small text-secondary" },
+          el("span", { html: '<i class="bi bi-shield-check"></i> <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춥니다. 값 변경은 <b>매매 설정</b>에서. (실거래 성과 로그 기준)' })),
+        openCfgBtn,
       ]),
-      el("div", { class: "small text-secondary mt-1" },
-        "팁: 거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 소액 계좌는 절대금액이 작아 대부분 1~2주로 잡힙니다. 종목당 비중은 100 ÷ 동시 보유 목표수 정도로 — 예: 5종목 목표면 20%."),
       gStatus,
     );
+
     const loadRisk = async () => {
       let r;
       try { r = await fetchJSON("/api/trading/risk"); } catch (e) { return; }
       if (!changed("risk", r)) return;
-      if (document.activeElement !== gTarget) gTarget.value = r.daily_target_pct;
-      if (document.activeElement !== gLoss) gLoss.value = r.daily_loss_limit_pct;
-      if (document.activeElement !== gRisk) gRisk.value = r.risk_per_trade_pct;
-      if (document.activeElement !== gWeight) gWeight.value = r.max_position_weight_pct ?? 0;
-      if (document.activeElement !== gScan) gScan.value = r.scan_interval_sec ?? 60;
+      // 입력 중인 칸은 건드리지 않는다(폴링이 타이핑을 덮어쓰지 않게).
+      const set = (input, v) => { if (document.activeElement !== input) input.value = v; };
+      set(gTarget, r.daily_target_pct);
+      set(gLoss, r.daily_loss_limit_pct);
+      set(gRisk, r.risk_per_trade_pct);
+      set(gWeight, r.max_position_weight_pct ?? 0);
+      set(gMaxPos, r.max_positions ?? 3);
+      set(gTtl, r.signal_ttl_min ?? 10);
+      set(gScan, r.scan_interval_sec ?? 60);
       if (Array.isArray(r.scan_interval_range)) {
         gScan.min = r.scan_interval_range[0];
         gScan.max = r.scan_interval_range[1];
       }
       gAuto.checked = !!r.auto_approve;
+      gLongOnly.checked = !!r.long_only;
       gConfirm.checked = !!r.confirm_on_close;
       gStatus.innerHTML = "";
       const cls = r.pct >= 0 ? "text-danger" : "text-primary";
@@ -123,6 +170,10 @@ export default {
         r.halted ? el("span", { class: "badge text-bg-warning" }, r.reason)
           : el("span", { class: "badge text-bg-success" }, "정상 — 진입 허용"),
         r.auto_approve ? el("span", { class: "badge text-bg-danger" }, "⚡ 완전 자동 발주 중") : null,
+        el("span", { class: "badge text-bg-light text-dark", title: "한 종목 최대 비중 · 최대 동시 포지션" },
+          `비중 ${r.max_position_weight_pct ? r.max_position_weight_pct + "%" : "무제한"} · 최대 ${r.max_positions ?? 3}종목`),
+        el("span", { class: "badge text-bg-light text-dark", title: "신호 스캔 간격 · 돌파 확인" },
+          `${r.scan_interval_sec ?? 60}초${r.confirm_on_close ? " · 돌파확인" : ""}`),
         r.regime ? el("span", {
           class: "badge text-bg-" + (r.regime === "강세" ? "danger" : r.regime === "약세" ? "primary" : "secondary"),
           title: `전일 breadth ${r.base_regime || "-"} · 당일 시가갭 ${r.gap_bias || "-"} · 야간리포트 ${r.night_bias || "-"}` },
@@ -133,15 +184,15 @@ export default {
       }
     };
 
-    // 상태 카드 헤더에 설정(기어) 버튼 추가 → 클릭 시 API 설정 모달 표시
+    // 상태 카드 헤더에 설정(기어) 버튼 추가 → 클릭 시 매매 설정 모달 표시
     const statusHeader = status.col.querySelector(".card-header");
     statusHeader.classList.add("d-flex", "justify-content-between", "align-items-center");
     const gearBtn = el("button", {
-      class: "btn btn-sm btn-link p-0 text-secondary", title: "키움 API 설정",
+      class: "btn btn-sm btn-link p-0 text-secondary", title: "매매 설정",
     }, el("i", { class: "bi bi-gear-fill" }));
     statusHeader.appendChild(gearBtn);
 
-    // --- 키움 API 설정 폼 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
+    // --- 키움 API 자격 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
     const envSel = el("select", { class: "form-select form-select-sm" }, [
       el("option", { value: "mock" }, "모의투자 (mockapi)"),
       el("option", { value: "real" }, "실전 (api.kiwoom.com)"),
@@ -149,55 +200,78 @@ export default {
     const appKeyIn = el("input", { class: "form-control form-control-sm", autocomplete: "off" });
     const secretIn = el("input", { class: "form-control form-control-sm", type: "password", autocomplete: "new-password" });
     const accountIn = el("input", { class: "form-control form-control-sm", autocomplete: "off" });
-    const saveBtn = el("button", { class: "btn btn-sm btn-primary mt-2" }, "저장");
+    const saveBtn = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "자격 저장");
     const cfgMsg = el("div", { class: "small mt-2" });
     const field = (label, input) =>
       el("div", { class: "mb-2" }, [el("label", { class: "form-label small mb-1" }, label), input]);
-
-    // API 설정 모달 (기어 버튼으로 연다)
-    const scanSave = el("button", { class: "btn btn-sm btn-outline-primary", type: "button" }, "주기 저장");
-    const scanMsg = el("div", { class: "small mt-1" });
     const usageBox = el("div", { class: "small" });
-    const modalBody = el("div", { class: "modal-body" }, [
-      el("div", { class: "fw-semibold small mb-2", html: '<i class="bi bi-key"></i> 키움 API 자격' }),
-      field("환경", envSel),
-      field("앱키 (App Key)", appKeyIn),
-      field("시크릿 키 (Secret Key)", secretIn),
-      field("계좌번호", accountIn),
-      cfgMsg,
-      el("hr", { class: "my-3" }),
-      el("div", { class: "fw-semibold small mb-2", html: '<i class="bi bi-speedometer2"></i> 감시 주기 · API 부하' }),
-      el("div", { class: "d-flex gap-2 align-items-end mb-1" },
-        [fld("감시 주기(초)", gScan), el("div", {}, scanSave)]),
-      el("div", { class: "small text-secondary mb-2" },
-        "신호 스캔 간격(10~300초). 짧을수록 진입이 빨라지지만 감시 종목수 × 호출이 늘어 API 한도에 가까워집니다. 저장 즉시 적용(재시작 불필요). 한도 초과(429)가 나면 서버가 자동으로 호출 속도를 절반으로 낮추고, 안정되면 단계적으로 회복합니다."),
-      el("div", { class: "form-check form-switch" }, [
-        gConfirm,
-        el("label", { class: "form-check-label small fw-semibold", for: "gConfirmChk" },
-          "🔒 돌파 확인 — 봉이 마감된 뒤에만 발사"),
-      ]),
-      el("div", { class: "small text-secondary mb-2" },
-        "키움 분봉은 '형성 중인 현재 봉'을 현재가로 함께 내려줍니다. 끄면 지금 이 순간 가격으로 판단해 더 빨리 진입하지만, 찍고 되밀린 가짜 돌파에도 반응합니다. 신호는 (종목·규칙)당 하루 한 번만 발사되므로 가짜 돌파 한 번이 그날의 기회를 소진합니다. 감시 주기를 짧게 쓸수록 켜 두는 편이 안전합니다. (백테스트는 항상 마감봉 기준이라 켠 쪽이 백테스트와 같은 조건입니다.)"),
-      scanMsg,
-      usageBox,
+
+    // --- 설정 모달: 섹션별 접이식(아코디언) ---
+    const ACC_ID = "tradeCfgAcc";
+    const accItem = (id, icon, title, children, open) => el("div", { class: "accordion-item" }, [
+      el("h2", { class: "accordion-header" },
+        el("button", {
+          class: "accordion-button py-2 px-3" + (open ? "" : " collapsed"),
+          type: "button", "data-bs-toggle": "collapse", "data-bs-target": "#" + id,
+        }, el("span", { class: "small fw-semibold", html: `<i class="bi bi-${icon}"></i> ${title}` }))),
+      el("div", {
+        id, class: "accordion-collapse collapse" + (open ? " show" : ""),
+        "data-bs-parent": "#" + ACC_ID,
+      }, el("div", { class: "accordion-body py-2 px-3" }, children)),
     ]);
+
+    const modalBody = el("div", { class: "modal-body pt-2" },
+      el("div", { class: "accordion", id: ACC_ID }, [
+        accItem("cfgFund", "cash-coin", "자금 · 리스크", [
+          el("div", { class: "d-flex gap-3 flex-wrap align-items-start" }, [
+            fld("거래당 리스크 %", gRisk, "1회 손절 시 계좌 대비 최대 손실"),
+            fld("종목당 비중 %", gWeight, "한 종목 최대 비중 (0=무제한)"),
+            fld("최대 동시 포지션", gMaxPos, "동시에 열 수 있는 종목 수"),
+            fld("일일 목표 %", gTarget, "도달 시 이익 확정·진입 중단"),
+            fld("손실 한도 %", gLoss, "도달 시 그날 진입 중단"),
+            fld("신호 만료(분)", gTtl, "승인 대기 신호 자동 만료"),
+          ]),
+          el("div", { class: "small text-secondary mt-2 lh-sm" },
+            "거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 종목당 비중은 100 ÷ 동시 보유 목표수 정도가 기준입니다 — 5종목 목표면 20%. 비중 상한이 없으면 손절폭이 좁은 첫 신호가 예수금을 독식하고 이후 신호가 전부 밀립니다."),
+          el("hr", { class: "my-2" }),
+          sw(gAuto, "⚡ 완전 자동 발주",
+            "신호를 승인 없이 즉시 발주하고 목표 도달 청산도 자동 실행합니다. 끄면 화면에서 승인해야 발주됩니다."),
+          sw(gLongOnly, "롱 전용",
+            "현물 계좌는 개별주 공매도가 불가하므로 숏 신호를 발주하지 않고 기록만 합니다."),
+          el("div", {}, gSave), fundMsg,
+        ], true),
+        accItem("cfgScan", "speedometer2", "감시 · 신호", [
+          el("div", { class: "d-flex gap-3 flex-wrap align-items-start mb-2" },
+            [fld("감시 주기(초)", gScan, "신호 스캔 간격 (10~300)")]),
+          el("div", { class: "small text-secondary mb-2 lh-sm" },
+            "짧을수록 진입이 빨라지지만 감시 종목수 × 호출이 늘어 API 한도에 가까워집니다. 저장 즉시 적용(재시작 불필요). 한도 초과(429)가 나면 서버가 호출 속도를 자동으로 절반까지 낮추고, 안정되면 단계적으로 회복합니다."),
+          sw(gConfirm, "🔒 돌파 확인 — 봉이 마감된 뒤에만 발사",
+            "키움 분봉은 '형성 중인 현재 봉'을 현재가로 함께 내려줍니다. 끄면 지금 이 순간 가격으로 판단해 더 빨리 진입하지만, 찍고 되밀린 가짜 돌파에도 반응합니다. 신호는 (종목·규칙)당 하루 한 번만 발사되므로 가짜 돌파 한 번이 그날의 기회를 소진합니다. 켜면 백테스트와 같은 조건이 됩니다."),
+          el("div", {}, scanSave), scanMsg,
+        ]),
+        accItem("cfgUsage", "activity", "API 호출 부하", [usageBox]),
+        accItem("cfgKeys", "key", "키움 API 자격", [
+          field("환경", envSel),
+          field("앱키 (App Key)", appKeyIn),
+          field("시크릿 키 (Secret Key)", secretIn),
+          field("계좌번호", accountIn),
+          el("div", {}, saveBtn), cfgMsg,
+        ]),
+      ]));
     const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
-      el("div", { class: "modal-dialog modal-dialog-centered" },
+      el("div", { class: "modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable" },
         el("div", { class: "modal-content" }, [
-          el("div", { class: "modal-header" }, [
-            el("h5", { class: "modal-title", html: '<i class="bi bi-key"></i> 키움 API 설정' }),
+          el("div", { class: "modal-header py-2" }, [
+            el("h5", { class: "modal-title", html: '<i class="bi bi-gear-fill"></i> 매매 설정' }),
             el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
           ]),
           modalBody,
-          el("div", { class: "modal-footer" }, [
-            el("button", { class: "btn btn-sm btn-secondary", type: "button", "data-bs-dismiss": "modal" }, "닫기"),
-            saveBtn,
-          ]),
+          el("div", { class: "modal-footer py-2" },
+            el("button", { class: "btn btn-sm btn-secondary", type: "button", "data-bs-dismiss": "modal" }, "닫기")),
         ]),
       ),
     );
     container.appendChild(modalEl);
-    saveBtn.className = "btn btn-sm btn-primary";  // 모달 푸터용 (mt-2 제거)
     const settingsModal = new bootstrap.Modal(modalEl);
     const renderUsage = (u) => {
       usageBox.innerHTML = "";
@@ -228,24 +302,7 @@ export default {
       );
     };
 
-    scanSave.onclick = async () => {
-      scanSave.disabled = true;
-      scanMsg.textContent = "";
-      try {
-        await postJSON("/api/trading/risk", {
-          scan_interval_sec: parseInt(gScan.value, 10),
-          confirm_on_close: gConfirm.checked,
-        });
-        _memo["risk"] = undefined;
-        await loadRisk();
-        scanMsg.className = "small mt-1 text-success";
-        scanMsg.textContent = `저장됨 — ${gScan.value}초 주기 · 돌파 확인 ${gConfirm.checked ? "켜짐" : "꺼짐"} (다음 스캔부터 적용)`;
-      } catch (e) {
-        scanMsg.className = "small mt-1 text-danger";
-        scanMsg.textContent = "저장 실패: " + e.message;
-      } finally { scanSave.disabled = false; }
-    };
-
+    openCfgBtn.onclick = () => gearBtn.onclick();
     gearBtn.onclick = async () => {
       loadSettings();
       settingsModal.show();

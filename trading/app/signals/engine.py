@@ -257,6 +257,18 @@ class SignalEngine:
             return 0.0
         return v if 0 < v <= 100 else 0.0
 
+    @staticmethod
+    def _log_signal(day: str, rec: dict) -> None:
+        """매매일지용 신호 기록. 주문 테이블에는 '발주된 것'만 남아 자금이 없어
+        밀린 신호가 보이지 않는다 — 사후 진단을 위해 미발주분까지 남긴다.
+        기록 실패가 매매를 막지 않도록 삼킨다."""
+        from .. import journal
+
+        try:
+            journal.record_signal(day, rec)
+        except Exception:  # noqa: BLE001 - 일지 기록 실패는 비치명적
+            log.exception("신호 기록 실패 %s %s", rec.get("symbol"), rec.get("rule"))
+
     def _sync_open_positions(self) -> None:
         """열린 포지션 수를 장부에서 읽어 리스크 상태에 반영한다.
         조회 실패는 무시(직전 값 유지) — 한도 판정 때문에 사이클을 멈추지 않는다."""
@@ -413,6 +425,7 @@ class SignalEngine:
                         rec["auto_status"] = "error"
             self._fired[key] = actionable
             found.append(rec)
+            self._log_signal(day, rec)
             log.info("신호 등록 %s(%s) %s %s qty=%d 우선순위=%.0f%s", name, symbol,
                      sig.rule, sig.side, qty, rec.get("priority", 0),
                      "" if rec["actionable"] else " · 승인대기 미생성")
