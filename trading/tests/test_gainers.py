@@ -46,3 +46,38 @@ def test_replace_gainers_rotates_and_skips_existing(tmp_path, monkeypatch):
     watchlist.replace_gainers([{"code": "005930", "name": "삼성전자", "collect_only": True}])
     codes = {e["code"] for e in watchlist.entries()}
     assert codes == {"010140", "005930"}                  # 011200(gainer) 제거, manual 유지
+
+
+def test_liquidity_floor_drops_thin_names(monkeypatch):
+    """유동성 하한 — 거래대금이 얇으면 소액 주문에도 시장 충격이 난다.
+    (실측 2026-07-27: 3~10억짜리가 감시목록에 들어와 실제로 매매·손절됨)"""
+    monkeypatch.setattr(settings, "WATCHLIST", {})
+    items = [
+        {"code": "000001", "name": "두꺼운주", "price": 10_000,
+         "volume": 500_000, "change_pct": 5.0},        # 50억
+        {"code": "000002", "name": "얇은주", "price": 10_000,
+         "volume": 50_000, "change_pct": 9.0},         # 5억 — 등락률이 더 높아도 탈락
+    ]
+    cfg = {"min_price": 1_000, "min_trade_value_krw": 3_000_000_000,
+           "trade_max_price": 30_000, "top_n": 15}
+    assert [x["code"] for x in scanner.filter_gainers(items, cfg)] == ["000001"]
+    # 하한을 낮추면 둘 다 통과 — 필터가 실제로 그 값을 쓴다는 확인
+    cfg["min_trade_value_krw"] = 100_000_000
+    assert len(scanner.filter_gainers(items, cfg)) == 2
+
+
+def test_config_liquidity_floor_is_raised():
+    """운영 config 의 하한이 30억 이상인지 — 값이 되돌아가면 잡는다."""
+    assert settings.CONFIG["gainers"]["min_trade_value_krw"] >= 3_000_000_000
+
+
+def test_config_stop_band():
+    """손절폭 대역이 비용 구조와 맞는지 — 왕복 비용 0.28% 를 이겨야 한다."""
+    r = settings.CONFIG["rules"]
+    costs = settings.CONFIG["costs"]
+    round_trip = (costs["commission_pct"] * 2 + costs["sell_tax_pct"]
+                  + costs["slippage_bp"] / 100 * 2)
+    target_r = r["orb"]["target_r"]
+    # 하한 × target_r 이 왕복 비용보다 충분히 커야 '이겨도 본전'이 안 된다
+    assert r["min_stop_pct"] * target_r > round_trip * 1.5
+    assert r["min_stop_pct"] < r["max_stop_pct"] <= 3.0

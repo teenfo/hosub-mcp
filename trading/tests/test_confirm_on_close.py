@@ -72,3 +72,63 @@ def test_default_now_does_not_suppress_history():
     """now 미지정(=현재 시각)이면 과거 봉은 모두 마감봉 — 백테스트 무영향."""
     df = _orb_df(20)
     assert rules.evaluate_all(df, {"orb": ORB, "confirm_on_close": True}) != []
+
+
+# --- 손절폭 대역 필터 (min_stop_pct ~ max_stop_pct) ---
+# 너무 좁으면 왕복 비용이 이익을 먹고, 너무 넓으면 목표가 하루 변동폭 밖으로 나간다.
+
+def _band_df(stop_pct: float):
+    """ORB 상단 돌파 — 손절폭(범위 하단까지 거리)을 원하는 %로 만든다."""
+    idx, rows = [], []
+    lo = 100.0
+    entry = 103.0
+    hi_range = entry / (1 + stop_pct / 100)      # 진입가 대비 손절폭이 stop_pct 가 되게
+    lo = entry * (1 - stop_pct / 100)
+    for m in range(15):                          # 09:00~09:14 범위 구간
+        idx.append(datetime(2026, 7, 27, 9, m, tzinfo=KST))
+        rows.append({"open": lo, "high": hi_range, "low": lo,
+                     "close": lo, "volume": 100})
+    idx.append(datetime(2026, 7, 27, 9, 19, tzinfo=KST))
+    rows.append({"open": hi_range, "high": entry, "low": hi_range,
+                 "close": entry, "volume": 500})
+    return pd.DataFrame(rows, index=pd.DatetimeIndex(idx))
+
+
+def _eval(stop_pct, **cfg):
+    rules_cfg = {"orb": {**ORB, "min_range_pct": 0, "max_range_pct": 0}, **cfg}
+    return rules.evaluate_all(_band_df(stop_pct), rules_cfg, now=NOW)
+
+
+def test_stop_band_filters_both_ends():
+    assert _eval(1.6) != []                                  # 대역 안 — 통과
+    assert _eval(1.6, min_stop_pct=1.0, max_stop_pct=2.5) != []
+    assert _eval(0.3, min_stop_pct=1.0, max_stop_pct=2.5) == []   # 너무 좁다
+    assert _eval(3.4, min_stop_pct=1.0, max_stop_pct=2.5) == []   # 너무 넓다
+
+
+def test_stop_band_boundaries_inclusive():
+    """경계값은 통과시킨다(1.0% 하한이면 정확히 1.0% 는 살린다)."""
+    assert _eval(1.0, min_stop_pct=1.0, max_stop_pct=2.5) != []
+    assert _eval(2.5, min_stop_pct=1.0, max_stop_pct=2.5) != []
+
+
+def test_stop_band_disabled_when_zero():
+    assert _eval(0.2, min_stop_pct=0, max_stop_pct=0) != []
+    assert _eval(9.0, min_stop_pct=0, max_stop_pct=0) != []
+
+
+def test_per_rule_stop_band_overrides_global():
+    """규칙별 설정이 전역 대역을 덮어쓴다."""
+    cfg = {"orb": {**ORB, "min_range_pct": 0, "max_range_pct": 0,
+                   "min_stop_pct": 0.1, "max_stop_pct": 9.0},
+           "min_stop_pct": 1.0, "max_stop_pct": 2.5}
+    assert rules.evaluate_all(_band_df(0.3), cfg, now=NOW) != []   # 규칙별이 이김
+
+
+def test_stop_bound_helper():
+    assert rules._stop_bound({"min_stop_pct": 2.0}, {"min_stop_pct": 1.0},
+                             "min_stop_pct") == 2.0     # 규칙별 우선
+    assert rules._stop_bound({}, {"min_stop_pct": 1.0}, "min_stop_pct") == 1.0
+    assert rules._stop_bound({}, {}, "min_stop_pct") == 0.0
+    assert rules._stop_bound({"min_stop_pct": "bad"}, {}, "min_stop_pct") == 0.0
+    assert rules._stop_bound({"min_stop_pct": -3}, {}, "min_stop_pct") == 0.0
