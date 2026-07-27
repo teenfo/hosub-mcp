@@ -383,13 +383,22 @@ class SignalEngine:
             "phase": phase,
             "label": label,
             "scanning": phase == "open",
-            "scan_interval_sec": 60,
+            "scan_interval_sec": self.scan_interval(),
             "last_scan_age_sec": age,
             "watch_count": len(settings.WATCHLIST) - len(settings.COLLECT_ONLY),
             "session": "09:00~15:30",
         }
 
-    async def loop(self, interval_sec: int = 60) -> None:
+    def scan_interval(self) -> int:
+        """감시 주기(초) — UI 에서 바꾸면 다음 사이클부터 즉시 적용(재시작 불필요)."""
+        try:
+            n = int(settings.RISK.get("scan_interval_sec", 60))
+        except (TypeError, ValueError):
+            return 60
+        return max(settings.SCAN_INTERVAL_MIN_SEC,
+                   min(settings.SCAN_INTERVAL_MAX_SEC, n))
+
+    async def loop(self, interval_sec: int | None = None) -> None:
         while True:
             try:
                 now = datetime.now(KST)
@@ -401,7 +410,7 @@ class SignalEngine:
                     await self.run_once()
             except Exception:  # noqa: BLE001
                 log.exception("엔진 루프 오류")
-            await asyncio.sleep(interval_sec)
+            await asyncio.sleep(interval_sec or self.scan_interval())
 
     async def collect_roster_once(self) -> int:
         """감시목록에서 이탈했지만 유예기간 내인 종목의 분봉을 백필한다.

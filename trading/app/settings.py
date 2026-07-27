@@ -133,9 +133,14 @@ def _load_risk_overrides() -> None:
             pass
 
 
+SCAN_INTERVAL_MIN_SEC = 10       # 키움 레이트리밋 보호 하한
+SCAN_INTERVAL_MAX_SEC = 300
+
+
 def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
-              risk_per_trade_pct=None, auto_approve=None) -> None:
-    """일일 목표·손실한도·거래당 리스크·자동발주를 갱신하고 risk.json 에 영속화."""
+              risk_per_trade_pct=None, auto_approve=None,
+              scan_interval_sec=None) -> None:
+    """일일 목표·손실한도·거래당 리스크·자동발주·감시주기를 risk.json 에 영속화."""
     import json
     ov: dict = {}
     if RISK_FILE.exists():
@@ -156,6 +161,13 @@ def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
     if auto_approve is not None:
         ov["auto_approve"] = bool(auto_approve)
         RISK["auto_approve"] = bool(auto_approve)
+    if scan_interval_sec is not None:
+        n = int(scan_interval_sec)
+        if not SCAN_INTERVAL_MIN_SEC <= n <= SCAN_INTERVAL_MAX_SEC:
+            raise ValueError(
+                f"감시 주기는 {SCAN_INTERVAL_MIN_SEC}~{SCAN_INTERVAL_MAX_SEC}초여야 합니다")
+        ov["scan_interval_sec"] = n
+        RISK["scan_interval_sec"] = n
     RISK_FILE.write_text(json.dumps(ov, ensure_ascii=False))
 
 

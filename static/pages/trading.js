@@ -53,6 +53,8 @@ export default {
     const gLoss = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
     const gRisk = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", max: "50", style: "max-width:88px" });
     const gAuto = el("input", { class: "form-check-input", type: "checkbox", id: "gAutoChk" });
+    const gScan = el("input", { class: "form-control form-control-sm", type: "number",
+                                step: "5", min: "10", max: "300", style: "max-width:88px" });
     const gSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "저장");
     const gStatus = el("div", { class: "mt-2 small" });
     const saveRisk = async () => {
@@ -63,6 +65,7 @@ export default {
           daily_loss_limit_pct: parseFloat(gLoss.value),
           risk_per_trade_pct: parseFloat(gRisk.value),
           auto_approve: gAuto.checked,
+          scan_interval_sec: parseInt(gScan.value, 10),
         });
         _memo["risk"] = undefined;
         await loadRisk();
@@ -75,7 +78,8 @@ export default {
       el("div", { class: "small text-secondary mb-2" },
         el("span", { html: '<i class="bi bi-shield-check"></i> <b>거래당 리스크</b> = 1회 손절 시 계좌 대비 최대 손실 %(주문 수량을 정함). <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춤. (실거래 성과 로그 기준)' })),
       el("div", { class: "d-flex gap-3 flex-wrap align-items-end" },
-        [fld("거래당 리스크 %", gRisk), fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss), el("div", {}, gSave)]),
+        [fld("거래당 리스크 %", gRisk), fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss),
+         fld("감시 주기(초)", gScan), el("div", {}, gSave)]),
       el("div", { class: "form-check form-switch mt-2" }, [
         gAuto,
         el("label", { class: "form-check-label small fw-semibold", for: "gAutoChk" },
@@ -83,6 +87,8 @@ export default {
       ]),
       el("div", { class: "small text-secondary mt-1" },
         "팁: 거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 소액 계좌는 절대금액이 작아 대부분 1~2주로 잡힙니다."),
+      el("div", { class: "small text-secondary" },
+        "감시 주기: 신호 스캔 간격(10~300초). 짧을수록 진입이 빨라지지만 감시 종목수 × 호출이 늘어 키움 API 한도·서버 부하가 커집니다. 30초 이하는 종목 수를 줄여 쓰세요. 저장 즉시 적용(재시작 불필요)."),
       gStatus,
     );
     const loadRisk = async () => {
@@ -92,6 +98,11 @@ export default {
       if (document.activeElement !== gTarget) gTarget.value = r.daily_target_pct;
       if (document.activeElement !== gLoss) gLoss.value = r.daily_loss_limit_pct;
       if (document.activeElement !== gRisk) gRisk.value = r.risk_per_trade_pct;
+      if (document.activeElement !== gScan) gScan.value = r.scan_interval_sec ?? 60;
+      if (Array.isArray(r.scan_interval_range)) {
+        gScan.min = r.scan_interval_range[0];
+        gScan.max = r.scan_interval_range[1];
+      }
       gAuto.checked = !!r.auto_approve;
       gStatus.innerHTML = "";
       const cls = r.pct >= 0 ? "text-danger" : "text-primary";

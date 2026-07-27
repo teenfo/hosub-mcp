@@ -464,6 +464,9 @@ async def api_risk(_=Depends(require_auth)):
         "risk_per_trade_pct": settings.RISK.get("risk_per_trade_pct", 0),
         "max_positions": settings.RISK.get("max_positions", 3),
         "auto_approve": bool(settings.RISK.get("auto_approve", False)),
+        "scan_interval_sec": engine.scan_interval(),
+        "scan_interval_range": [settings.SCAN_INTERVAL_MIN_SEC,
+                                settings.SCAN_INTERVAL_MAX_SEC],
     }
 
 
@@ -476,11 +479,13 @@ async def api_risk_save(payload: dict, _=Depends(require_auth)):
             daily_loss_limit_pct=payload.get("daily_loss_limit_pct"),
             risk_per_trade_pct=payload.get("risk_per_trade_pct"),
             auto_approve=payload.get("auto_approve"),
+            scan_interval_sec=payload.get("scan_interval_sec"),
         )
     except (OSError, ValueError, TypeError) as e:
         return JSONResponse({"ok": False, "error": str(e)}, 400)
     log.info("리스크 설정 갱신: %s", {k: settings.RISK.get(k) for k in
-             ("daily_target_pct", "daily_loss_limit_pct", "risk_per_trade_pct")})
+             ("daily_target_pct", "daily_loss_limit_pct", "risk_per_trade_pct",
+              "scan_interval_sec")})
     return {"ok": True, **engine.day_guard_status()}
 
 
