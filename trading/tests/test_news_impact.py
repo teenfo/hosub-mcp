@@ -265,3 +265,19 @@ def test_save_and_latest_round_trip(monkeypatch, tmp_path):
     monkeypatch.setattr(ni, "OUT_FILE", tmp_path / "ni.json")
     ni.save({"ok": True, "run_ts": "2026-07-27T23:00:00+09:00", "rows": 7})
     assert ni.latest()["rows"] == 7
+
+
+def test_bonferroni_threshold_scales_with_category_count():
+    """카테고리를 여러 개 훑으면 하나쯤은 우연히 |t|>2 를 넘는다."""
+    from app.research import eventstudy
+
+    rows = [(f"c{i}", "positive", 1.0, 1.0, 1.0) for i in range(6) for _ in range(40)]
+    df = pd.DataFrame([{
+        "symbol": "000001", "date": "2026-07-01", "horizon": "short",
+        "direction": d, "category": c, "score": 70,
+        "fwd_1": a, "fwd_3": b, "fwd_5": e,
+        "exc_fwd_1": a, "exc_fwd_3": b, "exc_fwd_5": e,
+    } for c, d, a, b, e in rows])
+    out = ni.analyze(df)
+    assert out["bonferroni_t"] == eventstudy.bonferroni_t(len(out["by_category"]))
+    assert out["bonferroni_t"] > 2.0

@@ -208,13 +208,17 @@ CAVEATS = [
 def analyze(df: pd.DataFrame) -> dict:
     if df.empty:
         return {"rows": 0}
+    cats = sorted(_by(df, "category", ()), key=lambda r: -r["n"])[:12]
     return {
         "rows": len(df),
         "symbols": int(df["symbol"].nunique()),
         "date_from": df["date"].min(), "date_to": df["date"].max(),
         "by_horizon": _by(df, "horizon", HORIZONS),
         "by_direction": _by(df, "direction", DIRECTIONS),
-        "by_category": sorted(_by(df, "category", ()), key=lambda r: -r["n"])[:12],
+        "by_category": cats,
+        # 카테고리를 여러 개 훑으면 하나쯤은 우연히 |t|>2 를 넘는다. 문턱을
+        # 올리지 않으면 '살아남은 카테고리' 가 발견이 아니라 다중검정의 산물이다.
+        "bonferroni_t": eventstudy.bonferroni_t(len(cats)),
         "horizon_ko": HORIZON_KO, "direction_ko": DIRECTION_KO,
         "targets": list(TARGETS), "min_bucket": MIN_BUCKET,
         "caveats": CAVEATS,
