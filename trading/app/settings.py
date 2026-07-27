@@ -139,8 +139,10 @@ SCAN_INTERVAL_MAX_SEC = 300
 
 def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
               risk_per_trade_pct=None, auto_approve=None,
-              scan_interval_sec=None) -> None:
-    """일일 목표·손실한도·거래당 리스크·자동발주·감시주기를 risk.json 에 영속화."""
+              scan_interval_sec=None, max_position_weight_pct=None,
+              confirm_on_close=None) -> None:
+    """일일 목표·손실한도·거래당 리스크·자동발주·감시주기·종목당 비중 상한·
+    돌파 확인 설정을 risk.json 에 영속화."""
     import json
     ov: dict = {}
     if RISK_FILE.exists():
@@ -158,6 +160,16 @@ def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
             raise ValueError(f"{key} 는 0~50% 범위여야 합니다")
         ov[key] = f
         RISK[key] = f
+    if max_position_weight_pct is not None:
+        # 0 = 상한 없음(종전 동작). 한 종목이 계좌의 몇 %까지 차지할 수 있는가.
+        f = float(max_position_weight_pct)
+        if not 0 <= f <= 100:
+            raise ValueError("종목당 비중 상한은 0~100% 범위여야 합니다")
+        ov["max_position_weight_pct"] = f
+        RISK["max_position_weight_pct"] = f
+    if confirm_on_close is not None:
+        ov["confirm_on_close"] = bool(confirm_on_close)
+        RISK["confirm_on_close"] = bool(confirm_on_close)
     if auto_approve is not None:
         ov["auto_approve"] = bool(auto_approve)
         RISK["auto_approve"] = bool(auto_approve)

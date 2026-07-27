@@ -17,10 +17,13 @@ Exit 우선 원칙: stop/target 없는 신호는 존재할 수 없다.
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from . import indicators as ind
+
+KST = ZoneInfo("Asia/Seoul")
 
 # 규칙 레지스트리: 이름 → (함수, 전일종가 필요 여부, 방향). 등록 순서 = 평가 순서.
 REGISTRY: dict[str, tuple[Callable, bool, str]] = {}
@@ -89,6 +92,24 @@ def _atr_buffer(df: pd.DataFrame, cfg: dict, fallback: float) -> float:
         return fallback
     a = ind.atr(df, cfg.get("atr_period", 14)).iloc[-1]
     return float(mult * a) if a and not pd.isna(a) and a > 0 else fallback
+
+
+def bar_closed(ts: datetime | None, now: datetime) -> bool:
+    """신호가 나온 봉이 이미 마감된 봉인가 (진행 중인 현재 분봉이면 False).
+
+    키움 분봉 응답은 '형성 중인 현재 봉'을 현재가를 종가로 해서 함께 내려준다.
+    그래서 규칙들이 보는 df.iloc[-1] 은 확정된 봉이 아니라 지금 이 순간의
+    가격이다 — 감시 주기를 짧게 줄수록 '찍고 되밀린 가짜 돌파'에 반응하게 된다.
+    신호는 (날짜·종목·규칙)당 하루 한 번만 발사되므로 가짜 돌파 한 번이
+    그날의 기회를 소진해 버린다. 이 함수는 그 확인 게이트의 판정부.
+
+    tz 유무가 섞일 수 있어(저장분은 KST aware, 테스트는 naive) naive 로 맞춰 비교한다.
+    """
+    if ts is None:
+        return True                       # 시각 미상 → 게이트 통과(과차단 방지)
+    a = ts.replace(tzinfo=None)
+    b = now.replace(tzinfo=None, second=0, microsecond=0)
+    return a < b
 
 
 def _downtrend_ok(cfg: dict) -> bool:
@@ -417,12 +438,19 @@ def breakdown_retest(df: pd.DataFrame, cfg: dict) -> Signal | None:
 
 
 def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
-                 prev_close: float | None = None) -> list[Signal]:
+                 prev_close: float | None = None,
+                 now: datetime | None = None) -> list[Signal]:
     """레지스트리의 모든 규칙을 순회 평가. config 에 enabled 인 규칙만 실행하고,
-    개별 규칙의 예외는 다른 규칙 평가를 막지 않는다(격리)."""
+    개별 규칙의 예외는 다른 규칙 평가를 막지 않는다(격리).
+
+    now: 돌파 확인(confirm_on_close) 판정 기준 시각. 미지정 시 현재 KST.
+    """
     out: list[Signal] = []
     if df.empty:
         return out
+    now = now or datetime.now(KST)
+    # 돌파 확인 기본값(전역) — 개별 규칙 cfg 의 confirm_on_close 가 우선한다.
+    confirm_default = bool(rules_cfg.get("confirm_on_close", False))
     for name, (fn, needs_prev, _side) in REGISTRY.items():
         cfg = rules_cfg.get(name, {})
         if not cfg.get("enabled"):
@@ -434,6 +462,10 @@ def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
             logging.getLogger(__name__).exception("규칙 %s 평가 오류", name)
             continue
         if not s:
+            continue
+        # 돌파 확인(공통): 진행 중인 현재 분봉에서 나온 신호는 아직 확정이 아니다.
+        # 켜 두면 봉이 마감된 뒤에만 발사 — 짧은 감시 주기에서 가짜 돌파를 거른다.
+        if cfg.get("confirm_on_close", confirm_default) and not bar_closed(s.ts, now):
             continue
         # 시간대 필터(공통) — 자체 데이터 검증: 첫 시간 진입만 엣지가 있는 기법이
         # 많다(orb 9시 +0.58R vs 11시 이후 전패). entry_before 이후 신호는 폐기.

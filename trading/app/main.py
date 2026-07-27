@@ -479,6 +479,10 @@ async def api_risk(_=Depends(require_auth)):
         "scan_interval_sec": engine.scan_interval(),
         "scan_interval_range": [settings.SCAN_INTERVAL_MIN_SEC,
                                 settings.SCAN_INTERVAL_MAX_SEC],
+        "max_position_weight_pct": engine.max_position_weight_pct(),
+        # 돌파 확인: risk.json 오버라이드가 없으면 config.yaml 의 rules 기본값
+        "confirm_on_close": bool(settings.RISK.get(
+            "confirm_on_close", settings.RULES.get("confirm_on_close", False))),
     }
 
 
@@ -492,12 +496,14 @@ async def api_risk_save(payload: dict, _=Depends(require_auth)):
             risk_per_trade_pct=payload.get("risk_per_trade_pct"),
             auto_approve=payload.get("auto_approve"),
             scan_interval_sec=payload.get("scan_interval_sec"),
+            max_position_weight_pct=payload.get("max_position_weight_pct"),
+            confirm_on_close=payload.get("confirm_on_close"),
         )
     except (OSError, ValueError, TypeError) as e:
         return JSONResponse({"ok": False, "error": str(e)}, 400)
     log.info("리스크 설정 갱신: %s", {k: settings.RISK.get(k) for k in
              ("daily_target_pct", "daily_loss_limit_pct", "risk_per_trade_pct",
-              "scan_interval_sec")})
+              "scan_interval_sec", "max_position_weight_pct", "confirm_on_close")})
     return {"ok": True, **engine.day_guard_status()}
 
 

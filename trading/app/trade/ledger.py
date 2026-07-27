@@ -287,6 +287,13 @@ def realized_today(equity: float) -> dict:
     return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows)}
 
 
+def open_count() -> int:
+    """현재 열린 포지션 수 — 동시 포지션 한도(max_positions) 판정 기준."""
+    with _conn() as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) c FROM positions WHERE status='open'").fetchone()["c"])
+
+
 def stats() -> dict:
     """청산 완료 포지션 집계: 전체 + 규칙별. 실현손익·기대값·슬리피지."""
     with _conn() as conn:

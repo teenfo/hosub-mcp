@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from .. import settings
 from ..data import collector, store
 from ..trade import orders, risk
-from . import rules
+from . import priority, rules
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -233,16 +233,61 @@ class SignalEngine:
             base.get(k, {}).get("require_downtrend") and base.get(k, {}).get("enabled")
             for k in ("bounce_fade", "breakdown_retest")
         )
-        if not needs:
-            return base
-        dt = self._daily_downtrend(symbol)
-        if dt is None:
-            return base  # 판단 보류 → 원본대로(게이트 통과)
-        merged = dict(base)
-        for k in ("bounce_fade", "breakdown_retest"):
-            if k in merged:
-                merged[k] = {**merged[k], "_daily_downtrend": dt}
-        return merged
+        if needs:
+            dt = self._daily_downtrend(symbol)
+            if dt is not None:      # None 이면 판단 보류 → 원본대로(게이트 통과)
+                base = dict(base)
+                for k in ("bounce_fade", "breakdown_retest"):
+                    if k in base:
+                        base[k] = {**base[k], "_daily_downtrend": dt}
+
+        # ③ 돌파 확인(UI 설정) 주입 — risk.json 오버라이드가 config.yaml 기본값을 이긴다.
+        override = settings.RISK.get("confirm_on_close")
+        if override is not None and bool(override) != bool(
+                base.get("confirm_on_close", False)):
+            base = dict(base)
+            base["confirm_on_close"] = bool(override)
+        return base
+
+    def max_position_weight_pct(self) -> float:
+        """한 종목 최대 비중(%) — 0 이면 미적용. 잘못된 값은 무시하고 기본값."""
+        try:
+            v = float(settings.RISK.get("max_position_weight_pct", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        return v if 0 < v <= 100 else 0.0
+
+    def _sync_open_positions(self) -> None:
+        """열린 포지션 수를 장부에서 읽어 리스크 상태에 반영한다.
+        조회 실패는 무시(직전 값 유지) — 한도 판정 때문에 사이클을 멈추지 않는다."""
+        from ..trade import ledger
+
+        self.state.max_positions = settings.RISK.get("max_positions", 3)
+        try:
+            self.state.open_positions = ledger.open_count()
+        except Exception:  # noqa: BLE001 - 장부 조회 실패는 비치명적
+            log.warning("열린 포지션 수 조회 실패 — 직전 값(%d) 유지",
+                        self.state.open_positions)
+
+    def _zero_qty_note(self, sig, risk_pct: float, max_w: float,
+                       avail: float) -> str:
+        """수량 0 의 원인을 구분해 화면에 보여줄 문구를 만든다.
+        (1) 남은 현금 부족 (2) 종목당 비중 상한 (3) 거래당 리스크 한도."""
+        affordable = int(avail // sig.entry) if sig.entry > 0 else 0
+        if affordable < 1:
+            return (f"잔고 부족 — 1주 ≈ {int(sig.entry):,}원 > "
+                    f"가용 {int(avail):,}원")
+        if max_w and risk.weight_cap_qty(self.equity, sig.entry, max_w) < 1:
+            limit = self.equity * max_w / 100
+            return (f"비중 상한 — 1주 ≈ {int(sig.entry):,}원이 종목당 상한"
+                    f"(계좌의 {max_w:g}% ≈ {int(limit):,}원)을 넘음. "
+                    f"상한을 올리면 매매 가능")
+        dist = abs(sig.entry - sig.stop)
+        budget = self.equity * risk_pct / 100
+        stop_pct = (dist / sig.entry * 100) if sig.entry else 0
+        return (f"리스크 한도 — 손절폭 {stop_pct:.1f}%(≈{int(dist):,}원)가 "
+                f"거래당 {risk_pct:g}% 한도(≈{int(budget):,}원)를 초과해 0주 "
+                f"(매수여력은 {affordable}주). 리스크%를 올리면 매매 가능")
 
     async def run_once(self) -> list[dict]:
         found: list[dict] = []
@@ -275,6 +320,17 @@ class SignalEngine:
         self._effective_regime()
         # 매매: 수집전용(COLLECT_ONLY)을 제외한 트레이딩 대상만 규칙 평가·주문 제안.
         risk_pct = settings.RISK.get("risk_per_trade_pct", 0.5)
+        max_w = self.max_position_weight_pct()
+        # 동시 포지션 한도의 기준값을 장부에서 동기화한다. open_positions 는 어디서도
+        # 갱신되지 않아 항상 0 이었고 — max_positions 가 사실상 무제한이었다.
+        self._sync_open_positions()
+
+        # --- 1단계: 후보 수집 (아직 발주하지 않는다) ---
+        # 발견 즉시 발주하면 감시목록 순회 순서(= 종목코드 순)가 자금 배분을 정해,
+        # 뒤에 나온 더 좋은 신호가 '잔고 부족'으로 밀린다. 한 패스에서 나온 신호를
+        # 모두 모은 뒤 우선순위대로 발주한다. 지연의 상한은 '이 패스 소요 시간'이지
+        # 감시 주기가 아니다(어차피 한 바퀴 도는 동안 발견되는 신호들이다).
+        cands: list[dict] = []
         for symbol, name in settings.WATCHLIST.items():
             if symbol in settings.COLLECT_ONLY:
                 continue  # 수집전용 — 데이터만 쌓고 신호·주문은 만들지 않는다
@@ -282,72 +338,84 @@ class SignalEngine:
             if df.empty:
                 continue
             for sig in rules.evaluate_all(df, self._rules_for(symbol), prev_close):
-                key = (day, symbol, sig.rule)
                 sig.symbol = symbol
-                # 감시 신호는 금액 제한 없이 산출(최근 신호 기록). 승인대기 주문은
-                # position_size(매수여력 + 거래당 리스크 반영)가 1주 이상일 때만.
-                qty = risk.position_size(self.equity, risk_pct, sig.entry, sig.stop)
-                rec = {"symbol": symbol, "name": name, "rule": sig.rule,
-                       "side": sig.side, "reason": sig.reason,
-                       "entry": sig.entry, "stop": sig.stop,
-                       "target": sig.target, "qty": qty, "actionable": False,
-                       "ts": datetime.now(KST).isoformat(timespec="seconds")}
-                actionable = False
-                # 국면 게이트: 인버스 ETF(직접 또는 숏→인버스 매핑)는 강세장 매수 보류.
-                if self._inverse_blocked(symbol, sig.side):
-                    rec["note"] = f"국면 게이트 — {self.regime}장이라 인버스 매수 보류"
-                # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
-                # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
-                elif settings.RISK.get("long_only", False) and sig.side != "long":
-                    rec["note"] = "롱 전용 모드 — 숏 미발주(현물 계좌 개별주 공매도 불가)"
-                elif qty < 1:
-                    # qty=0 원인 구분: (1) 매수여력 부족(진입가>자산) vs
-                    # (2) 리스크 한도 — 손절폭이 거래당 리스크%보다 넓어 0주.
-                    dist = abs(sig.entry - sig.stop)
-                    affordable = int(self.equity // sig.entry) if sig.entry > 0 else 0
-                    budget = self.equity * risk_pct / 100
-                    if affordable < 1:
-                        rec["note"] = (f"잔고 부족 — 1주 ≈ {int(sig.entry):,}원 > "
-                                       f"자산 {int(self.equity):,}원")
-                    else:
-                        stop_pct = (dist / sig.entry * 100) if sig.entry else 0
-                        rec["note"] = (
-                            f"리스크 한도 — 손절폭 {stop_pct:.1f}%(≈{int(dist):,}원)가 "
-                            f"거래당 {risk_pct:g}% 한도(≈{int(budget):,}원)를 초과해 0주 "
-                            f"(매수여력은 {affordable}주). 리스크%를 올리면 매매 가능")
+                if self._fired.get((day, symbol, sig.rule)) is True:
+                    continue      # 이미 발주됨 — 재발주 금지(정렬 대상에서도 제외)
+                cands.append({"symbol": symbol, "name": name, "rule": sig.rule,
+                              "side": sig.side, "reason": sig.reason,
+                              "entry": sig.entry, "stop": sig.stop,
+                              "target": sig.target, "qty": 0, "actionable": False,
+                              "ts": datetime.now(KST).isoformat(timespec="seconds"),
+                              "_sig": sig})
+
+        # --- 2단계: 우선순위 정렬 (규칙 기대값 × 손익비 — 결정론) ---
+        ranked = priority.order(cands, settings.RULES)
+        if len(ranked) > 1:
+            log.info("사이클 신호 %d건 발주 순서: %s", len(ranked),
+                     " > ".join(f"{c['name']}({c['rule']} {c['priority']:.0f})"
+                                for c in ranked))
+
+        # --- 3단계: 우선순위대로 발주 ---
+        # 같은 사이클 안에서 앞선 발주가 쓴 금액을 빼고 남은 현금으로 수량을 계산한다
+        # (브로커 거부 대신 화면에 '잔고 부족'으로 정직하게 표시).
+        avail = float(self.equity)
+        for rec in ranked:
+            sig = rec.pop("_sig")
+            symbol, name = rec["symbol"], rec["name"]
+            key = (day, symbol, sig.rule)
+            # 감시 신호는 기록만이라도 남긴다. 승인대기 주문은 position_size
+            # (거래당 리스크 + 종목당 비중 상한 + 남은 매수여력)가 1주 이상일 때만.
+            qty = risk.position_size(self.equity, risk_pct, sig.entry, sig.stop,
+                                     max_weight_pct=max_w, available=avail)
+            rec["qty"] = qty
+            actionable = False
+            # 국면 게이트: 인버스 ETF(직접 또는 숏→인버스 매핑)는 강세장 매수 보류.
+            if self._inverse_blocked(symbol, sig.side):
+                rec["note"] = f"국면 게이트 — {self.regime}장이라 인버스 매수 보류"
+            # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
+            # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
+            elif settings.RISK.get("long_only", False) and sig.side != "long":
+                rec["note"] = "롱 전용 모드 — 숏 미발주(현물 계좌 개별주 공매도 불가)"
+            elif qty < 1:
+                rec["note"] = self._zero_qty_note(sig, risk_pct, max_w, avail)
+            else:
+                ok, why = self.state.can_open()
+                if ok:
+                    actionable = True
                 else:
-                    ok, why = self.state.can_open()
-                    if ok:
-                        actionable = True
-                    else:
-                        rec["note"] = f"진입 보류 — {why}"
-                        log.info("신호 차단 %s %s: %s", symbol, sig.rule, why)
-                # 중복 처리: 이미 발주된 신호는 재발주하지 않고, 비발주 상태가
-                # 그대로면 기록도 반복하지 않는다. 단 '차단→해제'(입금·포지션 정리·
-                # 국면 전환 등)로 발주 가능해진 신호는 다시 살아난다.
-                prev = self._fired.get(key)
-                if prev is True or (prev is not None and not actionable):
-                    continue
-                if actionable:
-                    rec["order_id"] = orders.propose(sig, qty)
-                    rec["actionable"] = True
-                    # 완전 자동 발주: 승인 없이 즉시 발주(소액 계좌 + 안전장치 전제).
-                    # 실패해도 주문은 대기열에 남아 수동 승인 가능(약속: 재시도 경로 유지).
-                    if settings.RISK.get("auto_approve"):
-                        try:
-                            res = await orders.approve_and_send(rec["order_id"])
-                            rec["auto_status"] = res.get("status")
-                            rec["auto_message"] = res.get("message")
-                            log.info("자동 발주 %s(%s) %s → %s: %s", name, symbol,
-                                     sig.rule, res.get("status"), res.get("message"))
-                        except Exception:  # noqa: BLE001 - 자동발주 실패는 대기열에 남는다
-                            log.exception("자동 발주 실패 %s %s", symbol, sig.rule)
-                            rec["auto_status"] = "error"
-                self._fired[key] = actionable
-                found.append(rec)
-                log.info("신호 등록 %s(%s) %s %s qty=%d%s", name, symbol,
-                         sig.rule, sig.side, qty,
-                         "" if rec["actionable"] else " · 승인대기 미생성")
+                    rec["note"] = f"진입 보류 — {why}"
+                    log.info("신호 차단 %s %s: %s", symbol, sig.rule, why)
+            # 중복 처리: 비발주 상태가 그대로면 기록도 반복하지 않는다. 단 '차단→해제'
+            # (입금·포지션 정리·국면 전환 등)로 발주 가능해진 신호는 다시 살아난다.
+            # (이미 발주된 신호 prev is True 는 1단계에서 걸러졌다.)
+            prev = self._fired.get(key)
+            if prev is not None and not actionable:
+                continue
+            if actionable:
+                rec["order_id"] = orders.propose(sig, qty)
+                rec["actionable"] = True
+                avail = max(0.0, avail - qty * sig.entry)   # 남은 현금에서 차감
+                # 같은 사이클에서 한도를 넘어 발주하지 않도록 즉시 반영(보수적 계산 —
+                # 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음 사이클에
+                # _sync_open_positions 가 장부 실제값으로 다시 맞춘다.
+                self.state.open_positions += 1
+                # 완전 자동 발주: 승인 없이 즉시 발주(소액 계좌 + 안전장치 전제).
+                # 실패해도 주문은 대기열에 남아 수동 승인 가능(약속: 재시도 경로 유지).
+                if settings.RISK.get("auto_approve"):
+                    try:
+                        res = await orders.approve_and_send(rec["order_id"])
+                        rec["auto_status"] = res.get("status")
+                        rec["auto_message"] = res.get("message")
+                        log.info("자동 발주 %s(%s) %s → %s: %s", name, symbol,
+                                 sig.rule, res.get("status"), res.get("message"))
+                    except Exception:  # noqa: BLE001 - 자동발주 실패는 대기열에 남는다
+                        log.exception("자동 발주 실패 %s %s", symbol, sig.rule)
+                        rec["auto_status"] = "error"
+            self._fired[key] = actionable
+            found.append(rec)
+            log.info("신호 등록 %s(%s) %s %s qty=%d 우선순위=%.0f%s", name, symbol,
+                     sig.rule, sig.side, qty, rec.get("priority", 0),
+                     "" if rec["actionable"] else " · 승인대기 미생성")
         self.last_run = datetime.now(KST).isoformat(timespec="seconds")
         if found:
             self.last_signals = (found + self.last_signals)[:50]
@@ -379,12 +447,16 @@ class SignalEngine:
                 age = int((now - datetime.fromisoformat(self.last_run)).total_seconds())
             except ValueError:
                 age = None
+        interval = self.scan_interval()
         return {
             "phase": phase,
             "label": label,
             "scanning": phase == "open",
-            "scan_interval_sec": self.scan_interval(),
+            "scan_interval_sec": interval,
             "last_scan_age_sec": age,
+            # 다음 스캔까지 남은 초 — 화면 카운트다운의 기준점(브라우저가 1초씩 감산).
+            # 스캔이 이미 지연됐으면 0(= 진행 중/지연).
+            "next_scan_sec": None if age is None else max(0, interval - age),
             "watch_count": len(settings.WATCHLIST) - len(settings.COLLECT_ONLY),
             "session": "09:00~15:30",
         }

@@ -135,3 +135,18 @@ def test_market_status_reports_configured_interval(monkeypatch):
     monkeypatch.setattr(settings, "RISK", {"scan_interval_sec": 15})
     _at(monkeypatch, datetime(2026, 7, 27, 10, 30, tzinfo=KST))
     assert eng.market_status()["scan_interval_sec"] == 15
+
+
+def test_next_scan_countdown(monkeypatch):
+    """화면 카운트다운의 기준점 — 남은 초. 지연 중이면 0, 기록 없으면 None."""
+    eng = SignalEngine()
+    monkeypatch.setattr(settings, "RISK", {"scan_interval_sec": 30})
+    now = datetime(2026, 7, 27, 10, 30, tzinfo=KST)
+    _at(monkeypatch, now)
+
+    eng.last_run = (now - timedelta(seconds=12)).isoformat(timespec="seconds")
+    assert eng.market_status()["next_scan_sec"] == 18
+    eng.last_run = (now - timedelta(seconds=90)).isoformat(timespec="seconds")
+    assert eng.market_status()["next_scan_sec"] == 0      # 이미 지났으면 0(음수 아님)
+    eng.last_run = ""
+    assert eng.market_status()["next_scan_sec"] is None
