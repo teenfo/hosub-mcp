@@ -349,3 +349,22 @@ def test_journal_records_guard_override(db, monkeypatch):
     assert any("임시 해제" in f and "같은 기준으로 비교할 수 없다" in f
                for f in entry["facts"])
     assert journal.build("2026-07-24")["guard"] == {}   # 다른 날엔 안 붙는다
+
+
+def test_facts_flags_timeout_exits():
+    f = journal.facts(_entry(
+        trades={"trades": 3, "wins": 0, "losses": 3, "win_rate": 0.0,
+                "pnl_krw": -500, "expectancy_pct": -0.3, "avg_slippage_pct": 0.0},
+        by_exit_reason={"timeout": {"trades": 2, "expectancy_pct": -0.2},
+                        "stop": {"trades": 1, "expectancy_pct": -0.5}}))
+    assert any("시간 손절 2건" in x for x in f)
+
+
+def test_facts_flags_unconfirmed_exits():
+    """실체결이 안 붙은 청산이 있으면 손익 숫자를 덜 믿어야 한다고 알린다."""
+    f = journal.facts(_entry(
+        trades={"trades": 2, "wins": 0, "losses": 2, "win_rate": 0.0,
+                "pnl_krw": -100, "expectancy_pct": -0.5, "avg_slippage_pct": 0.0},
+        by_exit_reason={"stop": {"trades": 2, "expectancy_pct": -0.5}},
+        positions=[{"exit_fill_confirmed": 1}, {"exit_fill_confirmed": 0}]))
+    assert any("실체결가가 확인되지 않아" in x for x in f)

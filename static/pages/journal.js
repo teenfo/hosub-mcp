@@ -5,7 +5,8 @@ import { postJSON, fmt, won, pct, makeChanged } from "./tradelib.js";
 // 수치·요인은 서버가 결정론으로 계산하고, LLM 은 그 사실을 문장으로 엮기만 한다.
 
 const plCls = (n) => (n > 0 ? "text-danger" : n < 0 ? "text-primary" : "");
-const REASON_KO = { stop: "손절", target: "목표", eod: "마감정리", manual: "수동" };
+const REASON_KO = { stop: "손절", target: "목표", eod: "마감정리",
+                    timeout: "시간초과", manual: "수동" };
 
 export default {
   id: "journal",
@@ -171,7 +172,14 @@ export default {
             el("td", {}, `${p.name || p.symbol}`),
             el("td", {}, p.rule),
             el("td", { class: "text-end" }, fmt(p.qty)),
-            el("td", { class: "text-end small" }, `${fmt(p.entry)} → ${fmt(p.exit)}`),
+            el("td", { class: "text-end small",
+              title: p.exit_fill_confirmed
+                ? "실제 체결가" + (p.model_exit && p.model_exit !== p.exit
+                    ? ` (이론가 ${fmt(p.model_exit)})` : "")
+                : "이론가(손절선·목표가) — 실체결 미수신" },
+              [`${fmt(p.entry)} → ${fmt(p.exit)}`,
+               p.exit_fill_confirmed ? null
+                 : el("span", { class: "text-secondary" }, " ~")]),
             el("td", {}, el("span", {
               class: "badge text-bg-" + (p.exit_reason === "target" ? "danger"
                 : p.exit_reason === "stop" ? "primary" : "secondary") },

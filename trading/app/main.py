@@ -106,7 +106,9 @@ async def _ledger_loop() -> None:
                     auto_all = settings.RISK.get("auto_approve", False)
                     for ex in await asyncio.to_thread(ledger.due_exits, _price_of):
                         # 완전 자동 모드면 목표 도달 청산도 승인 없이 즉시 실행
-                        if (ex["reason"] == "stop" and stop_mode == "auto") or auto_all:
+                        # 시간 손절은 손절과 같은 성격(계좌 보호) — 같은 모드를 따른다
+                        if (ex["reason"] in ("stop", "timeout") and stop_mode == "auto") \
+                                or auto_all:
                             r = await orders.execute_exit(ex, ex["reason"], ex["exit_px"])
                             log.info("%s 자동청산 %s: %s", ex["reason"],
                                      ex["symbol"], r.get("status"))

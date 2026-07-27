@@ -279,6 +279,17 @@ class SignalEngine:
         except Exception:  # noqa: BLE001 - 일지 기록 실패는 비치명적
             log.exception("신호 기록 실패 %s %s", rec.get("symbol"), rec.get("rule"))
 
+    @staticmethod
+    def _held_symbols() -> set[str]:
+        """보유 중인 종목코드. 장부 조회 실패 시 빈 집합(과차단보다 통과)."""
+        from ..trade import ledger
+
+        try:
+            return ledger.open_symbols()
+        except Exception:  # noqa: BLE001 - 조회 실패로 매매를 막지 않는다
+            log.warning("보유 종목 조회 실패 — 중복 진입 차단 이번 사이클 생략")
+            return set()
+
     def _sync_open_positions(self) -> None:
         """열린 포지션 수를 장부에서 읽어 리스크 상태에 반영한다.
         조회 실패는 무시(직전 값 유지) — 한도 판정 때문에 사이클을 멈추지 않는다."""
@@ -356,6 +367,11 @@ class SignalEngine:
         # 동시 포지션 한도의 기준값을 장부에서 동기화한다. open_positions 는 어디서도
         # 갱신되지 않아 항상 0 이었고 — max_positions 가 사실상 무제한이었다.
         self._sync_open_positions()
+        # 같은 종목 중복 진입 차단용 — 이미 보유 중인 종목 집합.
+        # 규칙이 다르면 각각 진입해 한 종목의 같은 하락을 두 번 맞는다
+        # (실측 2026-07-27: 신일전자 momentum + pullback 둘 다 손절).
+        held = self._held_symbols() if settings.RISK.get("one_position_per_symbol",
+                                                         True) else None
 
         # --- 1단계: 후보 수집 (아직 발주하지 않는다) ---
         # 발견 즉시 발주하면 감시목록 순회 순서(= 종목코드 순)가 자금 배분을 정해,
@@ -408,6 +424,9 @@ class SignalEngine:
             # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
             elif settings.RISK.get("long_only", False) and sig.side != "long":
                 rec["note"] = "롱 전용 모드 — 숏 미발주(현물 계좌 개별주 공매도 불가)"
+            elif held is not None and symbol in held:
+                rec["note"] = ("종목 중복 — 이미 보유·진입한 종목입니다"
+                               "(한 종목의 같은 움직임에 두 번 걸리지 않도록 차단)")
             elif qty < 1:
                 rec["note"] = self._zero_qty_note(sig, risk_pct, max_w, avail)
             else:
@@ -435,6 +454,8 @@ class SignalEngine:
                 # 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음 사이클에
                 # _sync_open_positions 가 장부 실제값으로 다시 맞춘다.
                 self.state.open_positions += 1
+                if held is not None:
+                    held.add(symbol)
                 # 완전 자동 발주: 승인 없이 즉시 발주(소액 계좌 + 안전장치 전제).
                 # 실패해도 주문은 대기열에 남아 수동 승인 가능(약속: 재시도 경로 유지).
                 if settings.RISK.get("auto_approve"):

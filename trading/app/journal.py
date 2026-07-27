@@ -182,6 +182,21 @@ def facts(entry: dict) -> list[str]:
             out.append("시간대 손실 구간: " + ", ".join(f"{h}시" for h in losing)
                        + " — 해당 시간대 진입 제한(entry_before) 검토 여지.")
 
+        # 시간 손절이 잦으면 셋업이 늦게 잡히거나 보유 상한이 짧다는 신호
+        tmo = reasons.get("timeout", {}).get("trades", 0)
+        if tmo:
+            out.append(
+                f"시간 손절 {tmo}건 — 손절·목표 어느 쪽에도 닿지 않아 보유 상한에서 "
+                "정리됐다. 진입이 늦었거나 상한이 셋업보다 짧을 수 있다.")
+        # 시장가 청산은 이론가(손절선)와 다르게 체결된다. 실측이 안 붙은 건이
+        # 많으면 손익 숫자 자체를 덜 믿어야 한다.
+        unconfirmed = sum(1 for p in entry["positions"]
+                          if not p.get("exit_fill_confirmed"))
+        if unconfirmed:
+            out.append(
+                f"청산 {unconfirmed}건은 실체결가가 확인되지 않아 이론가(손절선·목표가) "
+                "기준이다 — 실제 손익은 이보다 나쁠 수 있다.")
+
         slip = t.get("avg_slippage_pct") or 0
         if abs(slip) >= 0.3:
             out.append(
