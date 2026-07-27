@@ -434,6 +434,53 @@ export default {
     };
     mToday.onclick = () => { mCurDate = ""; mDate.value = mDates[0] || ""; loadChart(true); };
 
+    // --- 종목 → 1분봉 차트 연결 ---
+    // 신호·주문 표의 종목명을 누르면 차트 카드가 그 종목으로 바뀐다.
+    // 감시목록에서 빠진 종목(과거 주문 등)도 분봉이 남아 있으면 볼 수 있어야 하므로
+    // 드롭다운에 임시로 유지한다(chartExtra) — 감시목록 갱신에도 지워지지 않는다.
+    const chartExtra = {};
+    const rebuildSymbols = () => {
+      const keep = symbolSel.value;
+      const all = { ...watch, ...chartExtra };
+      symbolSel.innerHTML = "";
+      Object.entries(all)
+        .sort((a, b) => String(a[1]).localeCompare(String(b[1]), "ko"))   // 종목명 오름차순
+        .forEach(([code, nm]) =>
+          symbolSel.appendChild(el("option", { value: code }, `${nm} (${code})`)));
+      if (keep && all[keep]) symbolSel.value = keep;
+    };
+
+    const showOnChart = async (symbol, name) => {
+      if (!symbol) return;
+      if (!watch[symbol] && !chartExtra[symbol]) {
+        chartExtra[symbol] = name || symbol;
+        rebuildSymbols();
+      }
+      const jump = () => chart.col.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (symbolSel.value === symbol) { jump(); return; }   // 이미 그 종목이면 이동만
+      symbolSel.value = symbol;
+      mCurDate = "";
+      jump();
+      await loadDates();
+      loadChart(true);
+    };
+
+    /** 표의 '종목명 (코드)' 셀 — 클릭하면 1분봉 차트로 이동.
+     *  a[href="#"] 는 해시 라우터(#/페이지)를 건드리므로 button 을 쓴다. */
+    const symbolCell = (symbol, name) => {
+      const label = name && name !== symbol ? `${name} (${symbol})` : symbol;
+      // 색은 본문색 유지 — 이 화면에서 빨강/파랑은 손익을 뜻하므로 링크색을 쓰면
+      // 종목명이 손실처럼 읽힌다. 점선 밑줄로만 '누를 수 있음'을 표시한다.
+      const b = el("button", {
+        type: "button",
+        class: "btn btn-link p-0 border-0 align-baseline text-start link-body-emphasis",
+        style: "text-decoration: underline dotted; text-underline-offset: 2px",
+        title: "클릭하면 1분봉 차트에서 이 종목을 봅니다",
+      }, label);
+      b.onclick = () => showOnChart(symbol, name);
+      return el("td", {}, b);
+    };
+
     // --- 보유 포지션 · 청산 관리 ---
     // 실제 계좌 보유(키움)와 시스템 추적 포지션(손절/목표 감시 대상)을 나란히 본다.
     // 둘이 어긋나면(체결 실패·수동 매매 등) 경고를 띄운다 — 유령 포지션 감시 방지.
@@ -656,13 +703,8 @@ export default {
         }
       }
       if (s.watchlist && JSON.stringify(s.watchlist) !== JSON.stringify(watch)) {
-        const keep = symbolSel.value;
         watch = s.watchlist;
-        symbolSel.innerHTML = "";
-        for (const [code, name] of Object.entries(watch)) {
-          symbolSel.appendChild(el("option", { value: code }, `${name} (${code})`));
-        }
-        if (keep && watch[keep]) symbolSel.value = keep;
+        rebuildSymbols();
         loadDates().then(() => loadChart(true));
         loadPositions();
       }
@@ -752,7 +794,7 @@ export default {
         const gapEl = gap == null ? null : el("div", { class: Math.abs(gap) >= 0.5 ? "text-danger" : "text-secondary" },
           `현재 ${fmt(o.cur_price)} (${gap >= 0 ? "+" : ""}${gap.toFixed(2)}%)`);
         tb.appendChild(el("tr", {}, [
-          el("td", {}, o.name && o.name !== o.symbol ? `${o.name} (${o.symbol})` : o.symbol),
+          symbolCell(o.symbol, o.name),
           el("td", {}, o.rule),
           el("td", {}, isExit ? badge("청산", "warning") : sideBadge(o.side)),
           el("td", {}, `${fmt(o.entry)} / ${fmt(o.stop)} / ${fmt(o.target)}`),
@@ -782,7 +824,7 @@ export default {
           const [label, color] = ORDER_STATUS[o.status] || [o.status, "secondary"];
           htb.appendChild(el("tr", {}, [
             el("td", { class: "small text-nowrap" }, agoStr(o.created)),
-            el("td", {}, o.name && o.name !== o.symbol ? `${o.name} (${o.symbol})` : o.symbol),
+            symbolCell(o.symbol, o.name),
             el("td", {}, o.kind === "exit" ? badge("청산", "warning") : sideBadge(o.side)),
             el("td", {}, String(o.exec_qty ?? o.qty)),
             el("td", {}, badge(label, color)),
@@ -841,7 +883,7 @@ export default {
         priceCellHTML(curTd, s.cur_price, s.entry);
         tb.appendChild(el("tr", {}, [
           el("td", { class: "small text-secondary text-nowrap" }, agoStr(s.ts)),
-          el("td", {}, `${s.name} (${s.symbol})`),
+          symbolCell(s.symbol, s.name),
           curTd,
           el("td", { title: s.priority != null
             ? `발주 우선순위 ${s.priority} — 같은 사이클의 신호는 이 점수가 높은 순으로 발주됩니다(규칙 기대값 × 손익비).` : "" },
