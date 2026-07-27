@@ -138,6 +138,41 @@ def test_fetch_market_cursor_only_advances_over_fetched(monkeypatch):
     assert more is True                    # 남았다고 알린다
 
 
+def test_fetch_market_keeps_out_of_order_rcept_no(monkeypatch):
+    """페이지 간 rcept_no 역전에도 건을 잃지 않아야 한다.
+
+    회귀(2026-07-27 실측): 필터 기준 커서를 페이지마다 갱신했더니, sort=date 가
+    날짜순이지 rcept_no 순이 아니라서 앞 페이지의 큰 일련번호가 뒤 페이지의 작은
+    번호를 통째로 걸러 냈다. DART 1,175건 중 291건만 통과했다.
+    """
+    pages = [
+        _payload([_item("20260727900635", corp_code="AAA")], total_page=2),
+        _payload([_item("20260727000010", corp_code="BBB"),      # 더 작은 번호
+                  _item("20260727000011", corp_code="CCC")], total_page=2),
+    ]
+    FakeClient, _ = _fake_client(pages)
+    monkeypatch.setattr(dart.httpx, "AsyncClient", lambda **k: FakeClient())
+    monkeypatch.setattr(settings, "DART_API_KEY", "K")
+    pairs, cursor, _ = asyncio.run(dart.fetch_market(None))
+    assert [c for c, _ in pairs] == ["AAA", "BBB", "CCC"]     # 하나도 잃지 않는다
+    assert cursor == "20260727900635"                         # 커서는 최대값
+
+
+def test_per_stock_fetch_keeps_out_of_order_rcept_no(monkeypatch):
+    """종목별 경로도 같은 결함을 갖고 있었다 — 함께 막는다."""
+    pages = [
+        _payload([_item("20260727900635")], total_page=2),
+        _payload([_item("20260727000010")], total_page=2),
+    ]
+    FakeClient, _ = _fake_client(pages)
+    monkeypatch.setattr(dart.httpx, "AsyncClient", lambda **k: FakeClient())
+    monkeypatch.setattr(settings, "DART_API_KEY", "K")
+    monkeypatch.setitem(settings.COLLECT, "dart", {"initial_days": 30})
+    docs, cursor = asyncio.run(
+        dart.DartCollector().fetch({"dart_corp_code": "X"}, None))
+    assert len(docs) == 2 and cursor == "20260727900635"
+
+
 def test_fetch_market_resumes_from_cursor_date(monkeypatch):
     """커서가 있으면 그 날짜부터 — 30일치를 매번 다시 훑지 않는다."""
     FakeClient, calls = _fake_client([_payload([])])
