@@ -49,7 +49,7 @@ export default {
       el("div", { class: "d-flex align-items-center gap-2 flex-wrap mb-2" },
         [dateIn, todayBtn, runBtn, runMsg]),
       el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '체결·신호 기록에서 <b>서버가 계산한 사실</b>이 근거입니다. 요약 문장만 로컬 LLM(llm-gateway)이 씁니다 — 게이트웨이가 꺼져 있어도 나머지는 그대로 나옵니다. 평일 장 마감 후 자동 작성되고, <b>다시 작성</b>으로 언제든 갱신할 수 있습니다.' })),
+        el("span", { html: '체결·신호 기록에서 <b>서버가 계산한 사실</b>이 근거입니다. 요약 문장만 로컬 LLM(llm-gateway)이 씁니다 — 게이트웨이가 꺼져 있어도 나머지는 그대로 나옵니다. <b>요약은 장 마감 후에만</b> 작성됩니다(장중 요약은 오전까지의 손익을 하루의 결론처럼 쓰게 되므로). 장중에도 <b>다시 작성</b>으로 집계·관찰 사실은 언제든 갱신할 수 있습니다.' })),
       dayBody,
     );
 
@@ -100,7 +100,8 @@ export default {
           el("td", { class: "text-end" }, `${r.signals}(${r.blocked})`),
           el("td", {}, r.has_summary
             ? el("span", { class: "badge text-bg-success" }, "작성됨")
-            : el("span", { class: "badge text-bg-secondary" }, "없음")),
+            : el("span", { class: "badge text-bg-" + (r.final ? "secondary" : "warning") },
+                r.final ? "없음" : "진행 중")),
         ]);
         tr.onclick = () => { curDate = r.date; dateIn.value = r.date; loadDay(); };
         tb.appendChild(tr);
@@ -115,10 +116,11 @@ export default {
       const sig = d.signals || {};
       dayBody.appendChild(el("div", { class: "d-flex gap-2 align-items-center flex-wrap mb-2" }, [
         el("span", { class: "fw-semibold" }, d.date),
-        d.saved === false
-          ? el("span", { class: "badge text-bg-warning", title: "마감 잡이 아직 돌지 않아 즉석 계산한 값입니다" }, "미저장(진행 중)")
-          : el("span", { class: "badge text-bg-light text-dark" },
-              "작성 " + String(d.generated || "").slice(5, 16).replace("T", " ")),
+        d.final
+          ? el("span", { class: "badge text-bg-light text-dark" },
+              "확정 " + String(d.generated || "").slice(5, 16).replace("T", " "))
+          : el("span", { class: "badge text-bg-warning",
+              title: "장 마감 전이라 그때그때 다시 계산한 값입니다" }, "진행 중"),
       ]));
       dayBody.appendChild(el("div", { class: "row g-2 mb-3" }, [
         metric("청산", `${t.trades || 0}건`),
@@ -137,9 +139,15 @@ export default {
             html: `<i class="bi bi-chat-left-text"></i> 요약 <span class="text-secondary fw-normal">(${sum.role || "llm"} · 참고용)</span>` }),
           el("div", { class: "card-body py-2 small", style: "white-space:pre-wrap" }, sum.text),
         ]));
-      } else if (sum.error) {
+      } else if (sum.pending) {
+        // 장중에는 요약을 만들지 않는다 — 오전까지의 손익을 하루의 결론처럼 쓰게 된다.
+        dayBody.appendChild(el("div", { class: "alert alert-info py-2 px-3 small mb-3" },
+          [el("i", { class: "bi bi-hourglass-split" }),
+           " 요약 대기 — " + (sum.reason || "장 마감 후 작성됩니다") +
+           ". 아래 집계·관찰 사실은 지금까지의 실제 기록입니다."]));
+      } else if (sum.error || sum.reason) {
         dayBody.appendChild(el("div", { class: "alert alert-warning py-2 px-3 small mb-3" },
-          "요약 생성 실패 — " + sum.error + " (아래 사실 정리는 그대로 유효합니다)"));
+          "요약 없음 — " + (sum.error || sum.reason) + " (아래 사실 정리는 그대로 유효합니다)"));
       }
 
       // 관찰 사실 (결정론)
@@ -264,9 +272,12 @@ export default {
         const d = await postJSON("/api/trading/journal/run", { date: curDate });
         renderDay(d);
         await loadTrend();
-        const ok = (d.summary || {}).ok;
-        runMsg.className = "small " + (ok ? "text-success" : "text-warning");
-        runMsg.textContent = ok ? "작성 완료" : "작성 완료 (요약은 실패 — 사실 정리는 유효)";
+        const sum = d.summary || {};
+        runMsg.className = "small " + (sum.ok ? "text-success"
+                                     : sum.pending ? "text-secondary" : "text-warning");
+        runMsg.textContent = sum.ok ? "작성 완료"
+          : sum.pending ? "집계 갱신 완료 — " + (sum.reason || "요약은 장 마감 후")
+          : "작성 완료 (요약은 실패 — 사실 정리는 유효)";
       } catch (e) {
         runMsg.className = "small text-danger";
         runMsg.textContent = "실패: " + e.message;

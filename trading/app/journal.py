@@ -322,6 +322,7 @@ def history(days: int = 30) -> list[dict]:
             "signals": (d.get("signals") or {}).get("total", 0),
             "blocked": (d.get("signals") or {}).get("blocked", 0),
             "has_summary": bool((d.get("summary") or {}).get("text")),
+            "final": bool(d.get("final")),      # 장 마감 후 확정본인가
         })
     return out
 
@@ -346,6 +347,25 @@ def cumulative(rows: list[dict]) -> dict:
         "best_day": max(traded, key=lambda r: r["pnl_krw"])["date"],
         "worst_day": min(traded, key=lambda r: r["pnl_krw"])["date"],
     }
+
+
+def summary_ready(day: str, now: datetime | None = None) -> tuple[bool, str]:
+    """그날 요약을 써도 되는가 — 장이 끝나야 하루의 결과가 확정된다.
+
+    장중 요약은 '오전까지의 손실'을 하루의 결론처럼 쓰게 되어 오해를 부른다.
+    지난 날짜는 이미 끝났으므로 언제든 쓸 수 있다.
+    반환: (가능 여부, 불가 사유)
+    """
+    now = now or datetime.now(KST)
+    today = now.date().isoformat()
+    if day < today:
+        return True, ""
+    if day > today:
+        return False, "아직 오지 않은 날짜입니다"
+    cutoff = str(settings.CONFIG.get("journal", {}).get("run_after", "15:45"))
+    if now.strftime("%H:%M") < cutoff:
+        return False, f"장 마감 후({cutoff} 이후) 자동 작성됩니다 — 지금은 집계만 표시"
+    return True, ""
 
 
 async def summarize(entry: dict) -> dict:
@@ -376,10 +396,18 @@ async def summarize(entry: dict) -> dict:
 
 
 async def generate(day: str | None = None, with_summary: bool = True) -> dict:
-    """일지 생성 + 저장. 하루 마감 잡과 수동 재생성이 함께 쓴다."""
+    """일지 생성 + 저장. 하루 마감 잡과 수동 재생성이 함께 쓴다.
+
+    장이 끝나기 전에는 요약을 만들지 않는다(집계만 저장). final 이 False 인 저장본은
+    '진행 중 스냅샷'이라, 조회할 때 저장본 대신 그때그때 다시 계산한다.
+    """
     entry = build(day)
-    if with_summary:
+    ok, why = summary_ready(entry["date"])
+    entry["final"] = ok
+    if with_summary and ok:
         entry["summary"] = await summarize(entry)
+    elif with_summary:
+        entry["summary"] = {"ok": False, "pending": True, "reason": why}
     save(entry)
     return entry
 
