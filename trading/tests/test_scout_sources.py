@@ -204,7 +204,7 @@ async def test_news_skips_negative_impact(monkeypatch):
         {"ticker": "", "name": "다", "score": 95, "impact_direction": "positive"},
     ]}
     _install_httpx(monkeypatch, payload)
-    monkeypatch.setattr(settings, "INTERNAL_TOKEN", "t")
+    monkeypatch.setattr(settings, "TNM_TOKEN", "tnm-token")
     got = await slow.NewsSource().collect()
     assert [s.code for s in got] == ["000001"]
     assert got[0].strength == pytest.approx(0.8)
@@ -213,8 +213,22 @@ async def test_news_skips_negative_impact(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_news_disabled_without_token(monkeypatch):
-    monkeypatch.setattr(settings, "INTERNAL_TOKEN", "")
+    monkeypatch.setattr(settings, "TNM_TOKEN", "")
     assert slow.NewsSource().enabled() is False
+
+
+@pytest.mark.asyncio
+async def test_news_uses_tnm_token_not_our_own(monkeypatch):
+    """서비스마다 토큰이 따로다 — 자기 것을 보내면 401 이 온다.
+
+    실측 2026-07-27: 이 어댑터 첫 배포에서 정확히 그렇게 실패했다.
+    """
+    seen = {}
+    _install_httpx(monkeypatch, {"items": []}, seen)
+    monkeypatch.setattr(settings, "INTERNAL_TOKEN", "trading-own")
+    monkeypatch.setattr(settings, "TNM_TOKEN", "tnm-token")
+    await slow.NewsSource().collect()
+    assert seen["headers"]["X-Internal-Token"] == "tnm-token"
 
 
 @pytest.mark.asyncio
@@ -231,7 +245,7 @@ async def test_manual_never_expires_and_is_max_strength(monkeypatch):
     assert all(s.strength == 1.0 and s.ttl_sec == 0 for s in got)
 
 
-def _install_httpx(monkeypatch, payload):
+def _install_httpx(monkeypatch, payload, seen=None):
     import httpx
 
     class _Res:
@@ -252,6 +266,8 @@ def _install_httpx(monkeypatch, payload):
             return False
 
         async def get(self, *a, **k):
+            if seen is not None:
+                seen.update(k)
             return _Res()
 
     monkeypatch.setattr(httpx, "AsyncClient", _Client)

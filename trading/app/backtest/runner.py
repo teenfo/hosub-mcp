@@ -103,8 +103,11 @@ def run(symbol: str, df: pd.DataFrame, rules_cfg: dict | None = None,
     rules_cfg = rules_cfg or settings.RULES
     slip = settings.COSTS.get("slippage_bp", 5) / 10000
     result = Result()
-    for day, day_df in df.groupby(df.index.normalize()):
-        prev = df[df.index.normalize() < day]
+    # 날짜 정규화는 한 번만. 종전에는 날짜마다 전체 프레임을 다시 정규화·스캔해
+    # 봉이 늘수록(심층 백필로 900 → 4,500) 비용이 제곱으로 붙었다.
+    days_idx = df.index.normalize()
+    for day, day_df in df.groupby(days_idx):
+        prev = df[days_idx < day]
         prev_close = float(prev["close"].iloc[-1]) if not prev.empty else None
         fired: set[str] = set()
         open_trade: Trade | None = None
