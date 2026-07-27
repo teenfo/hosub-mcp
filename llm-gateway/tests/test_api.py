@@ -268,3 +268,80 @@ def test_embed_is_recorded_in_usage(client):
     client.post("/v1/embed", headers=H_ALPHA, json={"role": "vec", "input": "x"})
     usage = client.get("/v1/status", headers=H_ALPHA).json()["usage"]
     assert any(u["service"] == "alpha" and u["calls"] >= 1 for u in usage)
+
+
+# --- 리뷰 반영: 조용한 실패를 막는 것들 ---
+def test_non_object_json_body_is_400_not_500(client):
+    """유효한 JSON 이지만 매핑이 아닌 본문(null·[])이 500 을 내면 안 된다."""
+    hdr = {**H_ALPHA, "Content-Type": "application/json"}
+    for bad in ["null", "[]", '"문자열"', "42"]:
+        r = client.post("/v1/generate", headers=hdr, content=bad)
+        assert r.status_code == 400, f"{bad} → {r.status_code}"
+        assert r.json()["error"] == "invalid_request"
+    for bad in ["null", "[]"]:
+        r = client.post("/v1/embed", headers=hdr, content=bad)
+        assert r.status_code == 404      # role 없음으로 처리 — 500 이 아니어야 한다
+
+
+def test_cancel_wakes_a_waiting_request(client):
+    """취소된 잡을 기다리던 요청이 MAX_WAIT(300초)까지 붙잡히면 안 된다."""
+    import threading
+    import time
+
+    fake = client.app.state.fake
+    fake.delay = 5.0                      # 앞선 잡이 batch 레인을 오래 점유한다
+    client.post("/v1/generate", headers=H_ALPHA,
+                json={"role": "heavy", "prompt": "block", "wait": 0})
+    time.sleep(0.3)
+
+    # 큐에서 대기하게 될 잡을 만들고, 그것을 wait 로 기다리는 요청을 띄운다
+    queued = client.post("/v1/generate", headers=H_ALPHA,
+                         json={"role": "bulk", "prompt": "x", "wait": 0}).json()
+    assert queued["status"] == "pending"
+
+    done = threading.Event()
+    elapsed = {}
+
+    def wait_on_it():
+        t0 = time.monotonic()
+        client.get(f"/v1/jobs/{queued['job_id']}", headers=H_ALPHA)
+        elapsed["get"] = time.monotonic() - t0
+        done.set()
+
+    t = threading.Thread(target=wait_on_it, daemon=True)
+    t.start()
+
+    t0 = time.monotonic()
+    assert client.delete(f"/v1/jobs/{queued['job_id']}",
+                         headers=H_ALPHA).status_code == 200
+    cancel_took = time.monotonic() - t0
+
+    t.join(timeout=5)
+    assert cancel_took < 2.0, f"취소가 {cancel_took:.1f}s 걸렸다"
+    assert client.get(f"/v1/jobs/{queued['job_id']}",
+                      headers=H_ALPHA).json()["status"] == "cancelled"
+
+
+def test_cancel_notifies_scheduler_event(client):
+    """이벤트가 실제로 set 되는지 — 이게 없으면 wait_for 가 계속 매달린다."""
+    sched = client.app.state.scheduler
+    job = client.post("/v1/generate", headers=H_ALPHA,
+                      json={"role": "heavy", "prompt": "x", "wait": 0}).json()
+    ev = sched.event_for(job["job_id"])        # 대기자가 있는 상황을 만든다
+    assert not ev.is_set()
+    client.delete(f"/v1/jobs/{job['job_id']}", headers=H_ALPHA)
+    assert ev.is_set(), "취소했는데 대기자를 안 깨웠다"
+
+
+def test_embed_missing_model_creates_install_request(client, store):
+    """임베딩은 잡을 안 만들어 스케줄러가 못 본다 — 엔드포인트가 직접 걸어야 한다."""
+    fake = client.app.state.fake
+    fake._models = ["small", "mid", "big"]          # bge-m3 를 뺀다
+    client.app.state.scheduler._available = list(fake._models)
+
+    r = client.post("/v1/embed", headers=H_ALPHA, json={"role": "vec", "input": "x"})
+    assert r.status_code == 503
+    assert r.json()["retryable"] is True
+    req = store.get_model_request("bge-m3")
+    assert req is not None and req["status"] == "pending"
+    assert req["roles"] == ["vec"]

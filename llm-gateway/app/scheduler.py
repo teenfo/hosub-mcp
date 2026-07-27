@@ -65,6 +65,7 @@ class Scheduler:
         backoff_base: float = 2.0,
         auto_install: bool = True,
         models_refresh: float = 30.0,
+        retention_days: int = 30,
     ) -> None:
         self.store = store
         self.roles = roles
@@ -75,6 +76,7 @@ class Scheduler:
         self.backoff_base = backoff_base
         self.auto_install = auto_install
         self.models_refresh = models_refresh
+        self.retention_days = retention_days
 
         # 잡 완료 알림 (동기 대기 중인 요청을 깨운다)
         self._events: dict[str, asyncio.Event] = {}
@@ -100,7 +102,9 @@ class Scheduler:
             # 레인을 열기 전에 보유 목록을 먼저 읽는다. 그러지 않으면 기동 직후
             # 미설치 모델 잡이 낙관적으로 실행돼 404 로 죽는다(설치 요청 대신).
             await self._refresh_models()
+        self._purge_once()
         self._tasks = [asyncio.create_task(self._lane_loop(l)) for l in LANES]
+        self._tasks.append(asyncio.create_task(self._retention_loop()))
         if self.auto_install:
             self._tasks.append(asyncio.create_task(self._models_loop()))
 
@@ -115,6 +119,27 @@ class Scheduler:
                 pass
         self._tasks = []
 
+    # ---------- 보존 ----------
+    def _purge_once(self) -> None:
+        if self.retention_days <= 0:
+            return
+        try:
+            n = self.store.purge_old(self.retention_days)
+        except Exception:
+            log.exception("보존 정리 실패")
+            return
+        if n["jobs"] or n["usage"]:
+            log.info("보존 정리: 잡 %d건, 사용량 %d건 삭제(%d일 초과)",
+                     n["jobs"], n["usage"], self.retention_days)
+
+    async def _retention_loop(self) -> None:
+        """하루 한 번 정리. 안 하면 /data 가 계속 커진다."""
+        while not self._stopping:
+            await asyncio.sleep(24 * 3600)
+            if self._stopping:
+                return
+            self._purge_once()
+
     # ---------- 대기/알림 ----------
     def event_for(self, job_id: str) -> asyncio.Event:
         ev = self._events.get(job_id)
@@ -122,6 +147,14 @@ class Scheduler:
             ev = asyncio.Event()
             self._events[job_id] = ev
         return ev
+
+    def notify_cancelled(self, job_id: str) -> None:
+        """외부(API)에서 잡을 취소했을 때 대기 중인 요청을 깨운다."""
+        self._notify(job_id)
+
+    def model_ready(self, model: str) -> bool:
+        """맥에 이 모델이 있나(공개용). 목록을 모르면 낙관적으로 True."""
+        return self._model_ready(model)
 
     def _notify(self, job_id: str) -> None:
         ev = self._events.pop(job_id, None)
@@ -384,8 +417,11 @@ class Scheduler:
             self._running.pop(lane, None)
 
     async def _handle_failure(self, job: dict, exc: BackendError) -> None:
-        attempts = job["attempts"]  # claim 에서 이미 +1 된 값
-        if exc.retryable and attempts < self.max_retries:
+        # attempts 는 claim 에서 이미 +1 된 값이라 **최초 실행을 포함**한다.
+        # max_retries 를 "재시도 횟수"로 읽으려면 최초 1회를 더해야 한다
+        # (MAX_RETRIES=3 → 최초 + 재시도 3회, 백오프 2→4→8초).
+        attempts = job["attempts"]
+        if exc.retryable and attempts <= self.max_retries:
             delay = self.backoff_base ** attempts
             log.warning(
                 "잡 %s 실패(%s) — %.0fs 후 재시도 (%d/%d)",

@@ -19,7 +19,7 @@ from starlette.routing import Route
 
 from .auth import RateLimiter, authenticate
 from .config import RoleConfig, ServiceConfig
-from .ollama import BackendError, OllamaClient
+from .ollama import BackendError, InputTooLong, OllamaClient
 from .scheduler import LANES, Scheduler
 from .store import (
     MR_APPROVED,
@@ -47,6 +47,19 @@ MAX_EMBED_BATCH = 256
 DOCS_DIR = Path(
     os.environ.get("LLMGW_DOCS_DIR") or Path(__file__).resolve().parent.parent / "docs"
 )
+
+
+async def _json_body(request: Request) -> dict:
+    """본문을 매핑으로만 받는다.
+
+    유효한 JSON 이라도 null·[] 이면 body.get(...) 이 AttributeError 를 내
+    500 이 된다. 문서화된 400 을 주려면 매핑인지 먼저 확인해야 한다.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
 
 
 def _job_response(job: dict, *, queue_position: int | None = None) -> dict:
@@ -96,6 +109,7 @@ def build_app(
         max_retries=int(os.environ.get("MAX_RETRIES", 3)),
         auto_install=os.environ.get("AUTO_INSTALL_MODELS", "1") not in ("0", "false"),
         models_refresh=float(os.environ.get("MODELS_REFRESH_SECONDS", 30)),
+        retention_days=int(os.environ.get("JOB_RETENTION_DAYS", 30)),
     )
     limiter = RateLimiter()
 
@@ -134,10 +148,7 @@ def build_app(
         svc, err = _auth(request)
         if err:
             return err
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _json_body(request)
 
         role_name = str(body.get("role") or "").strip()
         prompt = body.get("prompt") or ""
@@ -210,10 +221,7 @@ def build_app(
         svc, err = _auth(request)
         if err:
             return err
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _json_body(request)
 
         role_name = str(body.get("role") or "").strip()
         role = roles.role(role_name)
@@ -257,9 +265,30 @@ def build_app(
                 status_code=413,
             )
 
+        # 모델이 없으면 생성 잡과 같은 설치 요청 흐름을 탄다. 임베딩은 잡을 만들지
+        # 않으므로 스케줄러의 미설치 탐지(_triage_missing)가 못 본다 — 여기서 건다.
+        if not scheduler.model_ready(role.model):
+            req = store.ensure_model_request(
+                role.model, requested_by=svc.name,
+                roles=roles.roles_using(role.model),
+                est_size_gb=roles.model_size_gb(role.model),
+            )
+            return JSONResponse({
+                "status": "failed", "retryable": True,
+                "error": f"모델 '{role.model}' 이 아직 설치되지 않았습니다 "
+                         f"(설치 요청 상태: {req['status']}).",
+                "hint": "hosub 대시보드 LLM 페이지에서 승인하면 자동 설치됩니다.",
+                "model_request": req["status"],
+            }, status_code=503)
+
         try:
             result = await client.embed(
                 model=role.model, inputs=inputs, timeout=role.timeout
+            )
+        except InputTooLong as exc:
+            return JSONResponse(
+                {"status": "failed", "error": str(exc), "retryable": False},
+                status_code=413,
             )
         except BackendError as exc:
             store.record_usage(service=svc.name, role=role_name, model=role.model,
@@ -309,7 +338,12 @@ def build_app(
         svc, err = _auth(request)
         if err:
             return err
-        ok = store.cancel(request.path_params["job_id"], svc.name)
+        job_id = request.path_params["job_id"]
+        ok = store.cancel(job_id, svc.name)
+        if ok:
+            # 같은 잡을 wait_for 로 기다리는 요청이 있으면 깨운다. 안 그러면 취소된
+            # 잡을 최대 MAX_WAIT(300초) 동안 붙잡고 있고 이벤트도 안 치워진다.
+            scheduler.notify_cancelled(job_id)
         if not ok:
             return JSONResponse(
                 {"error": "not_cancellable",
@@ -374,10 +408,7 @@ def build_app(
                 {"error": "forbidden", "detail": "모델 승인 권한이 없는 서비스입니다"},
                 status_code=403,
             )
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
+        body = await _json_body(request)
         model = str(body.get("model") or "").strip()
         action = str(body.get("action") or "").strip()
         if action not in ("approve", "reject"):

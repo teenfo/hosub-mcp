@@ -11,6 +11,10 @@ from dataclasses import dataclass
 import httpx
 
 
+class InputTooLong(Exception):
+    """모델 컨텍스트를 넘는 입력. 호출자가 잘라서 다시 보내야 한다(재시도 무의미)."""
+
+
 class BackendError(Exception):
     def __init__(self, message: str, *, retryable: bool = True) -> None:
         super().__init__(message)
@@ -145,16 +149,25 @@ class OllamaClient:
 
         구형 /api/embeddings 는 한 번에 한 건뿐이라 배치가 느리다.
         """
-        payload = {"model": model, "input": inputs, "keep_alive": self.keep_alive}
+        # truncate=false: 기본값(true)이면 모델 컨텍스트를 넘는 입력을 **조용히 잘라내고**
+        # status ok 를 돌려준다. 문서 뒷부분이 통째로 빠진 벡터가 저장되는데 에러가
+        # 안 나서 발견이 늦다. 통제된 실패로 바꾼다.
+        payload = {"model": model, "input": inputs, "truncate": False,
+                   "keep_alive": self.keep_alive}
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 res = await client.post(f"{self.base_url}/api/embed", json=payload)
                 if res.status_code >= 500:
                     raise BackendError(f"백엔드 오류 HTTP {res.status_code}", retryable=True)
                 if res.status_code >= 400:
+                    body = res.text[:300]
+                    # truncate=false 로 컨텍스트 초과를 거부당한 경우를 구분한다
+                    if "context" in body.lower() or "too long" in body.lower():
+                        raise InputTooLong(
+                            f"입력이 모델 컨텍스트를 넘습니다. 더 짧게 잘라 보내세요: {body}"
+                        )
                     raise BackendError(
-                        f"임베딩 거부 HTTP {res.status_code}: {res.text[:200]}",
-                        retryable=False,
+                        f"임베딩 거부 HTTP {res.status_code}: {body}", retryable=False,
                     )
                 data = res.json()
         except httpx.TimeoutException as exc:

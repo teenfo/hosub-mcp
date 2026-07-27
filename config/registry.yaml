@@ -33,13 +33,20 @@ services:
       timeout_seconds: 300
   llm-gateway:
     unit: llm-gateway.service
+    # 앱 로그는 journald 가 아니라 도커 로그 드라이버로 간다(systemd 는 compose
+    # 호출만 감쌈) — read_service_logs 가 docker logs 를 쓰도록 컨테이너를 알린다.
+    container: llm-gateway
     description: "공유 LLM 게이트웨이 (Docker, 127.0.0.1:8603) — 잡 큐를 들고 있어 다른 서비스 배포와 수명주기를 분리한다"
     deploy:
       workdir: /opt/hosub-mcp/llm-gateway
       steps:
         - ["git", "pull", "--ff-only"]
+        # sudo -n: 잡은 hosub 유저로 도는데 bootstrap.sh 가 docker 그룹에 넣어주지
+        # 않는다. 이미 부여된 NOPASSWD sudo 에 기대는 편이 그룹 소속보다 확실하다.
         # up -d --build 가 컨테이너를 새 이미지로 교체한다 → restart_after 불필요
-        - ["docker", "compose", "up", "-d", "--build"]
+        - ["sudo", "-n", "docker", "compose", "up", "-d", "--build"]
+        # 반영된 트리 해시를 남긴다 — 드리프트 감지의 기준점
+        - ["sudo", "-n", "/opt/hosub-mcp/deploy/gateway-mark-deployed.sh"]
       restart_after: false
       timeout_seconds: 900
   tnm:

@@ -14,9 +14,14 @@ curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/integration
 소비 프로젝트는 이 문서를 복사하지 말고 이 URL 을 참조하는 편이 낫다 — 계약이 두
 곳에 있으면 반드시 어긋난다.
 
+> **저장소 접근이 없다면 1절을 건너뛰고 [1-A](#1-a-저장소-없이-시작-http-만으로)로 가라.**
+> 1~3절은 이 저장소의 파일(`client/llmgw.py`, `tools/mock_gateway.py`)을 쓰는 지름길이고,
+> 그 파일들은 이 엔드포인트로 받을 수 없다. HTTP 만으로 필요한 건 전부 된다 —
+> 7절에 전체 계약이 있다.
+
 ---
 
-## 1. 5분 만에 시작
+## 1. 5분 만에 시작 (저장소 접근이 있을 때)
 
 ```bash
 # 1) 클라이언트 한 파일을 자기 레포에 복사
@@ -38,6 +43,50 @@ print(gw.run("summarize", 긴_문서))    # 끝까지 기다려 텍스트만
 
 실서버로 옮길 때 바뀌는 것은 **`LLMGW_URL` 과 `LLMGW_TOKEN` 두 값뿐**이다.
 응답 계약이 같다는 것은 회귀 테스트(`tests/test_client_contract.py`)가 보장한다.
+
+---
+
+## 1-A. 저장소 없이 시작 (HTTP 만으로)
+
+라이브러리도 목 서버도 필요 없다. 알아야 할 것은 **토큰 하나와 엔드포인트 네 개**다.
+
+```bash
+export LLMGW_URL=https://hosub.duckdns.org/llm
+export LLMGW_TOKEN=<관리자에게 받은 값>
+
+# 이 토큰으로 쓸 수 있는 역할·모델 확인 — 여기서부터 시작하면 된다
+curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/roles
+```
+
+```bash
+# 짧은 작업 — 결과를 기다린다
+curl -X POST $LLMGW_URL/v1/generate -H "Authorization: Bearer $LLMGW_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"summarize","prompt":"...","wait":30}'
+
+# 긴 작업 — job_id 만 받고 나중에 폴링 (서버리스는 반드시 이 방식, 5절)
+curl -X POST $LLMGW_URL/v1/generate -H "Authorization: Bearer $LLMGW_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"role":"analyze_workout","prompt":"...","system":"내 프롬프트","wait":0}'
+curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/jobs/<job_id>
+```
+
+구현에 필요한 것은 이 네 가지뿐이다:
+
+1. **응답은 항상 같은 모양**이고 `status` 가 `ok|pending|failed` 다 → 7절
+2. `pending` 이면 `job_id` 로 폴링한다(**2초 이상 간격**) → 8절
+3. 오류 코드의 의미(재시도 가치가 있는지) → 아래 표
+4. 모델이 아직 없으면 자동으로 설치 요청이 생긴다 → 6절
+
+| 코드 | 의미 | 대응 |
+|---|---|---|
+| 401 / 403 | 토큰 없음·틀림 / 역할 권한 없음 | **재시도 무의미.** 설정 확인 |
+| 404 / 413 | 모르는 역할 / 입력 초과 | **재시도 무의미.** 코드 수정 |
+| 429 | 레이트리밋 | 간격을 늘려 재시도 |
+| 503 | 백엔드 일시 불가·모델 설치 대기 | **나중에 재시도** |
+| 5xx 기타 | 게이트웨이 오류 | 백오프 후 재시도 |
+
+2절의 파이썬 클라이언트는 위 규칙을 감싼 것일 뿐이다. 직접 구현해도 동일하다.
 
 ---
 

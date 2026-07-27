@@ -14,9 +14,10 @@ from pathlib import Path
 import yaml
 
 _UNIT_RE = re.compile(r"^[A-Za-z0-9_.@-]+\.service$")
+_CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 
 _ALLOWED_TOP_KEYS = {"services", "scripts", "backup_script"}
-_ALLOWED_SERVICE_KEYS = {"unit", "description", "deploy"}
+_ALLOWED_SERVICE_KEYS = {"unit", "description", "deploy", "container"}
 _ALLOWED_SCRIPT_KEYS = {"path", "description", "timeout_seconds"}
 _ALLOWED_DEPLOY_KEYS = {"workdir", "steps", "restart_after", "timeout_seconds"}
 
@@ -47,6 +48,10 @@ class ServiceEntry:
     unit: str
     description: str = ""
     deploy: DeploySpec | None = None
+    # 도커 컨테이너로 도는 서비스의 컨테이너 이름.
+    # systemd 로 감싸면 journald 에는 compose 호출만 남고 앱 출력은 도커
+    # 로그 드라이버로 간다 — 이 값이 있으면 read_service_logs 가 docker logs 를 쓴다.
+    container: str | None = None
 
 
 class Registry:
@@ -138,11 +143,18 @@ class Registry:
                     f"서비스 '{name}' 의 unit 이 올바른 .service 형식이 아님: {unit!r}"
                 )
             deploy = Registry._parse_deploy(name, cfg.get("deploy"))
+            container = cfg.get("container")
+            if container is not None:
+                if not isinstance(container, str) or not _CONTAINER_RE.match(container):
+                    raise RegistryError(
+                        f"서비스 '{name}' 의 container 이름이 올바르지 않음: {container!r}"
+                    )
             out[name] = ServiceEntry(
                 name=name,
                 unit=unit,
                 description=str(cfg.get("description", "")),
                 deploy=deploy,
+                container=container,
             )
         return out
 
