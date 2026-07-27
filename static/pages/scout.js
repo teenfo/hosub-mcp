@@ -44,6 +44,22 @@ const ACTION_TONE = {
 };
 const srcMeta = (s) => SRC_META[s] || { label: s || "—", tone: "secondary" };
 
+/** 소스마다 evidence 키가 다르다 — 있는 것만 짧게 이어 붙인다. */
+function evidenceText(ev) {
+  if (!ev || typeof ev !== "object") return "";
+  const out = [];
+  if (ev.rank != null) out.push(`순위 ${ev.rank}/${ev.of}`);
+  if (ev.change_pct != null) out.push(`등락 ${ev.change_pct}%`);
+  if (ev.surge_pct != null) out.push(`거래량 급증 ${ev.surge_pct}%`);
+  if (ev.trade_value != null) out.push(`거래대금 ${ev.trade_value}`);
+  if (Array.isArray(ev.reasons) && ev.reasons.length) out.push(ev.reasons.join(" · "));
+  if (ev.category) out.push(ev.category);
+  if (ev.title) out.push(String(ev.title).slice(0, 40));
+  if (ev.date) out.push(ev.date);
+  if (ev.added) out.push(`추가 ${String(ev.added).slice(0, 10)}`);
+  return out.join(" · ");
+}
+
 export default {
   id: "scout",
   title: "발굴 엔진",
@@ -57,9 +73,10 @@ export default {
     const stateC = card("엔진 상태 · 소스", null, { wide: true, icon: "bi-diagram-3" });
     const queueC = card("후보 큐", null, { wide: true, icon: "bi-list-ol" });
     const diffC = card("판단 대조 (엔진 ↔ 실제 감시목록)", null, { wide: true, icon: "bi-arrow-left-right" });
+    const srcC = card("소스별 원시 결과 (패키지 단위)", null, { wide: true, icon: "bi-boxes" });
     const histC = card("승격·강등 이력", null, { wide: true, icon: "bi-clock-history" });
     const CARDS = [["state", stateC], ["queue", queueC],
-                   ["diff", diffC], ["hist", histC]];
+                   ["diff", diffC], ["source", srcC], ["hist", histC]];
     CARDS.forEach(([id, c], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
@@ -262,7 +279,101 @@ export default {
       ].filter(Boolean))));
 
     // ==================================================================
-    // ④ 결정 이력
+    // ④ 소스별 원시 결과 — 각 패키지가 무엇을 올렸는가
+    // 후보 큐는 그룹 내 max 로 합쳐진 뒤라 어느 소스가 무엇을 봤는지 안 보인다.
+    // 여기서는 취합 **전** 을 패키지 단위로 나눠 본다.
+    // ==================================================================
+    const SRC_TABS = [
+      { id: "volume", label: "거래대금", icon: "cash-stack",
+        note: "거래대금 상위(ka10032). <b>시장이 실제로 돈을 넣는</b> 종목이라 유동성이 안전하다. 세기 = 목록 안의 순위." },
+      { id: "gainers", label: "등락률", icon: "rocket-takeoff",
+        note: "등락률 상위(ka10027), 코스피·코스닥 합산. 세기 = 목록 안의 순위. <b>전 시장 조회가 실패하면 빈 목록이 아니라 예외</b>를 낸다 — 실패를 '급등주 없음'으로 보고하면 목록이 증발한다." },
+      { id: "presurge", label: "급등조짐", icon: "lightning",
+        note: "거래량은 터졌는데 가격은 아직(ka10023). 세기 = 급증률 자체(로그 스케일) — 목록 길이에 안 흔들린다. <b>편입 경로가 없어 지금껏 한 번도 측정된 적이 없는 소스</b>다." },
+      { id: "nightly", label: "야간발굴", icon: "graph-up-arrow",
+        note: "평일 17:30 전종목 일봉 3규칙. <b>발굴을 다시 돌리지 않고 결과만 읽는다</b>(3,900종목 배치는 엔진 주기로 못 돈다). 세기 = 점수/3 — 예측력은 없고 합의를 세는 용도다." },
+      { id: "news", label: "뉴스·공시", icon: "newspaper",
+        note: "TNM 분석 중 고점수분. 악재(impact_direction=negative)는 후보에서 뺀다 — 그 필터의 근거는 성과 페이지의 뉴스 영향 검증에 있다." },
+      { id: "manual", label: "수동", icon: "hand-index",
+        note: "감시목록의 seed/manual 항목. <b>만료도 감쇠도 없다</b> — 엔진이 사용자의 결정을 덮어쓰지 않는다." },
+    ];
+    const srcTabs = makeTabs(SRC_TABS);
+    srcC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-boxes"></i> 각 소스는 <b>독립 패키지</b>다 — 자기 주기로 돌고, 실패해도 다른 소스를 막지 않으며, config 로 개별 on/off 된다. 여기서는 취합 <b>전</b> 원시 결과를 패키지별로 본다. 세기(0~1)는 예측력이 아니라 <b>그 소스 안에서 얼마나 강하게 지목됐는가</b>다.' })),
+      el("div", {}),
+    );
+    srcTabs.mount(srcC.body);
+    SRC_TABS.forEach((t) => srcTabs.set(t.id, emptyRow("불러오는 중…")));
+
+    /** 패키지 운영 상태 줄 — 켜짐/주기/최근/실패. 표보다 이게 먼저다. */
+    const srcHead = (h) => {
+      if (!h) return el("div", { class: "small text-secondary mb-2" }, "상태 없음");
+      const items = [
+        h.enabled ? badge("켜짐", "success") : badge("꺼짐", "secondary"),
+        h.polled ? badge("수집 완료", "success") : badge("첫 수집 대기", "warning"),
+        el("span", { class: "badge text-bg-light text-dark" }, `주기 ${h.interval_sec}초`),
+        el("span", { class: "badge text-bg-light text-dark" },
+           `최근 신호 ${h.signals == null ? "—" : fmt(h.signals)}`),
+        h.last_ok ? el("span", { class: "small text-secondary" },
+                       `최근 성공 ${String(h.last_ok).replace("T", " ").slice(5, 19)}`) : null,
+        h.fails ? el("span", { class: "badge text-bg-danger", title: h.error_msg || "" },
+                     `연속 실패 ${h.fails}회 — 백오프 중`) : null,
+      ].filter(Boolean);
+      const box = el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, items);
+      if (h.fails && h.error_msg) {
+        return el("div", {}, [box,
+          el("div", { class: "small text-danger mb-2", style: "word-break:break-all" },
+             h.error_msg)]);
+      }
+      return box;
+    };
+
+    const renderSources = (d) => {
+      const health = Object.fromEntries(
+        ((d.status || {}).sources || []).map((s) => [s.name, s]));
+      const bySrc = d.by_source || {};
+      for (const t of SRC_TABS) {
+        const rows = bySrc[t.id] || [];
+        const h = health[t.id];
+        const body = el("div", {}, [
+          srcHead(h),
+          rows.length ? tableOf(
+            "<th style='width:2.5rem'>#</th><th>종목</th><th class='text-end'>세기</th>" +
+            "<th class='text-end'>감쇠 후</th><th class='text-end'>원시값</th>" +
+            "<th>근거</th><th class='text-end'>관측</th><th>tier</th>",
+            rows.slice(0, 40).map((r, i) => el("tr", {}, [
+              el("td", { class: "text-secondary" }, String(i + 1)),
+              el("td", {}, [
+                el("div", {}, `${r.name} (${r.code})`),
+                r.kind && r.kind !== t.id
+                  ? el("div", { class: "text-secondary", style: "font-size:.72rem" }, r.kind)
+                  : null,
+              ]),
+              el("td", { class: "text-end" }, r.strength.toFixed(3)),
+              el("td", { class: "text-end " + (r.effective < r.strength ? "text-secondary" : ""),
+                         title: "시간 감쇠 반영 — 취합에 실제로 들어가는 값" },
+                 r.effective.toFixed(3)),
+              el("td", { class: "text-end" }, r.raw == null ? "—" : String(r.raw)),
+              el("td", { class: "text-secondary small", style: "max-width:22rem" },
+                 evidenceText(r.evidence)),
+              el("td", { class: "text-end text-secondary text-nowrap" },
+                 r.age_sec < 90 ? "방금" : `${Math.floor(r.age_sec / 60)}분 전`),
+              el("td", {}, badge(TIER_KO[r.tier] || r.tier, TIER_TONE[r.tier] || "light")),
+            ]))) : emptyRow(h && !h.enabled
+              ? "이 소스는 꺼져 있습니다 (config 에서 켤 수 있습니다)"
+              : h && h.fails ? "수집에 실패해 결과가 없습니다 — 위 오류 참조"
+              : "이번 주기에 올린 종목이 없습니다"),
+          rows.length > 40
+            ? el("div", { class: "small text-secondary mt-1" },
+                 `상위 40건만 표시 — 전체 ${rows.length}건`) : null,
+        ]);
+        srcTabs.set(t.id, body, rows.length);
+      }
+    };
+
+    // ==================================================================
+    // ⑤ 결정 이력
     // ==================================================================
     const histBody = el("div", {}, emptyRow("불러오는 중…"));
     histC.body.append(
@@ -279,6 +390,7 @@ export default {
       const st = d.status || {};
       renderState(st);
       renderQueue(d.candidates || [], st.max_score);
+      renderSources(d);
 
       const pending = d.pending || [];
       diffTabs.set("pending", pending.length ? decisionRows(pending, false)

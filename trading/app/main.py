@@ -598,8 +598,25 @@ async def api_scout(_=Depends(require_auth)):
     from .scout import store as scout_store
 
     cur = scout_mod.snapshot_current()      # 모듈 함수다 — Engine 의 메서드가 아니다
+    # 소스별 원시 결과 — 취합 **전** 각 패키지가 무엇을 올렸는지.
+    # candidates 는 그룹 내 max 로 합쳐진 뒤라 어느 소스가 무엇을 봤는지 안 보인다.
+    # 세기 0(목록 꼴찌)도 포함한다 — 그것도 그 소스가 본 것이다.
+    by_source: dict[str, list] = {}
+    for s in scout_store.live():
+        by_source.setdefault(s.source, []).append({
+            "code": s.code, "name": s.name, "kind": s.kind,
+            "strength": round(s.strength, 3),
+            "effective": round(s.effective(), 3),
+            "raw": s.raw, "price": s.price, "evidence": s.evidence,
+            "observed_at": s.observed_at.isoformat(timespec="seconds"),
+            "age_sec": int(s.age_sec()),
+            "tier": cur.tier.get(s.code, "none"),
+        })
+    for rows in by_source.values():
+        rows.sort(key=lambda r: (-r["effective"], r["code"]))
     return {
         "status": scout.status(),
+        "by_source": by_source,
         "candidates": [
             {"code": c.code, "name": c.name, "score": c.score, "price": c.price,
              "sources": c.sources, "by_group": c.by_group,
