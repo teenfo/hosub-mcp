@@ -239,8 +239,10 @@ export default {
       }
 
       // 되돌리기 / 삭제
-      mRevert.classList.toggle("d-none", isNew || !v.overridden_fields.length
-                                          && v.origin !== "db");
+      // 되돌릴 게 있을 때만 보인다: 신규 생성 화면이거나, 기본값 그대로인 YAML 역할이면 숨긴다
+      const revertable = !isNew
+        && (v.origin === "db" || (v.overridden_fields || []).length > 0);
+      mRevert.classList.toggle("d-none", !revertable);
       mRevert.textContent = v.origin === "db" ? "역할 삭제" : "기본값으로 되돌리기";
       mRevert.onclick = async () => {
         const msg = v.origin === "db"

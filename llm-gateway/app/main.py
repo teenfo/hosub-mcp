@@ -824,7 +824,9 @@ def build_app(
             measure = store.get_job(ids.get("measure") or "")
             warm = store.get_job(ids.get("warmup") or "")
             for j in (measure, warm):
-                if j is None or j["status"] not in (SUCCEEDED, "failed", "cancelled"):
+                # 잡 행이 없으면(취소·보존 정리) 끝난 것으로 본다. 없는 것을
+                # 기다리면 이 실행이 영원히 running 이라 다음 비교가 409 로 막힌다.
+                if j is not None and j["status"] not in (SUCCEEDED, "failed", "cancelled"):
                     done = False
             sides[side] = {
                 "model": run[f"model_{side}"],

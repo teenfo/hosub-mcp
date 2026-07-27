@@ -188,4 +188,5 @@ def compare_models(prompt: str, models: list, *, system: str | None = None,
 
 
 def get_comparison(run_id: str, *, client_factory=httpx.Client) -> dict:
-    return _call("GET", f"/v1/admin/compare/{run_id}", client_factory=client_factory)
+    return _call("GET", f"/v1/admin/compare/{quote(run_id, safe='')}",
+                 client_factory=client_factory)
