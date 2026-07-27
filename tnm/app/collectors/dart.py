@@ -92,15 +92,31 @@ def parse_list_payload(payload: dict, cursor: str | None) -> tuple[list[RawDoc],
     return docs, (max_rcept or cursor)
 
 
+def _meta(it: dict) -> dict:
+    """RawDoc 이 못 담는 원본 식별 정보.
+
+    **DART 응답에는 stock_code 가 이미 들어 있다.** 종전에는 이걸 읽지도 않고
+    버렸는데, 감시목록 밖 공시에서 새 종목을 발굴하려면 바로 이 값이 필요하다
+    (corp_code → ticker 역매핑 캐시를 만들 필요가 없다). 비상장사는 빈 문자열이다.
+    """
+    return {
+        "stock_code": str(it.get("stock_code", "")).strip(),
+        "corp_name": str(it.get("corp_name", "")).strip(),
+        "report_nm": str(it.get("report_nm", "")).strip(),
+        "rcept_no": str(it.get("rcept_no", "")).strip(),
+    }
+
+
 def parse_market_payload(payload: dict, cursor: str | None
-                         ) -> tuple[list[tuple[str, RawDoc]], str | None]:
-    """전종목 응답 → [(corp_code, RawDoc)] + 새 커서.
+                         ) -> tuple[list[tuple[str, RawDoc, dict]], str | None]:
+    """전종목 응답 → [(corp_code, RawDoc, meta)] + 새 커서.
 
     종목별 모드와 달리 어느 회사 공시인지 응답의 corp_code 로 판별한다.
-    호출자가 corp_code → 감시종목 매핑으로 걸러 적재한다.
+    호출자가 corp_code → 감시종목 매핑으로 걸러 적재하고, **매칭되지 않은 것은
+    meta 로 신규 종목 발굴에 쓴다**(discover.py).
     """
     items = _new_items(payload, cursor)
-    pairs = [(str(it.get("corp_code", "")).strip(), _to_doc(it))
+    pairs = [(str(it.get("corp_code", "")).strip(), _to_doc(it), _meta(it))
              for it in items if it.get("corp_code")]
     max_rcept = max([str(it["rcept_no"]).strip() for it in items] + [cursor or ""])
     return pairs, (max_rcept or cursor)
@@ -108,7 +124,7 @@ def parse_market_payload(payload: dict, cursor: str | None
 
 async def fetch_market(cursor: str | None, initial_days: int = 3,
                        max_pages: int = _MARKET_MAX_PAGES
-                       ) -> tuple[list[tuple[str, RawDoc]], str | None, bool]:
+                       ) -> tuple[list[tuple[str, RawDoc, dict]], str | None, bool]:
     """corp_code 없이 날짜 범위로 **전체 공시**를 받아온다.
 
     종목당 1콜(감시 65종목 = 65콜/사이클)에서 목록 몇 콜로 바뀐다. 같은 비용에
@@ -122,7 +138,7 @@ async def fetch_market(cursor: str | None, initial_days: int = 3,
         bgn_de = cursor[:8]
     else:
         bgn_de = (datetime.now(KST) - timedelta(days=initial_days)).strftime("%Y%m%d")
-    pairs: list[tuple[str, RawDoc]] = []
+    pairs: list[tuple[str, RawDoc, dict]] = []
     max_seen = cursor or ""
     more = False
     async with httpx.AsyncClient(timeout=30) as client:
