@@ -65,7 +65,6 @@ export default {
           daily_loss_limit_pct: parseFloat(gLoss.value),
           risk_per_trade_pct: parseFloat(gRisk.value),
           auto_approve: gAuto.checked,
-          scan_interval_sec: parseInt(gScan.value, 10),
         });
         _memo["risk"] = undefined;
         await loadRisk();
@@ -79,7 +78,7 @@ export default {
         el("span", { html: '<i class="bi bi-shield-check"></i> <b>거래당 리스크</b> = 1회 손절 시 계좌 대비 최대 손실 %(주문 수량을 정함). <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춤. (실거래 성과 로그 기준)' })),
       el("div", { class: "d-flex gap-3 flex-wrap align-items-end" },
         [fld("거래당 리스크 %", gRisk), fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss),
-         fld("감시 주기(초)", gScan), el("div", {}, gSave)]),
+         el("div", {}, gSave)]),
       el("div", { class: "form-check form-switch mt-2" }, [
         gAuto,
         el("label", { class: "form-check-label small fw-semibold", for: "gAutoChk" },
@@ -87,8 +86,6 @@ export default {
       ]),
       el("div", { class: "small text-secondary mt-1" },
         "팁: 거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 소액 계좌는 절대금액이 작아 대부분 1~2주로 잡힙니다."),
-      el("div", { class: "small text-secondary" },
-        "감시 주기: 신호 스캔 간격(10~300초). 짧을수록 진입이 빨라지지만 감시 종목수 × 호출이 늘어 키움 API 한도·서버 부하가 커집니다. 30초 이하는 종목 수를 줄여 쓰세요. 저장 즉시 적용(재시작 불필요)."),
       gStatus,
     );
     const loadRisk = async () => {
@@ -152,12 +149,24 @@ export default {
       el("div", { class: "mb-2" }, [el("label", { class: "form-label small mb-1" }, label), input]);
 
     // API 설정 모달 (기어 버튼으로 연다)
+    const scanSave = el("button", { class: "btn btn-sm btn-outline-primary", type: "button" }, "주기 저장");
+    const scanMsg = el("div", { class: "small mt-1" });
+    const usageBox = el("div", { class: "small" });
     const modalBody = el("div", { class: "modal-body" }, [
+      el("div", { class: "fw-semibold small mb-2", html: '<i class="bi bi-key"></i> 키움 API 자격' }),
       field("환경", envSel),
       field("앱키 (App Key)", appKeyIn),
       field("시크릿 키 (Secret Key)", secretIn),
       field("계좌번호", accountIn),
       cfgMsg,
+      el("hr", { class: "my-3" }),
+      el("div", { class: "fw-semibold small mb-2", html: '<i class="bi bi-speedometer2"></i> 감시 주기 · API 부하' }),
+      el("div", { class: "d-flex gap-2 align-items-end mb-1" },
+        [fld("감시 주기(초)", gScan), el("div", {}, scanSave)]),
+      el("div", { class: "small text-secondary mb-2" },
+        "신호 스캔 간격(10~300초). 짧을수록 진입이 빨라지지만 감시 종목수 × 호출이 늘어 API 한도에 가까워집니다. 저장 즉시 적용(재시작 불필요). 한도 초과(429)가 나면 서버가 자동으로 호출 속도를 절반으로 낮추고, 안정되면 단계적으로 회복합니다."),
+      scanMsg,
+      usageBox,
     ]);
     const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
       el("div", { class: "modal-dialog modal-dialog-centered" },
@@ -177,7 +186,58 @@ export default {
     container.appendChild(modalEl);
     saveBtn.className = "btn btn-sm btn-primary";  // 모달 푸터용 (mt-2 제거)
     const settingsModal = new bootstrap.Modal(modalEl);
-    gearBtn.onclick = () => { loadSettings(); settingsModal.show(); };
+    const renderUsage = (u) => {
+      usageBox.innerHTML = "";
+      if (!u || !u.max_rps) {
+        usageBox.appendChild(el("div", { class: "text-secondary" }, "API 호출 기록 없음"));
+        return;
+      }
+      const pctUse = u.usage_pct ?? 0;
+      const heavy = pctUse >= 80 || (u.rate_limited_1h || 0) > 0 || u.auto_throttled;
+      const tone = heavy ? "bg-danger" : pctUse >= 50 ? "bg-warning" : "bg-success";
+      usageBox.append(
+        el("div", { class: "d-flex justify-content-between" }, [
+          el("span", { class: "text-secondary" }, "현재 호출 속도"),
+          el("span", { class: heavy ? "fw-semibold text-danger" : "" },
+            `${u.rps_10s}/${u.max_rps} rps (${pctUse}%)`),
+        ]),
+        el("div", { class: "progress", style: "height:6px" },
+          el("div", { class: `progress-bar ${tone}`, style: `width:${Math.min(100, pctUse)}%` })),
+        el("div", { class: "text-secondary mt-1" },
+          `최근 1분 ${u.calls_1m}회 · 1시간 ${u.calls_1h}회` +
+          (u.throttle_wait_sec ? ` · 대기 ${u.throttle_wait_sec}s` : "") +
+          (u.errors_1h ? ` · 오류 ${u.errors_1h}회(1h)` : "")),
+        u.auto_throttled
+          ? el("div", { class: "alert alert-warning py-1 px-2 mt-2 mb-0 small" },
+              `⚠ 자동 감속 중 — 한도 초과로 상한을 ${u.configured_rps} → ${u.max_rps} rps 로 낮췄습니다(누적 ${u.penalties}회). 안정되면 자동 회복하며, 반복되면 감시 주기를 늘리세요.`)
+          : el("div", { class: "text-secondary small mt-1" },
+              `자동 감속 미작동 (설정 상한 ${u.configured_rps} rps) — 429 발생 시 서버가 스스로 속도를 낮춥니다.`),
+      );
+    };
+
+    scanSave.onclick = async () => {
+      scanSave.disabled = true;
+      scanMsg.textContent = "";
+      try {
+        await postJSON("/api/trading/risk", { scan_interval_sec: parseInt(gScan.value, 10) });
+        _memo["risk"] = undefined;
+        await loadRisk();
+        scanMsg.className = "small mt-1 text-success";
+        scanMsg.textContent = `저장됨 — ${gScan.value}초 주기로 다음 스캔부터 적용`;
+      } catch (e) {
+        scanMsg.className = "small mt-1 text-danger";
+        scanMsg.textContent = "저장 실패: " + e.message;
+      } finally { scanSave.disabled = false; }
+    };
+
+    gearBtn.onclick = async () => {
+      loadSettings();
+      settingsModal.show();
+      try {
+        const st = await fetchJSON("/api/trading/status");
+        renderUsage(st.api_usage);
+      } catch (e) { /* 상태 카드가 알림 */ }
+    };
 
     const loadSettings = async () => {
       try {
@@ -423,29 +483,6 @@ export default {
           (mk.scanning ? ageTxt + (stale ? " ⚠ 스캔이 멈춘 것 같습니다" : "")
                        : `정규장 ${mk.session || "09:00~15:30"}`)),
       ]));
-      // --- 키움 API 부하 (감시 주기를 더 줄일 여유가 있는지) ---
-      const u = s.api_usage || {};
-      if (u.max_rps) {
-        const pctUse = u.usage_pct ?? 0;
-        const heavy = pctUse >= 80 || (u.rate_limited_1h || 0) > 0;
-        const barTone = heavy ? "bg-danger" : pctUse >= 50 ? "bg-warning" : "bg-success";
-        status.body.appendChild(el("div", { class: "mb-2" }, [
-          el("div", { class: "d-flex justify-content-between small" }, [
-            el("span", { class: "text-secondary" }, "키움 API 부하"),
-            el("span", { class: heavy ? "fw-semibold text-danger" : "" },
-              `${u.rps_10s}/${u.max_rps} rps (${pctUse}%)`),
-          ]),
-          el("div", { class: "progress", style: "height:6px" },
-            el("div", { class: `progress-bar ${barTone}`,
-                        style: `width:${Math.min(100, pctUse)}%` })),
-          el("div", { class: "small text-secondary" },
-            `최근 1분 ${u.calls_1m}회 · 1시간 ${u.calls_1h}회` +
-            (u.throttle_wait_sec ? ` · 대기 ${u.throttle_wait_sec}s` : "") +
-            ((u.rate_limited_1h || 0) > 0
-              ? ` · ⚠ 한도초과 ${u.rate_limited_1h}회(1h) — 주기를 늘리세요`
-              : (u.errors_1h ? ` · 오류 ${u.errors_1h}회(1h)` : ""))),
-        ]));
-      }
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
       const clockBadge = s.server_time
         ? [" ", badge(s.clock_synced ? "동기화 ✓" : "미동기화 ⚠", s.clock_synced ? "success" : "danger")]
