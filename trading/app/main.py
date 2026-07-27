@@ -405,10 +405,16 @@ async def api_journal(date: str | None = None, _=Depends(require_auth)):
     """
     day = date or datetime.now(KST).date().isoformat()
     saved = await asyncio.to_thread(journal.load, day)
-    if saved:
-        return saved
+    if saved and saved.get("final"):
+        return saved                # 마감 후 확정본 — 요약 포함, 그대로 반환
+    # 진행 중인 날짜는 저장본이 있어도 그때그때 다시 계산한다(저장본은 스냅샷일 뿐).
     entry = await asyncio.to_thread(journal.build, day)
-    entry["saved"] = False          # 아직 마감 잡이 돌지 않은 오늘치
+    ok, why = journal.summary_ready(day)
+    entry["final"] = False
+    entry["saved"] = bool(saved)
+    entry["summary"] = ({"ok": False, "pending": True, "reason": why} if not ok
+                        else {"ok": False,
+                              "reason": "아직 작성되지 않음 — '다시 작성'으로 만들 수 있습니다"})
     return entry
 
 

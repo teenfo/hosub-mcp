@@ -1,4 +1,6 @@
 """매매일지 — 신호 기록·집계·요인 추출·누적. 수치는 전부 결정론이어야 한다."""
+from datetime import datetime
+from zoneinfo import ZoneInfo
 import pytest
 
 from app import journal, settings
@@ -217,6 +219,7 @@ async def test_summarize_failure_does_not_break_journal(db, monkeypatch):
             raise llmgw.GatewayError("연결 실패")
 
     monkeypatch.setattr(llmgw, "AsyncLLMGateway", Boom)
+    monkeypatch.setattr(journal, "summary_ready", lambda day, now=None: (True, ""))
     entry = await journal.generate("2026-07-27")
     assert entry["summary"]["ok"] is False and "연결 실패" in entry["summary"]["error"]
     assert entry["facts"]                          # 결정론 부분은 그대로
@@ -236,6 +239,7 @@ async def test_summarize_success(db, monkeypatch):
             return "  오늘의 결과: 거래 없음  "
 
     monkeypatch.setattr(llmgw, "AsyncLLMGateway", Fake)
+    monkeypatch.setattr(journal, "summary_ready", lambda day, now=None: (True, ""))
     entry = await journal.generate("2026-07-27")
     assert entry["summary"]["ok"] is True
     assert entry["summary"]["text"] == "오늘의 결과: 거래 없음"
@@ -248,3 +252,83 @@ def test_summary_prompt_carries_only_facts(db):
     assert "- 사실1" in p and "- 사실2" in p
     assert "매수" not in journal.SUMMARY_SYSTEM.split("규칙:")[0]   # 매매 지시 아님
     assert "추천" in journal.SUMMARY_SYSTEM                        # 추천 금지 명시
+
+
+# --- 요약은 장 마감 후에만 ---
+# 장중 요약은 '오전까지의 손익'을 하루의 결론처럼 쓰게 되어 오해를 부른다.
+
+def _now(h, m, day=27):
+    return datetime(2026, 7, day, h, m, tzinfo=ZoneInfo("Asia/Seoul"))
+
+
+def test_summary_ready_only_after_close(db, monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "journal", {"run_after": "15:45"})
+    ok, why = journal.summary_ready("2026-07-27", _now(11, 30))
+    assert ok is False and "15:45" in why          # 장중
+    assert journal.summary_ready("2026-07-27", _now(15, 44))[0] is False
+    assert journal.summary_ready("2026-07-27", _now(15, 45))[0] is True
+    assert journal.summary_ready("2026-07-27", _now(16, 30))[0] is True
+
+
+def test_summary_ready_past_and_future(db, monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "journal", {"run_after": "15:45"})
+    # 지난 날짜는 이미 끝났으므로 장중에 조회해도 작성 가능
+    assert journal.summary_ready("2026-07-24", _now(11, 30))[0] is True
+    ok, why = journal.summary_ready("2026-07-28", _now(11, 30))
+    assert ok is False and "아직 오지 않은" in why
+
+
+@pytest.mark.asyncio
+async def test_generate_skips_summary_intraday(db, monkeypatch):
+    """장중 '다시 작성'은 집계만 갱신하고 LLM 을 부르지 않는다."""
+    from app import llmgw
+
+    called = []
+
+    class Fake:
+        def __init__(self, *a, **kw):
+            called.append(1)
+
+        async def run(self, *a, **kw):
+            return "x"
+
+    monkeypatch.setattr(llmgw, "AsyncLLMGateway", Fake)
+    monkeypatch.setattr(journal, "summary_ready",
+                        lambda day, now=None: (False, "장 마감 후(15:45 이후) 자동 작성됩니다"))
+    entry = await journal.generate("2026-07-27")
+    assert called == []                             # 게이트웨이 호출 없음
+    assert entry["final"] is False
+    assert entry["summary"]["pending"] is True
+    assert "15:45" in entry["summary"]["reason"]
+    assert entry["facts"]                           # 집계는 그대로
+
+
+@pytest.mark.asyncio
+async def test_generate_writes_summary_after_close(db, monkeypatch):
+    from app import llmgw
+
+    class Fake:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def run(self, *a, **kw):
+            return "오늘의 결과: 정리"
+
+    monkeypatch.setattr(llmgw, "AsyncLLMGateway", Fake)
+    monkeypatch.setattr(journal, "summary_ready", lambda day, now=None: (True, ""))
+    entry = await journal.generate("2026-07-27")
+    assert entry["final"] is True
+    assert entry["summary"]["text"] == "오늘의 결과: 정리"
+
+
+def test_history_reports_final_flag(db):
+    journal.save({"date": "2026-07-27", "generated": "x", "final": False,
+                  "trades": {"trades": 0}, "signals": {}, "summary": {}})
+    journal.save({"date": "2026-07-24", "generated": "x", "final": True,
+                  "trades": {"trades": 1, "win_rate": 100.0, "pnl_krw": 10.0,
+                             "expectancy_pct": 1.0},
+                  "signals": {"total": 1, "blocked": 0},
+                  "summary": {"text": "요약"}})
+    rows = {r["date"]: r for r in journal.history(30)}
+    assert rows["2026-07-27"]["final"] is False and rows["2026-07-27"]["has_summary"] is False
+    assert rows["2026-07-24"]["final"] is True and rows["2026-07-24"]["has_summary"] is True
