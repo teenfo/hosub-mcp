@@ -236,12 +236,17 @@ def _regime_rows(n_days=60, beta_only=True, seed=1):
                 fwd = mkt * (0.5 if low_vol else 1.5)
             else:
                 fwd = mkt + (2.0 if low_vol else 0.0)
+            atr = 1.0 if low_vol else 5.0
             rows.append({
                 "date": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}",
                 "symbol": f"S{k}", "score": 1, "liquid": 1, "gap_pct": 0.0,
-                "atr_pct": 1.0 if low_vol else 5.0,
+                "atr_pct": atr,
+                # 변동성과 거의 같이 움직이는 피처 — 잔차화가 죽여야 하는 대상.
+                # 완전히 같으면 잔차가 상수(0)라 상관이 정의되지 않으므로 잡음을 섞는다.
+                "vol_ratio20": atr + rng.normal(0, 0.3),
                 "ret_1d": mkt + rng.normal(0, 0.01),
-                "fwd_1": fwd, "fwd_3": fwd, "fwd_5": fwd,
+                "fwd_1": fwd + rng.normal(0, 0.05),
+                "fwd_3": fwd, "fwd_5": fwd,
             })
     return pd.DataFrame(rows)
 
@@ -315,7 +320,175 @@ def test_market_daily_is_cross_sectional_mean():
     assert m["2026-07-01"] == 2.0 and m["2026-07-02"] == -2.0
 
 
-# --- ⑦ 배선 ---
+# --- ⑦ 목적어 교정 — 발굴은 방향이 아니라 '움직임'을 공급해야 한다 ---
+# 발굴이 먹이는 것은 orb·momentum 같은 장중 규칙이다. 익일 종가 방향만 재면
+# 잘못된 것을 최적화하게 된다. 1년치 하네스가 그 상태였다.
+
+def test_panel_keeps_high_low():
+    """새 목적어의 재료. 종전엔 close/open 만 실어 계산 자체가 불가능했다."""
+    p = panel.panel(_bars(seed=4), settings.CONFIG["discovery"])
+    assert {"high", "low", "open", "close"} <= set(p.columns)
+
+
+def test_forward_targets_share_the_same_entry():
+    """셋 다 t+1 시가 진입 기준이어야 서로 비교된다."""
+    p = pd.DataFrame({
+        "close": [100.0, 110.0, 120.0], "open": [99.0, 100.0, 111.0],
+        "high": [101.0, 115.0, 121.0], "low": [98.0, 95.0, 110.0],
+    }, index=pd.date_range("2026-01-01", periods=3))
+    out = panel.forward(p, horizons=(1,))
+    # t0 진입가 = t1 시가 100
+    assert out["fwd_1"].iloc[0] == pytest.approx(10.0)        # → t1 종가 110
+    assert out["fwd_up_1"].iloc[0] == pytest.approx(15.0)     # → t1 고가 115
+    assert out["fwd_range_1"].iloc[0] == pytest.approx(20.0)  # (115−95)/100
+
+
+def test_forward_range_is_never_negative():
+    """고가−저가는 정의상 음수가 될 수 없다 — 부호가 뒤집히면 계산 오류다."""
+    p = panel.forward(panel.panel(_bars(seed=13), settings.CONFIG["discovery"]))
+    r = p["fwd_range_1"].dropna()
+    assert len(r) and (r >= 0).all()
+
+
+def test_forward_up_never_below_direction():
+    """고가는 종가 이상이므로 최대상승 ≥ 방향수익률이어야 한다."""
+    p = panel.forward(panel.panel(_bars(seed=21), settings.CONFIG["discovery"]))
+    both = p[["fwd_up_1", "fwd_1"]].dropna()
+    assert len(both) and (both["fwd_up_1"] >= both["fwd_1"] - 1e-9).all()
+
+
+def test_forward_last_row_has_no_future():
+    p = panel.forward(panel.panel(_bars(seed=6), settings.CONFIG["discovery"]))
+    assert np.isnan(p["fwd_up_1"].iloc[-1]) and np.isnan(p["fwd_range_1"].iloc[-1])
+
+
+def test_forward_without_high_low_is_safe():
+    """high/low 가 없는 프레임(구버전 호출)이 와도 터지지 않는다."""
+    p = pd.DataFrame({"close": [100.0, 110.0], "open": [99.0, 100.0]},
+                     index=pd.date_range("2026-01-01", periods=2))
+    out = panel.forward(p, horizons=(1,))
+    assert "fwd_1" in out and "fwd_up_1" not in out
+
+
+def test_ic_is_computed_per_target():
+    rows = []
+    for d in range(12):
+        for k in range(25):
+            rows.append({"date": f"2026-07-{d + 1:02d}", "symbol": f"S{k}",
+                         "score": k % 4, "liquid": 1, "gap_pct": 0.0,
+                         "atr_pct": float(k), "vol_ratio20": float(k),
+                         "fwd_1": float(k), "fwd_3": 0.0, "fwd_5": 0.0,
+                         "fwd_up_1": float(-k), "fwd_range_1": float(k)})
+    out = eventstudy.analyze(_long(rows), cost_pct=0.28)
+    by = out["ic_by_target"]
+    assert set(by) == set(panel.TARGETS)
+    ic_of = lambda t, f: next(r["mean_ic"] for r in by[t] if r["feature"] == f)  # noqa: E731
+    assert ic_of("fwd_1", "vol_ratio20") == pytest.approx(1.0, abs=0.01)
+    assert ic_of("fwd_up_1", "vol_ratio20") == pytest.approx(-1.0, abs=0.01)
+
+
+def test_targets_and_threshold_reported():
+    out = eventstudy.analyze(_regime_rows(n_days=60), cost_pct=0.28)
+    assert out["beta_control"] == "atr_pct"
+    assert out["bonferroni_t"] == eventstudy.bonferroni_t(len(panel.IC_FEATURES))
+
+
+# --- ⑧ 베타 잔차화 — 횡단면 demeaning 은 베타를 지우지 못한다 ---
+
+def test_bonferroni_threshold_values():
+    assert eventstudy.bonferroni_t(1) == 1.96
+    assert eventstudy.bonferroni_t(7) == 2.69
+    assert eventstudy.bonferroni_t(7) > eventstudy.bonferroni_t(3)
+
+
+def _resid_of(out, feature, key="resid_ic"):
+    return next((r.get(key) for r in out["ic"] if r["feature"] == feature), None)
+
+
+def _down_skewed_beta(n_days=80, seed=3):
+    """**하락 편중** 표본에 순수 베타 피처를 심는다.
+
+    실제 표본이 이 모양이었다(190일 중 하락 107 / 상승 83, 시장 평균 −0.22%).
+    상승·하락이 균형을 이루면 베타 효과가 상쇄돼 평균 IC 가 0으로 나온다 —
+    그래서 원시 IC 만 봐서는 판별이 안 되고, 하락 편중일 때 강하게 보인다.
+    바로 그 상황에서 잔차화가 베타를 걸러 내는지를 확인한다.
+    """
+    rng = np.random.default_rng(seed)
+    rows = []
+    for d in range(n_days):
+        mkt = -2.0 if d % 5 else 1.0          # 5일 중 4일 하락
+        for k in range(30):
+            atr = 1.0 if k < 15 else 5.0       # 저변동성 / 고변동성
+            rows.append({
+                "date": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}",
+                "symbol": f"S{k}", "score": 1, "liquid": 1, "gap_pct": 0.0,
+                "atr_pct": atr,
+                "vol_ratio20": atr + rng.normal(0, 0.3),
+                "ret_1d": mkt,
+                "fwd_1": mkt * (0.5 if atr == 1.0 else 1.5) + rng.normal(0, 0.05),
+                "fwd_3": 0.0, "fwd_5": 0.0,
+            })
+    return pd.DataFrame(rows)
+
+
+def test_residual_kills_pure_beta():
+    """저변동성이 시장을 덜 따라간 것뿐이라면 잔차 IC 는 0 으로 죽어야 한다.
+
+    이게 이번 변경의 핵심 판별력이다 — 원시 IC 는 강하게 나오지만 그 강도가
+    변동성으로 전부 설명되면 알파가 아니다.
+    """
+    out = eventstudy.analyze(_down_skewed_beta(), cost_pct=0.28)
+    raw = abs(_resid_of(out, "vol_ratio20", "mean_ic"))
+    resid = abs(_resid_of(out, "vol_ratio20"))
+    assert raw > 0.3, f"원시 IC 가 약해 판별이 무의미하다({raw})"
+    assert resid < raw / 3, f"잔차화가 베타를 못 걸렀다(원시 {raw} → 잔차 {resid})"
+
+
+def test_residual_keeps_real_alpha():
+    """변동성과 무관한 신호는 잔차화 후에도 살아남아야 한다."""
+    rng = np.random.default_rng(11)
+    rows = []
+    for d in range(40):
+        for k in range(30):
+            # atr 은 신호와 무관하게 섞고, 신호(vol_ratio20)만 수익률과 단조 관계.
+            # 일별 잡음이 없으면 IC 표준편차가 0이라 t 값이 정의되지 않는다.
+            rows.append({"date": f"2026-{1 + d // 28:02d}-{1 + d % 28:02d}",
+                         "symbol": f"S{k}", "score": 1, "liquid": 1, "gap_pct": 0.0,
+                         "atr_pct": float((k * 7) % 30), "vol_ratio20": float(k),
+                         "ret_1d": 0.1, "fwd_1": float(k) + rng.normal(0, 1.5),
+                         "fwd_3": 0.0, "fwd_5": 0.0})
+    out = eventstudy.analyze(_long(rows), cost_pct=0.28)
+    assert _resid_of(out, "vol_ratio20") > 0.7
+    assert abs(_resid_of(out, "vol_ratio20", "resid_t")) > 2
+
+
+def test_control_feature_is_flagged_not_residualized():
+    """대조축을 자기 자신에 회귀시키면 잔차가 0이다 — 계산하지 않고 표시만."""
+    out = eventstudy.analyze(_regime_rows(n_days=60), cost_pct=0.28)
+    ctrl = next(r for r in out["ic"] if r["feature"] == "atr_pct")
+    assert ctrl["is_control"] is True
+    assert "resid_ic" not in ctrl
+    other = next(r for r in out["ic"] if r["feature"] == "vol_ratio20")
+    assert other["is_control"] is False
+
+
+def test_resid_spearman_guards():
+    g = pd.DataFrame({"a": [1.0] * 30, "atr_pct": [2.0] * 30, "fwd_1": [3.0] * 30})
+    assert np.isnan(eventstudy._resid_spearman(g, "a"))          # 분산 0
+    small = pd.DataFrame({"a": [1.0, 2.0], "atr_pct": [1.0, 2.0], "fwd_1": [1.0, 2.0]})
+    assert np.isnan(eventstudy._resid_spearman(small, "a"))      # 표본 부족
+    assert np.isnan(eventstudy._resid_spearman(g, "atr_pct"))    # 자기 자신
+
+
+def test_spearman_target_parameterised():
+    g = pd.DataFrame({"a": range(30), "fwd_1": range(30),
+                      "fwd_up_1": range(29, -1, -1)})
+    assert eventstudy._spearman(g, "a", "fwd_1") == pytest.approx(1.0)
+    assert eventstudy._spearman(g, "a", "fwd_up_1") == pytest.approx(-1.0)
+    assert np.isnan(eventstudy._spearman(g, "a", "없는목적어"))
+
+
+# --- ⑨ 배선 ---
 
 def test_job_knows_study():
     from app.backtest import job
