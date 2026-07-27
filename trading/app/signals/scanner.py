@@ -7,11 +7,11 @@
 """
 import asyncio
 import logging
-import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from .. import settings
+from ..data.exclude import is_excluded as _is_excluded
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -119,19 +119,6 @@ def filter_candidates(items: list[dict], cfg: dict,
     return picked
 
 
-# ETF·ETN·리츠·스팩 등 비보통주 제외(급등 자동편입 시 잡ETF 유입 방지)
-_EXCL_KW = ("KODEX", "TIGER", "KOSEF", "ARIRANG", "HANARO", "PLUS", "RISE", "ACE",
-            "SOL", "KBSTAR", "TIMEFOLIO", "ETN", "레버리지", "인버스", "선물",
-            "리츠", "스팩", "채권", "국채", "커버드콜", "배당", "TR")
-
-
-def _is_excluded(name: str) -> bool:
-    n = name or ""
-    if any(k in n for k in _EXCL_KW):
-        return True
-    # 우선주 제외(등락률 상위엔 저유동 우선주가 잘 걸린다). '3우B'·'우(전환)' 등
-    # 접미 변형까지 커버: 숫자?우숫자?B?(괄호 주석)? 로 끝나는 이름.
-    return bool(re.search(r"[0-9]?우[0-9]?B?(\([^)]*\))?$", n)) or "우선" in n
 
 
 def filter_gainers(items: list[dict], cfg: dict,

@@ -79,9 +79,27 @@ export default {
         risk && risk.regime ? chip("시장 유효국면", risk.regime + (risk.regime === "강세" ? " · 인버스 보류" : " · 인버스 허용"),
           risk.regime === "강세" ? "text-danger" : risk.regime === "약세" ? "text-primary" : "") : null,
         chip("활성 기법", r.rules.filter((x) => x.enabled).length + " / " + r.rules.length),
+        (() => {
+          const ov = r.rules.filter((x) => x.overridden);
+          return chip("설정과 다름", ov.length ? `${ov.length}개 (화면 토글이 덮음)` : "없음",
+                      ov.length ? "text-warning" : "text-secondary");
+        })(),
       ]));
       sumC.body.appendChild(el("div", { class: "small text-secondary mt-2" },
         "모든 기법에 공통 적용: 잔고 동기화 → 일일 가드 → 국면 게이트(인버스) → 롱 전용 → 리스크 사이징. 신호는 금액 제한 없이 기록되고, 주문 생성만 게이트를 거칩니다."));
+      {
+        // 어긋난 규칙을 한 줄로 모아 보여 준다 — 카드를 스크롤하지 않아도 보이게
+        const ov = r.rules.filter((x) => x.overridden);
+        if (ov.length) {
+          sumC.body.appendChild(el("div", { class: "small mt-2" }, [
+            el("span", { class: "badge text-bg-warning me-2" }, "설정과 다름"),
+            el("span", { class: "text-secondary" },
+              `config.yaml 기본값과 다른 상태로 동작 중: ` +
+              ov.map((x) => `${RULE_LABEL[x.name] || x.name} ${x.config_enabled ? "ON→OFF" : "OFF→ON"}`).join(" · ") +
+              ` — 화면 토글(rules.json)이 더 최근 결정이므로 되돌리지 않습니다. 의도한 것인지 확인하세요.`),
+          ]));
+        }
+      }
 
       // --- 기법 카드들 ---
       rulesRow.innerHTML = "";
@@ -96,8 +114,17 @@ export default {
           type: "button",
         }, rule.enabled ? "끄기" : "켜기");
         tgl.onclick = async () => {
-          const onMsg = `[${RULE_LABEL[rule.name] || rule.name}] 기법을 켤까요? 다음 신호 사이클부터 실제 매매 신호를 만듭니다.`;
-          const offMsg = `[${RULE_LABEL[rule.name] || rule.name}] 기법을 끌까요? 신규 신호가 더 이상 생성되지 않습니다(기존 포지션은 유지).`;
+          const label = RULE_LABEL[rule.name] || rule.name;
+          // 켤 때는 성적을 반드시 보여 준다. 스윕이 음수인 규칙이 오버라이드로
+          // 켜져 있어도 화면 어디에도 드러나지 않던 것이 이번 개편의 발단이다.
+          const s = rule.sweep;
+          let evidence = "\n\n주간 스윕 성적: ";
+          if (!s) evidence += "아직 없음 (매주 토 09시 자동 실행)";
+          else if (!s.trades) evidence += "표본 없음 — 이 규칙은 스윕에서 한 번도 체결되지 않았습니다";
+          else evidence += `${s.trades}건 · 승률 ${s.win_rate}% · 평균 ${s.avg_r >= 0 ? "+" : ""}${s.avg_r}R`
+            + (s.avg_r < 0 ? "\n\n⚠️ 평균 R 이 음수입니다 — 스윕 표본에서는 손실을 냈습니다." : "");
+          const onMsg = `[${label}] 기법을 켤까요? 다음 신호 사이클부터 실제 매매 신호를 만듭니다.${evidence}`;
+          const offMsg = `[${label}] 기법을 끌까요? 신규 신호가 더 이상 생성되지 않습니다(기존 포지션은 유지).`;
           if (!confirm(rule.enabled ? offMsg : onMsg)) return;
           tgl.disabled = true;
           try {
@@ -106,6 +133,22 @@ export default {
             await load();
           } catch (e) { alert("실패: " + e.message); tgl.disabled = false; }
         };
+        // 스윕 평균 R — 켜고 끄는 판단의 1차 근거이므로 헤더로 끌어올린다
+        const sr = rule.sweep;
+        const swBadge = !sr || !sr.trades
+          ? el("span", { class: "badge text-bg-light text-secondary", title: "스윕 표본 없음" }, "스윕 —")
+          : el("span", {
+              class: "badge " + (sr.avg_r >= 0 ? "text-bg-danger" : "text-bg-primary"),
+              title: `주간 스윕 ${sr.trades}건 · 승률 ${sr.win_rate}%`,
+            }, `스윕 ${sr.avg_r >= 0 ? "+" : ""}${sr.avg_r}R`);
+        // config 기본값과 현재값이 어긋나면 드러낸다. rules.json 은 UI 토글이
+        // 쓰는 파일이라 더 최근 결정이지만, 보이지 않으면 의도인지 사고인지 모른다.
+        const divBadge = rule.overridden
+          ? el("span", {
+              class: "badge text-bg-warning",
+              title: `config.yaml 기본값은 ${rule.config_enabled ? "켜짐" : "꺼짐"} — 화면 토글로 덮인 상태입니다`,
+            }, `설정과 다름 (기본 ${rule.config_enabled ? "ON" : "OFF"})`)
+          : null;
         cardEl.appendChild(el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
           el("span", { class: "fw-semibold" }, RULE_LABEL[rule.name] || rule.name),
           el("code", { class: "small" }, rule.name),
@@ -115,6 +158,13 @@ export default {
                 ? badge(`국면 대기 (현재 ${rule.cur_regime})`, "warning")
                 : badge("가동 중", "success"))
             : badge("비활성", "secondary"),
+          swBadge,
+          divBadge,
+          rule.priority != null
+            ? el("span", { class: "badge text-bg-light text-dark",
+                           title: "발주 우선순위 — 같은 사이클에 여러 신호가 나오면 높은 쪽이 먼저 자금을 쓴다" },
+                 `우선 ${rule.priority}`)
+            : null,
           tgl,
         ]));
         const body = el("div", { class: "card-body small" });

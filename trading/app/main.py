@@ -322,21 +322,35 @@ async def api_prices(_=Depends(require_auth)):
 @app.get("/api/rules")
 async def api_rules(_=Depends(require_auth)):
     """등록된 매매 규칙(테크닉) 목록 + 활성 여부 — 기법 점검/관리용."""
+    from .backtest import sweep
     from .signals.rules import REGISTRY
 
+    sw = await asyncio.to_thread(sweep.latest)      # 파일 1개 읽기
+    sw_rules = (sw or {}).get("rules") or {}
     out = []
     for name, (fn, _needs, side) in REGISTRY.items():
         cfg = settings.RULES.get(name, {})
         doc = (fn.__doc__ or "").strip().splitlines()[0] if fn.__doc__ else ""
         regimes = cfg.get("regimes")
-        blocked = bool(regimes and cfg.get("enabled") and engine.regime not in regimes)
-        out.append({"name": name, "enabled": bool(cfg.get("enabled")),
+        enabled = bool(cfg.get("enabled"))
+        blocked = bool(regimes and enabled and engine.regime not in regimes)
+        # config 기본값과 현재값이 어긋나면 화면에서 드러내야 한다. rules.json 은
+        # UI 토글이 쓰는 파일이라 '사용자의 더 최근 결정'이지만, 그 사실이 보이지
+        # 않으면 어느 쪽이 의도인지 아무도 모른다.
+        default = settings.RULES_CONFIG_ENABLED.get(name)
+        out.append({"name": name, "enabled": enabled,
                     "side": side, "desc": doc,
+                    "config_enabled": default,
+                    "overridden": default is not None and default != enabled,
+                    "sweep": sw_rules.get(name),
+                    "priority": cfg.get("priority"),
                     "regime_blocked": blocked, "cur_regime": engine.regime,
                     "config": {k: v for k, v in cfg.items()
                                if not k.startswith("_")}})
     return {"rules": out, "max_stop_pct": settings.RULES.get("max_stop_pct"),
-            "long_only": settings.RISK.get("long_only", False)}
+            "long_only": settings.RISK.get("long_only", False),
+            "sweep_run_ts": (sw or {}).get("run_ts"),
+            "sweep_symbols": (sw or {}).get("symbols")}
 
 
 @app.post("/api/rules/{name}/toggle")
