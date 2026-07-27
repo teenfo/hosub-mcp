@@ -18,12 +18,15 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from .auth import RateLimiter, authenticate
+from .catalog import Catalog
 from .config import (
     OVERRIDABLE_FIELDS,
     ROLE_NAME_RE,
     ConfigError,
     RoleConfig,
     ServiceConfig,
+    model_matches,
+    validate_model_name,
     validate_role_fields,
 )
 from .notify import SlackNotifier
@@ -114,6 +117,8 @@ def build_app(
     # roles.yaml 은 기본값, DB 의 런타임 오버라이드가 그 위에 얹힌다.
     # 주입된 테스트 픽스처도 같은 경로를 타게 여기서 한 번만 적용한다.
     roles.apply_overrides(store.list_role_overrides())
+    catalog = Catalog(cfg_dir / "catalog.yaml")
+    roles.set_catalog_sizes(catalog.sizes())
     client = client or OllamaClient(roles.backend.base_url, roles.backend.keep_alive)
     scheduler = scheduler or Scheduler(
         store, roles, client,
@@ -173,6 +178,14 @@ def build_app(
     def _reload_overrides() -> list[dict]:
         """DB → 유효 역할 맵. 쓰기 직후 항상 이 한 경로로만 반영한다."""
         return roles.apply_overrides(store.list_role_overrides())
+
+    def _sync_catalog_sizes() -> None:
+        """카탈로그는 git pull 로 바뀐다(재빌드 없음) — 크기 추정에 즉시 반영한다.
+
+        기동 시 한 번만 읽으면 새로 추가한 모델이 크기 게이트에서 20GB 로 가정돼
+        멀쩡한 설치가 거부된다. Catalog 는 mtime 캐시라 매번 불러도 싸다.
+        """
+        roles.set_catalog_sizes(catalog.sizes())
 
     # --- 엔드포인트 ---
     async def healthz(request: Request):
@@ -598,6 +611,185 @@ def build_app(
             "overrides": roles.override_summary(),
         })
 
+    def _model_delete_blockers(model: str) -> list[dict]:
+        """지우면 무언가 깨지는 이유들. 비어 있어야 삭제할 수 있다.
+
+        **force 플래그를 두지 않는다.** 역할이 그 모델을 가리키는 채로 지우면
+        다음 _models_loop 틱이 곧바로 설치 요청을 다시 만들고 Slack 을 울린다.
+        순서는 "역할을 먼저 바꾸고 → 지운다" 여야 한다.
+        """
+        out: list[dict] = []
+        using = roles.roles_using(model, loose=True)
+        if using:
+            embeds = [n for n in using
+                      if (r := roles.role(n)) is not None and r.kind == "embed"]
+            out.append({
+                "kind": "roles", "detail": using,
+                "message": f"이 모델을 쓰는 역할이 있습니다: {', '.join(using)}. "
+                           "먼저 역할의 모델을 바꾸세요.",
+                # 임베딩 역할은 잡 큐가 아니라 동기 경로다 — 지우는 순간 소비자가
+                # pending 이 아니라 **즉시 503** 을 받는다. 따로 경고한다.
+                "embed_roles": embeds,
+            })
+        queued = {m: c for m, c in store.queued_job_models().items()
+                  if model_matches(model, m)}
+        if queued:
+            out.append({"kind": "queued_jobs", "detail": queued,
+                        "message": f"대기 중인 잡 {sum(queued.values())}건이 이 모델을 씁니다."})
+        running = [lane for lane, v in scheduler.running_snapshot().items()
+                   if model_matches(model, v["model"])]
+        if running:
+            out.append({"kind": "running_jobs", "detail": running,
+                        "message": f"지금 실행 중입니다({', '.join(running)} 레인)."})
+        req = store.get_model_request(model)
+        if req and req["status"] in (MR_APPROVED, MR_PULLING):
+            out.append({"kind": "installing", "detail": req["status"],
+                        "message": "설치가 진행 중입니다. 끝난 뒤에 지우세요."})
+        return out
+
+    async def admin_list_models(request: Request):
+        """맥에 설치된 모델 + 크기 + 쓰는 역할 + 최근 사용 + 삭제 가능 여부."""
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        try:
+            detail = await client.tags_detailed()
+            online, backend_error = True, None
+        except BackendError as exc:
+            detail, online, backend_error = scheduler.models_detail, False, str(exc)
+
+        usage = {u["model"]: u for u in store.usage_by_model()}
+        items = []
+        for d in detail:
+            name = d["name"]
+            u = next((v for k, v in usage.items() if model_matches(name, k)), None)
+            items.append({
+                **d,
+                "roles": roles.roles_using(name, loose=True),
+                "est_size_gb": roles.model_size_gb(name),
+                "calls_30d": (u or {}).get("calls", 0),
+                "last_used": (u or {}).get("last_used"),
+                "blockers": _model_delete_blockers(name),
+            })
+        items.sort(key=lambda i: (i["size_gb"] or 0), reverse=True)
+        total = sum(i["size_gb"] or 0 for i in items)
+        return JSONResponse({
+            "models": items,
+            "total_size_gb": round(total, 2),
+            "backend": {"online": online, "error": backend_error,
+                        "base_url": roles.backend.base_url},
+            "usage_by_model": store.usage_by_model(),
+            "usage_days": 30,
+        })
+
+    async def admin_delete_model(request: Request):
+        svc, err = _require_admin(request)
+        if err:
+            return err
+        model = str(request.query_params.get("model") or "").strip()
+        if not model:
+            return JSONResponse(
+                {"error": "invalid_request", "detail": "model 이 필요합니다"},
+                status_code=400,
+            )
+        blockers = _model_delete_blockers(model)
+        if blockers:
+            store.record_audit(actor=svc.name, action="model_delete", target=model,
+                               detail={"blockers": blockers}, outcome="blocked")
+            return JSONResponse(
+                {"error": "in_use", "blockers": blockers,
+                 "detail": "; ".join(b["message"] for b in blockers)},
+                status_code=409,
+            )
+        freed = next((d["size_gb"] for d in scheduler.models_detail
+                      if model_matches(model, d["name"])), None)
+        try:
+            existed = await client.delete(model)
+        except BackendError as exc:
+            store.record_audit(actor=svc.name, action="model_delete", target=model,
+                               detail={"error": str(exc)}, outcome="failed")
+            return JSONResponse(
+                {"error": "backend_error", "detail": str(exc),
+                 "retryable": exc.retryable},
+                status_code=503 if exc.retryable else 502,
+            )
+
+        # 설치 요청 행을 남기면 _triage_missing 이 ready→pending 으로 되살리고
+        # Slack 을 쏜다. rejected 도 답이 아니다(이후 잡이 거짓 사유로 하드 실패).
+        store.delete_model_request(model)
+        scheduler.forget_model(model)          # /v1/status 가 30초간 거짓말하지 않도록
+        scheduler.notifier.forget(f"model:{model}")   # 재설치 때 알림이 억제되지 않도록
+        await scheduler.notifier.model_deleted(model, freed_gb=freed, actor=svc.name)
+        store.record_audit(actor=svc.name, action="model_delete", target=model,
+                           detail={"existed": existed, "freed_gb": freed})
+        log.info("모델 삭제 %s (by %s, ~%sGB)", model, svc.name, freed)
+        return JSONResponse({"status": "deleted", "model": model,
+                             "existed": existed, "freed_gb": freed})
+
+    async def admin_catalog(request: Request):
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        _sync_catalog_sizes()
+        found = catalog.search(request.query_params.get("q") or "",
+                               kind=request.query_params.get("kind"))
+        installed = scheduler.available_models or []
+        return JSONResponse({
+            "models": found,
+            "installed": installed,
+            "mem_budget_gb": roles.mem_budget_gb,
+            "error": catalog.error,
+        })
+
+    async def admin_install_model(request: Request):
+        """운영자가 먼저 설치한다(지금까지는 외부 서비스 요청 때만 가능했다).
+
+        새 pull 코드를 만들지 않는다 — 기존 승인 파이프라인에 approved 로 밀어
+        넣으면 _models_loop 이 2초 안에 집어간다. 동시성·진행률·실패 처리 그대로.
+        """
+        svc, err = _require_admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        try:
+            model = validate_model_name(body.get("model"))
+        except ConfigError as exc:
+            return JSONResponse(
+                {"error": "invalid_model", "detail": str(exc)}, status_code=400
+            )
+
+        _sync_catalog_sizes()
+        # 크기 게이트: _pick 이 사후에 잡을 몰살하는 대신 **설치 전에** 거부한다.
+        # 크기를 모르는 모델은 20GB 로 가정되므로 이 문이 없으면 임의 설치가
+        # 곧바로 사고가 된다.
+        est = roles.model_size_gb(model)
+        if est > roles.mem_budget_gb:
+            return JSONResponse({
+                "error": "too_large", "est_size_gb": est,
+                "mem_budget_gb": roles.mem_budget_gb,
+                "detail": f"추정 {est}GB 는 메모리 예산 {roles.mem_budget_gb}GB 를 "
+                          "넘어 설치해도 실행할 수 없습니다.",
+            }, status_code=400)
+
+        if scheduler.model_ready(model):
+            return JSONResponse({"status": "already_installed", "model": model})
+        req = store.get_model_request(model)
+        if req and req["status"] in (MR_APPROVED, MR_PULLING):
+            return JSONResponse(
+                {"error": "in_progress", "request": req}, status_code=409
+            )
+        store.ensure_model_request(
+            model, requested_by=svc.name, roles=roles.roles_using(model, loose=True),
+            est_size_gb=est,
+        )
+        store.set_model_request_size(model, est)
+        store.set_model_request_status(model, MR_APPROVED, error="", progress=0)
+        store.record_audit(actor=svc.name, action="model_install", target=model,
+                           detail={"est_size_gb": est})
+        log.info("모델 설치 요청 %s (~%sGB, by %s)", model, est, svc.name)
+        return JSONResponse({"status": "approved",
+                             "request": store.get_model_request(model)})
+
     async def admin_audit(request: Request):
         _svc, err = _require_admin(request)
         if err:
@@ -673,6 +865,10 @@ def build_app(
         Route("/v1/admin/roles", admin_list_roles, methods=["GET"]),
         Route("/v1/admin/roles", admin_set_role, methods=["POST"]),
         Route("/v1/admin/roles", admin_revert_role, methods=["DELETE"]),
+        Route("/v1/admin/models", admin_list_models, methods=["GET"]),
+        Route("/v1/admin/models", admin_delete_model, methods=["DELETE"]),
+        Route("/v1/admin/models/install", admin_install_model, methods=["POST"]),
+        Route("/v1/admin/catalog", admin_catalog, methods=["GET"]),
         Route("/v1/admin/audit", admin_audit, methods=["GET"]),
     ]
 

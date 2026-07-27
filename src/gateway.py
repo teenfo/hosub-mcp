@@ -12,6 +12,7 @@ hosub 는 맥의 Ollama 를 **직접 부르지 않는다.** 모든 추론은 게
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 import httpx
 
@@ -100,12 +101,13 @@ def generate(role: str, prompt: str, *, system: str | None = None,
 
 def get_job(job_id: str, *, client_factory=httpx.Client) -> dict:
     """잡 조회. pending 이던 생성 요청의 결과를 나중에 수령한다."""
-    return _call("GET", f"/v1/jobs/{job_id}", client_factory=client_factory)
+    return _call("GET", f"/v1/jobs/{quote(job_id, safe='')}",
+                 client_factory=client_factory)
 
 
 def list_model_requests(status: str | None = None, *, client_factory=httpx.Client) -> dict:
     """모델 설치 요청 목록. pending 이 있으면 사용자의 승인이 필요하다."""
-    path = "/v1/models/requests" + (f"?status={status}" if status else "")
+    path = "/v1/models/requests" + (f"?status={quote(status, safe='')}" if status else "")
     return _call("GET", path, client_factory=client_factory)
 
 
@@ -116,3 +118,58 @@ def decide_model_request(model: str, action: str, *, client_factory=httpx.Client
     return _call("POST", "/v1/models/requests",
                  json={"model": model, "action": action},
                  client_factory=client_factory)
+
+
+# --- 관리 API ---
+#
+# /v1/admin/* 은 Caddy 가 공개 경로(/llm/*)에서 404 로 잘라낸다. 즉 여기서
+# 부르는 127.0.0.1:8603 으로만 닿는다 — 대시보드는 서버 안에서 돌므로 문제없다.
+# 게이트웨이가 다시 admin 토큰(hosub)인지 확인하므로 통제는 두 겹이다.
+
+def list_admin_roles(*, client_factory=httpx.Client) -> dict:
+    """역할별 유효값 + roles.yaml 기본값 대비 차이 + 붙여 넣을 스니펫."""
+    return _call("GET", "/v1/admin/roles", client_factory=client_factory)
+
+
+def set_role_override(role: str, fields: dict, *, note: str | None = None,
+                      client_factory=httpx.Client) -> dict:
+    """역할의 모델·레인·타임아웃·옵션을 런타임에 바꾼다(roles.yaml 은 그대로)."""
+    body: dict = {"role": role, "fields": fields}
+    if note:
+        body["note"] = note
+    return _call("POST", "/v1/admin/roles", json=body, client_factory=client_factory)
+
+
+def revert_role(role: str, *, client_factory=httpx.Client) -> dict:
+    """오버라이드를 지워 roles.yaml 기본값으로 되돌린다."""
+    return _call("DELETE", f"/v1/admin/roles?role={quote(role, safe='')}",
+                 client_factory=client_factory)
+
+
+def list_installed_models(*, client_factory=httpx.Client) -> dict:
+    """맥에 설치된 모델 + 용량 + 쓰는 역할 + 최근 사용 + 삭제 차단 사유."""
+    return _call("GET", "/v1/admin/models", client_factory=client_factory,
+                 timeout=STATUS_TIMEOUT)
+
+
+def delete_model(model: str, *, client_factory=httpx.Client) -> dict:
+    """맥에서 모델을 지운다. 쓰는 역할·대기 잡이 있으면 409 로 거부된다."""
+    # 모델 이름에는 ':'·'/' 가 들어간다 — 쿼리스트링에 그대로 넣지 않는다
+    return _call("DELETE", f"/v1/admin/models?model={quote(model, safe='')}",
+                 client_factory=client_factory, timeout=60)
+
+
+def install_model(model: str, *, client_factory=httpx.Client) -> dict:
+    """모델 설치를 지시한다(기존 승인 파이프라인에 approved 로 들어간다)."""
+    return _call("POST", "/v1/admin/models/install", json={"model": model},
+                 client_factory=client_factory)
+
+
+def search_catalog(query: str = "", kind: str | None = None, *,
+                   client_factory=httpx.Client) -> dict:
+    """내장 카탈로그 검색. 목록에 없으면 이름을 직접 입력해 설치한다."""
+    # 검색어는 사용자 자유 입력이다. 인코딩하지 않으면 'a&b' 가 잘린다.
+    path = f"/v1/admin/catalog?q={quote(query or '', safe='')}"
+    if kind:
+        path += f"&kind={quote(kind, safe='')}"
+    return _call("GET", path, client_factory=client_factory)
