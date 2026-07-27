@@ -134,15 +134,22 @@ def rank_series(g: pd.DataFrame, method: str, weights: dict | None,
         return g["atr_pct"].astype(float)
     if method in ("composite_is", "composite_wf"):
         return _composite(g, weights or {})
-    if method in ("random", "liquid_only"):
+    if method in _RANDOM_PICK:
         return pd.Series(rng.random(len(g)), index=g.index)
     raise ValueError(f"알 수 없는 랭킹 방식: {method}")
 
 
-METHODS = ("score", "atr", "composite_is", "composite_wf", "liquid_only", "random")
-# liquid_only 와 random 은 둘 다 무작위지만 모집단이 다르다 —
-# liquid_only 는 유동성 통과분(= 실제로 살 수 있는 종목)만, random 은 전 종목.
+METHODS = ("score", "atr", "composite_is", "composite_wf",
+           "score_gate_only", "liquid_only", "random")
+# 셋 다 무작위 추출이지만 **모집단이 다르다** — 그 차이가 곧 게이트의 값이다.
+#   random          : 전 종목 (못 사는 종목 포함 — 실행 불가능한 상한선)
+#   liquid_only     : 유동성 통과분 (= 실제로 살 수 있는 종목)
+#   score_gate_only : 유동성 + 발굴 점수 min_score 이상
+# liquid_only 와 score_gate_only 의 격차가 **점수 게이트 자체의 값**이다.
+# 1.5단계는 "그 풀 안에서 점수 순으로 줄 세우기"만 쟀고 게이트 자체는 안 쟀다.
+_RANDOM_PICK = ("random", "liquid_only", "score_gate_only")
 _ALL_UNIVERSE = ("random",)
+_GATE_UNIVERSE = ("score_gate_only",)
 
 
 def wf_weights(ic: pd.DataFrame, dates: list, i: int) -> dict[str, float] | None:
@@ -157,20 +164,26 @@ def wf_weights(ic: pd.DataFrame, dates: list, i: int) -> dict[str, float] | None
     return _mean_weights(ic.loc[ic.index.isin(dates[i - TRAIN_DAYS:i])])
 
 
-def prepare(df: pd.DataFrame) -> dict:
+def prepare(df: pd.DataFrame, min_score: float | None = None) -> dict:
     """방식·손절폭 전부가 공유하는 사전 계산 — 날짜별 묶음과 가중치.
 
-    24개 조합(방식 6 × 손절폭 4)이 같은 날짜 필터와 같은 잔차 IC 를 다시
-    계산하는 것을 막는다. 손절폭은 **랭킹에 영향을 주지 않으므로**(브래킷
-    판정에만 쓰인다) 가중치는 손절폭과 무관하게 한 번만 구하면 된다.
+    조합 전체(방식 × 손절폭)가 같은 날짜 필터와 같은 잔차 IC 를 다시 계산하는
+    것을 막는다. 손절폭은 **랭킹에 영향을 주지 않으므로**(브래킷 판정에만
+    쓰인다) 가중치는 손절폭과 무관하게 한 번만 구하면 된다.
     """
+    if min_score is None:
+        min_score = float(settings.CONFIG.get("discovery", {}).get("min_score", 2))
     dates = sorted(df["date"].unique())
     groups = {d: g for d, g in df.groupby("date")}
+    liquid = {d: g[g["liquid"] == 1] for d, g in groups.items()}
     ic = daily_resid_ic(df)
     return {
         "dates": dates,
         "groups": groups,
-        "liquid": {d: g[g["liquid"] == 1] for d, g in groups.items()},
+        "liquid": liquid,
+        # 실제 야간 발굴이 후보로 삼는 풀과 같은 조건(discovery.py:199)
+        "gated": {d: g[g["score"] >= min_score] for d, g in liquid.items()},
+        "min_score": min_score,
         "is_w": _mean_weights(ic) if len(ic) else {},
         "wf": {i: wf_weights(ic, dates, i) for i in range(len(dates))} if len(ic) else {},
     }
@@ -186,7 +199,12 @@ def evaluate(df: pd.DataFrame, method: str, stop_pct: float, target_r: float,
     used_days = 0
     for i, day in enumerate(dates):
         # 실제로 살 수 있는 종목만 — random 대조군만 전 종목에서 뽑는다
-        g = ctx["groups"][day] if method in _ALL_UNIVERSE else ctx["liquid"][day]
+        if method in _ALL_UNIVERSE:
+            g = ctx["groups"][day]
+        elif method in _GATE_UNIVERSE:
+            g = ctx["gated"][day]            # 유동성 + 점수 게이트 통과분
+        else:
+            g = ctx["liquid"][day]
         if len(g) < top_n:
             continue
         if method == "composite_wf":
@@ -228,7 +246,7 @@ CAVEATS = [
 
 def analyze(df: pd.DataFrame, stops: list[float], target_r: float,
             cost_pct: float, top_n: int = TOP_N) -> dict:
-    ctx = prepare(df)                        # 24개 조합이 공유 — 한 번만 계산한다
+    ctx = prepare(df)                        # 전 조합이 공유 — 한 번만 계산한다
     rows = [evaluate(df, m, s, target_r, cost_pct, top_n, ctx)
             for m in METHODS for s in stops]
     ok = [r for r in rows if r.get("reliable")]
@@ -244,6 +262,7 @@ def analyze(df: pd.DataFrame, stops: list[float], target_r: float,
         "rows": rows, "best": best, "methods": list(METHODS), "stops": stops,
         "top_n": top_n, "target_r": target_r, "cost_pct": cost_pct,
         "train_days": TRAIN_DAYS, "learn_target": TARGET,
+        "min_score": ctx["min_score"],
         "caveats": CAVEATS,
     }
 
