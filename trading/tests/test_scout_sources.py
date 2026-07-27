@@ -212,6 +212,16 @@ async def test_news_skips_negative_impact(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_news_asks_for_the_right_status(monkeypatch):
+    """'done' 은 존재하지 않는 상태값이라 조용히 0건이 온다 — 실제로 그랬다."""
+    seen = {}
+    _install_httpx(monkeypatch, {"items": []}, seen)
+    monkeypatch.setattr(settings, "TNM_TOKEN", "t")
+    await slow.NewsSource().collect()
+    assert seen["params"]["status"] == "ok" == settings.TNM_STATUS_OK
+
+
+@pytest.mark.asyncio
 async def test_news_disabled_without_token(monkeypatch):
     monkeypatch.setattr(settings, "TNM_TOKEN", "")
     assert slow.NewsSource().enabled() is False
