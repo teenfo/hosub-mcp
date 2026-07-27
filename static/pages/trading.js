@@ -128,7 +128,7 @@ export default {
     guardC.body.append(
       el("div", { class: "d-flex justify-content-between align-items-start gap-2 mb-2" }, [
         el("div", { class: "small text-secondary" },
-          el("span", { html: '<i class="bi bi-shield-check"></i> <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춥니다. 값 변경은 <b>매매 설정</b>에서. (실거래 성과 로그 기준)' })),
+          el("span", { html: '<i class="bi bi-shield-check"></i> <b>일일 목표/손실한도</b>는 <b>완전 자동 발주를 위한 안전장치</b>입니다. 당일 실현손익이 도달하면 자동 발주 모드에서만 신규 진입을 멈추고, 자동 발주를 끄면 신호는 계속 나와 <b>사용자 책임 하에 직접 승인</b>할 수 있습니다. 어느 쪽이든 보유 포지션의 손절·목표 감시는 계속됩니다. 값 변경은 <b>매매 설정</b>에서. (실거래 성과 로그 기준)' })),
         openCfgBtn,
       ]),
       gStatus,
@@ -167,7 +167,13 @@ export default {
       bar.appendChild(el("div", { class: "progress-bar " + (r.pct >= 0 ? "bg-danger" : "bg-primary"), style: `width:${r.pct >= 0 ? frac : 0}%` }));
       gStatus.appendChild(bar);
       gStatus.appendChild(el("div", { class: "mt-2 d-flex gap-2 align-items-center flex-wrap" }, [
-        r.halted ? el("span", { class: "badge text-bg-warning" }, r.reason)
+        r.halted
+          ? el("span", {
+              class: "badge text-bg-" + (r.auto_approve ? "warning" : "secondary"),
+              title: r.auto_approve
+                ? "완전 자동 발주 모드 — 가드가 신규 진입을 막습니다"
+                : "수동 승인 모드 — 가드는 경고만 하고 진입을 막지 않습니다(사용자 책임)" },
+              r.reason + (r.auto_approve ? "" : " · 수동 승인이라 진입 허용"))
           : el("span", { class: "badge text-bg-success" }, "정상 — 진입 허용"),
         r.auto_approve ? el("span", { class: "badge text-bg-danger" }, "⚡ 완전 자동 발주 중") : null,
         el("span", { class: "badge text-bg-light text-dark", title: "한 종목 최대 비중 · 최대 동시 포지션" },
@@ -235,7 +241,7 @@ export default {
             "거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 종목당 비중은 100 ÷ 동시 보유 목표수 정도가 기준입니다 — 5종목 목표면 20%. 비중 상한이 없으면 손절폭이 좁은 첫 신호가 예수금을 독식하고 이후 신호가 전부 밀립니다."),
           el("hr", { class: "my-2" }),
           sw(gAuto, "⚡ 완전 자동 발주",
-            "신호를 승인 없이 즉시 발주하고 목표 도달 청산도 자동 실행합니다. 끄면 화면에서 승인해야 발주됩니다."),
+            "신호를 승인 없이 즉시 발주하고 목표 도달 청산도 자동 실행합니다. 끄면 화면에서 승인해야 발주됩니다. 위 일일 목표·손실 한도는 이 모드를 위한 안전장치라, 끄면 한도에 도달해도 신호가 계속 나오고 진입 여부는 사용자 판단이 됩니다(신호에 '가드 도달 후' 표시가 붙습니다)."),
           sw(gLongOnly, "롱 전용",
             "현물 계좌는 개별주 공매도가 불가하므로 숏 신호를 발주하지 않고 기록만 합니다."),
           el("div", {}, gSave), fundMsg,
@@ -534,8 +540,9 @@ export default {
       cdBox.classList.remove("d-none");
       const iv = scanState.interval || 60;
       const left = Math.max(0, scanState.next - (Date.now() - scanState.at) / 1000);
-      cdText.textContent = left >= 1 ? `다음 스캔까지 ${Math.ceil(left)}초`
-                                     : "스캔 실행 중…";
+      const what = scanState.halted ? "수집" : "스캔";
+      cdText.textContent = left >= 1 ? `다음 ${what}까지 ${Math.ceil(left)}초`
+                                     : `${what} 실행 중…`;
       cdBar.style.width = `${Math.max(0, Math.min(100, (1 - left / iv) * 100))}%`;
     };
 
@@ -560,26 +567,38 @@ export default {
       status.body.innerHTML = "";
       // --- 감시 상태(장중 스캔 중인지) — 가장 먼저, 크게 ---
       const mk = s.market || {};
-      const TONE = { open: "success", pre: "warning", closed: "secondary", disabled: "danger" };
-      const ICON = { open: "🟢", pre: "🟡", closed: "⚪", disabled: "🔴" };
+      const gd = mk.guard || {};
+      const TONE = { open: "success", halted: "warning", pre: "warning",
+                     closed: "secondary", disabled: "danger" };
+      const ICON = { open: "🟢", halted: "⏸", pre: "🟡", closed: "⚪", disabled: "🔴" };
+      // collecting = 루프가 도는가(분봉 수집). scanning = 신호를 평가·발주하는가.
+      // 가드가 걸리면 앞은 계속되고 뒤만 멈춘다 — 배너가 그 차이를 말해야 한다.
+      const running = mk.collecting ?? mk.scanning;
       const ageTxt = mk.last_scan_age_sec == null ? "스캔 기록 없음"
         : mk.last_scan_age_sec < 120 ? `${mk.last_scan_age_sec}초 전 스캔`
         : `${Math.floor(mk.last_scan_age_sec / 60)}분 전 스캔`;
-      const stale = mk.scanning && mk.last_scan_age_sec != null && mk.last_scan_age_sec > 180;
-      // 카운트다운 기준점 갱신 — 감시 중이 아니면 숨긴다
-      scanState = (mk.scanning && !stale && mk.next_scan_sec != null)
-        ? { interval: mk.scan_interval_sec || 60, next: mk.next_scan_sec, at: Date.now() }
+      const stale = running && mk.last_scan_age_sec != null && mk.last_scan_age_sec > 180;
+      // 카운트다운 기준점 갱신 — 루프가 돌지 않으면 숨긴다
+      scanState = (running && !stale && mk.next_scan_sec != null)
+        ? { interval: mk.scan_interval_sec || 60, next: mk.next_scan_sec,
+            at: Date.now(), halted: mk.phase === "halted" }
         : null;
       tickCountdown();
+      const detail = mk.phase === "halted"
+        ? "신규 진입만 중단됩니다 — 보유 포지션의 손절·목표 감시와 장 마감 정리, 분봉 수집은 계속됩니다. 완전 자동 발주를 끄면 사용자 승인 방식으로 매매를 재개할 수 있습니다."
+        : gd.manual_override
+          ? `일일 가드 도달(${gd.reason || ""}) — 수동 승인 모드라 신호는 계속 나옵니다. 승인 여부는 사용자 판단입니다.`
+          : null;
       status.body.appendChild(el("div", {
         class: `alert alert-${stale ? "danger" : (TONE[mk.phase] || "secondary")} py-2 px-3 mb-2`,
       }, [
         el("div", { class: "fw-semibold" },
           `${ICON[mk.phase] || "⚪"} ${mk.label || "상태 미상"}` +
-          (mk.scanning ? ` · ${mk.watch_count ?? "-"}종목 · ${mk.scan_interval_sec ?? 60}초 주기` : "")),
+          (running ? ` · ${mk.watch_count ?? "-"}종목 · ${mk.scan_interval_sec ?? 60}초 주기` : "")),
         el("div", { class: "small" },
-          (mk.scanning ? ageTxt + (stale ? " ⚠ 스캔이 멈춘 것 같습니다" : "")
-                       : `정규장 ${mk.session || "09:00~15:30"}`)),
+          (running ? ageTxt + (stale ? " ⚠ 스캔이 멈춘 것 같습니다" : "")
+                   : `정규장 ${mk.session || "09:00~15:30"}`)),
+        detail ? el("div", { class: "small mt-1" }, detail) : null,
         cdBox,
       ]));
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
@@ -809,7 +828,11 @@ export default {
               ? el("span", { title: s.auto_message || "" },
                   badge(s.auto_status === "sent" ? `⚡자동발주 ${s.qty}주` : `자동발주 ${s.auto_status}`,
                         s.auto_status === "sent" ? "danger" : "warning"))
-              : badge(`승인대기 ${s.qty}주`, "success"))
+              : el("span", { title: s.guard_warn || "" }, [
+                  badge(`승인대기 ${s.qty}주`, "success"),
+                  s.guard_warn ? el("span", { class: "ms-1" },
+                    badge("⚠ 가드 도달 후", "warning")) : null,
+                ]))
           : el("span", { class: "small text-secondary", title: s.note || "" },
               badge(...noteLabel(s.note)));
         // 현재가 셀 — data-px/data-entry 로 태깅해 refreshPrices 가 값만 갱신한다.
