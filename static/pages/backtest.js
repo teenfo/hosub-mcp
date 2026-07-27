@@ -353,6 +353,47 @@ export default {
             el("td", { class: "text-end text-secondary" }, r.days),
           ]))));
       }
+      // 국면 분리 — 알파인가 저베타 효과인가
+      const icRow = (sec, label) => {
+        const rows = (sec[label] || {}).ic || [];
+        return Object.fromEntries(rows.map((r) => [r.feature, r]));
+      };
+      const regimeBlock = (title, note, sec) => {
+        const labels = Object.keys(sec || {});
+        if (labels.length < 2) return null;
+        const feats = [...new Set(labels.flatMap((L) => (sec[L].ic || []).map((r) => r.feature)))];
+        const byLabel = Object.fromEntries(labels.map((L) => [L, icRow(sec, L)]));
+        return el("div", { class: "mt-3" }, [
+          el("div", { class: "fw-semibold small mb-1" }, title),
+          el("div", { class: "small text-secondary mb-1", html: note }),
+          tableOf(
+            `<th>피처</th>${labels.map((L) => `<th class='text-end'>${L}<br><span class='fw-normal text-secondary'>${sec[L].days}일 · 시장 ${sec[L].market_pct}%</span></th>`).join("")}<th>판정</th>`,
+            feats.map((f) => {
+              const vals = labels.map((L) => (byLabel[L][f] || {}).mean_ic);
+              const solid = labels.every((L) => Math.abs(((byLabel[L][f] || {}).t_stat) || 0) > 2);
+              const signs = vals.filter((v) => v != null).map((v) => Math.sign(v));
+              const flipped = new Set(signs).size > 1;
+              return el("tr", { class: solid ? "" : "opacity-50" }, [
+                el("td", {}, f),
+                ...vals.map((v) => el("td", { class: "text-end " + (v > 0 ? "text-danger" : v < 0 ? "text-primary" : "") },
+                  v == null ? "—" : v.toFixed(4))),
+                el("td", {}, !solid ? el("span", { class: "text-secondary small" }, "표본 약함")
+                  : flipped ? badge("부호 뒤집힘", "warning") : badge("부호 유지", "success")),
+              ]);
+            })),
+        ]);
+      };
+      const trend = regimeBlock(
+        "국면별 재측정 — 사전에 알 수 있는 추세",
+        "직전 20일 시장 누적 등락의 부호로 나눈다. <b>그날 이미 알 수 있는 정보</b>라 실전 규칙으로 쓸 수 있다.",
+        d.by_trend);
+      const fwd = regimeBlock(
+        "알파 / 저베타 판별 — 익일 시장 방향으로 분해",
+        "<b>사전에 알 수 없으므로 매매에 쓸 수 없다.</b> 목적은 하나 — 어떤 피처의 예측력이 진짜인지 가리는 것. " +
+        "저변동성이 그냥 시장을 덜 따라간 것뿐이라면 <b>오르는 날엔 부호가 뒤집힌다</b>. 양쪽 다 같은 부호면 국면과 무관한 신호다.",
+        d.by_fwd_dir);
+      if (trend) esBody.appendChild(trend);
+      if (fwd) esBody.appendChild(fwd);
       // 한계 — 숨기지 않는다
       esBody.appendChild(el("ul", { class: "small text-secondary mt-3 mb-0 ps-3" },
         (d.caveats || []).map((c) => el("li", {}, c))));
