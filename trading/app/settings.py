@@ -140,9 +140,10 @@ SCAN_INTERVAL_MAX_SEC = 300
 def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
               risk_per_trade_pct=None, auto_approve=None,
               scan_interval_sec=None, max_position_weight_pct=None,
-              confirm_on_close=None) -> None:
-    """일일 목표·손실한도·거래당 리스크·자동발주·감시주기·종목당 비중 상한·
-    돌파 확인 설정을 risk.json 에 영속화."""
+              confirm_on_close=None, max_positions=None, long_only=None,
+              signal_ttl_min=None) -> None:
+    """UI(기어 모달)에서 바꾸는 매매 설정을 risk.json 에 영속화한다.
+    config.yaml 의 risk 블록이 기본값, 여기 저장분이 오버라이드."""
     import json
     ov: dict = {}
     if RISK_FILE.exists():
@@ -167,12 +168,24 @@ def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
             raise ValueError("종목당 비중 상한은 0~100% 범위여야 합니다")
         ov["max_position_weight_pct"] = f
         RISK["max_position_weight_pct"] = f
-    if confirm_on_close is not None:
-        ov["confirm_on_close"] = bool(confirm_on_close)
-        RISK["confirm_on_close"] = bool(confirm_on_close)
-    if auto_approve is not None:
-        ov["auto_approve"] = bool(auto_approve)
-        RISK["auto_approve"] = bool(auto_approve)
+    if max_positions is not None:
+        n = int(max_positions)
+        if not 1 <= n <= 20:
+            raise ValueError("최대 동시 포지션은 1~20 범위여야 합니다")
+        ov["max_positions"] = n
+        RISK["max_positions"] = n
+    if signal_ttl_min is not None:
+        n = int(signal_ttl_min)
+        if not 1 <= n <= 240:
+            raise ValueError("신호 만료는 1~240분 범위여야 합니다")
+        ov["signal_ttl_min"] = n
+        RISK["signal_ttl_min"] = n
+    for key, flag in (("confirm_on_close", confirm_on_close),
+                      ("auto_approve", auto_approve),
+                      ("long_only", long_only)):
+        if flag is not None:
+            ov[key] = bool(flag)
+            RISK[key] = bool(flag)
     if scan_interval_sec is not None:
         n = int(scan_interval_sec)
         if not SCAN_INTERVAL_MIN_SEC <= n <= SCAN_INTERVAL_MAX_SEC:

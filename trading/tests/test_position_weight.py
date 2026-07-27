@@ -78,6 +78,29 @@ def test_save_risk_persists_new_fields(tmp_path, monkeypatch):
     assert settings.RISK["confirm_on_close"] is True
 
 
+def test_save_risk_persists_modal_fields(tmp_path, monkeypatch):
+    """기어 모달에서 바꾸는 나머지 값들도 재기동 후 유지된다."""
+    monkeypatch.setattr(settings, "RISK_FILE", tmp_path / "risk.json")
+    monkeypatch.setattr(settings, "RISK", {})
+    settings.save_risk(max_positions=5, signal_ttl_min=30, long_only=False,
+                       auto_approve=True)
+    settings.RISK.clear()
+    settings._load_risk_overrides()
+    assert settings.RISK["max_positions"] == 5
+    assert settings.RISK["signal_ttl_min"] == 30
+    assert settings.RISK["long_only"] is False
+    assert settings.RISK["auto_approve"] is True
+
+
+def test_save_risk_rejects_modal_fields_out_of_range(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "RISK_FILE", tmp_path / "risk.json")
+    monkeypatch.setattr(settings, "RISK", {})
+    for kw in ({"max_positions": 0}, {"max_positions": 21},
+               {"signal_ttl_min": 0}, {"signal_ttl_min": 999}):
+        with pytest.raises(ValueError):
+            settings.save_risk(**kw)
+
+
 def test_save_risk_rejects_weight_out_of_range(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "RISK_FILE", tmp_path / "risk.json")
     monkeypatch.setattr(settings, "RISK", {})

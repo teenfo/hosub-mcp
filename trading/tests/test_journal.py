@@ -1,0 +1,250 @@
+"""매매일지 — 신호 기록·집계·요인 추출·누적. 수치는 전부 결정론이어야 한다."""
+import pytest
+
+from app import journal, settings
+from app.trade import ledger
+
+
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    """일지·장부가 같은 tmp DB 를 보게 맞춘다(실 데이터 비의존)."""
+    monkeypatch.setattr(journal, "DB_PATH", tmp_path / "trading.db")
+    monkeypatch.setattr(journal, "JOURNAL_DIR", tmp_path / "journal")
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "trading.db")
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    monkeypatch.setattr(settings, "COSTS", {"commission_pct": 0.015,
+                                            "sell_tax_pct": 0.15, "slippage_bp": 5})
+    return tmp_path
+
+
+def _rec(symbol="005930", rule="orb", qty=2, actionable=True, note=None,
+         priority=115.0, ts="2026-07-27T09:20:00+09:00"):
+    return {"symbol": symbol, "name": "종목" + symbol, "rule": rule, "side": "long",
+            "entry": 10_000, "stop": 9_800, "target": 10_400, "qty": qty,
+            "priority": priority, "actionable": actionable, "note": note,
+            "ts": ts, "order_id": "oid" if actionable else None}
+
+
+# --- 신호 기록 ---
+
+def test_signal_upsert_keeps_one_row_per_day(db):
+    journal.record_signal("2026-07-27", _rec(actionable=False, note="잔고 부족 — …"))
+    journal.record_signal("2026-07-27", _rec(actionable=True, qty=3))   # 차단→해제
+    rows = journal.signals_on("2026-07-27")
+    assert len(rows) == 1                       # 하루·종목·규칙당 한 행
+    assert rows[0]["actionable"] == 1 and rows[0]["qty"] == 3   # 최종 상태로 갱신
+
+
+def test_signals_isolated_by_day(db):
+    journal.record_signal("2026-07-27", _rec())
+    journal.record_signal("2026-07-26", _rec())
+    assert len(journal.signals_on("2026-07-27")) == 1
+
+
+def test_prune_signals(db):
+    journal.record_signal("2020-01-01", _rec())
+    journal.record_signal("2026-07-27", _rec(symbol="000660"))
+    assert journal.prune_signals(keep_days=30) == 1
+    assert journal.signals_on("2020-01-01") == []
+
+
+# --- 사유 라벨 ---
+
+def test_note_labels():
+    assert journal.note_label("잔고 부족 — 1주 ≈ 15,000원 > 가용 5,000원") == "잔고 부족"
+    assert journal.note_label("비중 상한 — …") == "비중 상한"
+    assert journal.note_label("진입 보류 — 최대 동시 포지션(3) 도달") == "포지션 한도"
+    assert journal.note_label("롱 전용 모드 — 숏 미발주") == "숏 미발주"
+    assert journal.note_label("알 수 없는 사유") == "기타"
+    assert journal.note_label("") == "—"
+
+
+# --- 집계 ---
+
+def _order(oid, symbol="005930", rule="orb", entry=10_000, stop=9_800, target=10_400):
+    return {"id": oid, "symbol": symbol, "side": "long", "entry": entry,
+            "stop": stop, "target": target, "rule": rule, "qty": 10}
+
+
+def test_build_aggregates_closed_trades(db):
+    ledger.open_position(_order("a1"), fill=10_000)
+    ledger.monitor(lambda s: 10_500)                       # 목표 청산(승)
+    ledger.open_position(_order("a2", symbol="000660"), fill=10_000)
+    ledger.monitor(lambda s: 9_700)                        # 손절 청산(패)
+    day = ledger.positions(status="closed")[0]["closed"][:10]
+
+    entry = journal.build(day)
+    assert entry["trades"]["trades"] == 2
+    assert entry["trades"]["wins"] == 1 and entry["trades"]["losses"] == 1
+    assert entry["trades"]["win_rate"] == 50.0
+    assert set(entry["by_exit_reason"]) == {"target", "stop"}
+    assert entry["by_rule"]["orb"]["trades"] == 2
+
+
+def test_build_counts_blocked_signals(db):
+    journal.record_signal("2026-07-27", _rec(actionable=True))
+    journal.record_signal("2026-07-27", _rec(symbol="000660", actionable=False,
+                                             note="비중 상한 — …"))
+    journal.record_signal("2026-07-27", _rec(symbol="000100", actionable=False,
+                                             note="잔고 부족 — …"))
+    sig = journal.build("2026-07-27")["signals"]
+    assert sig == sig | {"total": 3, "ordered": 1, "blocked": 2}
+    assert sig["by_note"] == {"비중 상한": 1, "잔고 부족": 1}
+
+
+def test_build_is_deterministic(db):
+    journal.record_signal("2026-07-27", _rec())
+    a, b = journal.build("2026-07-27"), journal.build("2026-07-27")
+    a.pop("generated"), b.pop("generated")     # 생성 시각만 다르다
+    assert a == b
+
+
+# --- 요인 추출 ---
+
+def _entry(**over):
+    base = {
+        "date": "2026-07-27",
+        "trades": {"trades": 0, "wins": 0, "losses": 0, "win_rate": 0.0,
+                   "pnl_krw": 0.0, "expectancy_pct": 0.0, "avg_slippage_pct": 0.0},
+        "by_rule": {}, "by_exit_reason": {}, "by_hour": {},
+        "positions": [], "carried": [],
+        "signals": {"total": 0, "ordered": 0, "blocked": 0, "by_note": {}},
+        "guard": {},
+    }
+    base.update(over)
+    return base
+
+
+def test_facts_no_trades():
+    f = journal.facts(_entry())
+    assert any("청산된 거래 없음" in x for x in f)
+    assert any("기록된 신호 없음" in x for x in f)
+
+
+def test_facts_flags_eod_heavy_day():
+    f = journal.facts(_entry(
+        trades={"trades": 4, "wins": 1, "losses": 3, "win_rate": 25.0,
+                "pnl_krw": -5000, "expectancy_pct": -0.4, "avg_slippage_pct": 0.0},
+        by_exit_reason={"eod": {"trades": 3, "expectancy_pct": -0.2},
+                        "stop": {"trades": 1, "expectancy_pct": -1.0}}))
+    assert any("마감 정리(eod)" in x for x in f)
+
+
+def test_facts_flags_capital_blocks():
+    f = journal.facts(_entry(
+        signals={"total": 20, "ordered": 4, "blocked": 16,
+                 "by_note": {"잔고 부족": 16}}))
+    assert any("자금·한도로 밀린 신호 16건" in x for x in f)
+
+
+def test_facts_flags_slippage():
+    f = journal.facts(_entry(
+        trades={"trades": 2, "wins": 1, "losses": 1, "win_rate": 50.0,
+                "pnl_krw": 0, "expectancy_pct": 0.0, "avg_slippage_pct": 0.55},
+        by_exit_reason={"target": {"trades": 2, "expectancy_pct": 0.0}}))
+    assert any("슬리피지" in x for x in f)
+
+
+def test_facts_flags_losing_hours():
+    f = journal.facts(_entry(
+        trades={"trades": 3, "wins": 0, "losses": 3, "win_rate": 0.0,
+                "pnl_krw": -3000, "expectancy_pct": -1.0, "avg_slippage_pct": 0.0},
+        by_exit_reason={"stop": {"trades": 3, "expectancy_pct": -1.0}},
+        by_hour={"11": {"trades": 2, "expectancy_pct": -1.2},
+                 "9": {"trades": 1, "expectancy_pct": 0.5}}))
+    assert any("시간대 손실 구간" in x and "11시" in x for x in f)
+
+
+def test_facts_flags_carried_positions():
+    assert any("미청산 포지션" in x
+               for x in journal.facts(_entry(carried=[{"id": "x"}])))
+
+
+# --- 저장·누적 ---
+
+def test_save_load_roundtrip(db):
+    entry = journal.build("2026-07-27")
+    journal.save(entry)
+    assert journal.load("2026-07-27")["date"] == "2026-07-27"
+    assert journal.load("2026-01-01") is None      # 없는 날짜는 None
+
+
+def test_history_and_cumulative(db):
+    for day, trades, pnl, wr in (("2026-07-24", 2, 1000.0, 100.0),
+                                 ("2026-07-27", 3, -400.0, 33.3)):
+        journal.save({"date": day, "generated": "x",
+                      "trades": {"trades": trades, "win_rate": wr, "pnl_krw": pnl,
+                                 "expectancy_pct": 0.5},
+                      "signals": {"total": 5, "blocked": 1}, "summary": {}})
+    rows = journal.history(30)
+    assert [r["date"] for r in rows] == ["2026-07-27", "2026-07-24"]   # 최신순
+    c = journal.cumulative(rows)
+    assert c["trades"] == 5 and c["trading_days"] == 2
+    assert c["pnl_krw"] == 600.0
+    assert c["best_day"] == "2026-07-24" and c["worst_day"] == "2026-07-27"
+
+
+def test_cumulative_ignores_no_trade_days(db):
+    rows = [{"date": "2026-07-27", "trades": 0, "win_rate": 0.0, "pnl_krw": 0.0,
+             "expectancy_pct": 0.0, "signals": 0, "blocked": 0},
+            {"date": "2026-07-24", "trades": 2, "win_rate": 50.0, "pnl_krw": 500.0,
+             "expectancy_pct": 1.0, "signals": 3, "blocked": 1}]
+    c = journal.cumulative(rows)
+    assert c["days"] == 2 and c["trading_days"] == 1
+    assert c["win_rate"] == 50.0                  # 거래 없는 날이 평균을 희석하지 않는다
+
+
+def test_cumulative_empty():
+    c = journal.cumulative([])
+    assert c["trades"] == 0 and c["best_day"] is None
+
+
+def test_history_skips_corrupt_files(db):
+    journal.JOURNAL_DIR.mkdir(parents=True, exist_ok=True)
+    (journal.JOURNAL_DIR / "2026-07-27.json").write_text("{깨진 JSON")
+    assert journal.history(30) == []              # 예외 없이 건너뛴다
+
+
+# --- LLM 요약 (게이트웨이 장애 내성) ---
+
+@pytest.mark.asyncio
+async def test_summarize_failure_does_not_break_journal(db, monkeypatch):
+    """게이트웨이가 죽어도 일지는 만들어진다 — 요약만 비고 사유가 남는다."""
+    from app import llmgw
+
+    class Boom:
+        def __init__(self, *a, **kw):
+            raise llmgw.GatewayError("연결 실패")
+
+    monkeypatch.setattr(llmgw, "AsyncLLMGateway", Boom)
+    entry = await journal.generate("2026-07-27")
+    assert entry["summary"]["ok"] is False and "연결 실패" in entry["summary"]["error"]
+    assert entry["facts"]                          # 결정론 부분은 그대로
+    assert journal.load("2026-07-27") is not None  # 저장도 정상
+
+
+@pytest.mark.asyncio
+async def test_summarize_success(db, monkeypatch):
+    from app import llmgw
+
+    class Fake:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def run(self, role, prompt, **kw):
+            assert "관찰 사실" in prompt          # 원자료가 아니라 사실만 넘긴다
+            return "  오늘의 결과: 거래 없음  "
+
+    monkeypatch.setattr(llmgw, "AsyncLLMGateway", Fake)
+    entry = await journal.generate("2026-07-27")
+    assert entry["summary"]["ok"] is True
+    assert entry["summary"]["text"] == "오늘의 결과: 거래 없음"
+
+
+def test_summary_prompt_carries_only_facts(db):
+    entry = journal.build("2026-07-27")
+    entry["facts"] = ["사실1", "사실2"]
+    p = journal.summary_prompt(entry)
+    assert "- 사실1" in p and "- 사실2" in p
+    assert "매수" not in journal.SUMMARY_SYSTEM.split("규칙:")[0]   # 매매 지시 아님
+    assert "추천" in journal.SUMMARY_SYSTEM                        # 추천 금지 명시

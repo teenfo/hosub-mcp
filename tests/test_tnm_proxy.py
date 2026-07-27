@@ -70,3 +70,15 @@ def test_trading_proxy_unaffected():
         _login(c)
         assert c.get("/api/trading/status").status_code == 502   # 기존 프록시 정상
         assert c.get("/api/trading/shutdown").status_code == 404
+
+
+def test_journal_proxy_paths():
+    """매매일지 경로만 통과하고 인접 경로는 백엔드에 닿지 않는다."""
+    with _client() as c:
+        _login(c)
+        for path in ("journal", "journal/history"):
+            assert c.get(f"/api/trading/{path}").status_code == 502, path
+        assert c.post("/api/trading/journal/run", json={}).status_code == 502
+        for path in ("journal/2026-07-27", "journal/delete", "journal/run"):
+            assert c.get(f"/api/trading/{path}").status_code == 404, path
+        assert c.post("/api/trading/journal", json={}).status_code == 404
