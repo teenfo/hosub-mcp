@@ -22,6 +22,7 @@ import math
 import sqlite3
 from datetime import datetime
 from pathlib import Path
+from statistics import NormalDist
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -99,39 +100,93 @@ def _buckets(df: pd.DataFrame, cost_pct: float) -> list[dict]:
 MIN_CROSS_SECTION = 20   # 이보다 종목이 적은 날은 순위상관이 의미 없다
 
 
-def _spearman(g: pd.DataFrame, feat: str) -> float:
+BETA_CONTROL = "atr_pct"   # 잔차화 대조 축 — 변동성이 곧 베타 프록시다
+
+
+def _spearman(g: pd.DataFrame, feat: str, target: str = "fwd_1") -> float:
     """하루치 순위상관. 순위로 바꾼 뒤 피어슨 = 스피어만이라 scipy 가 필요 없다."""
     if len(g) < MIN_CROSS_SECTION or g[feat].nunique() < 2:
         return float("nan")
-    return g[feat].rank().corr(g["fwd_1"].rank())
+    if target not in g.columns or g[target].nunique() < 2:
+        return float("nan")
+    return g[feat].rank().corr(g[target].rank())
 
 
-def _ic(df: pd.DataFrame) -> list[dict]:
+def _resid_spearman(g: pd.DataFrame, feat: str, target: str = "fwd_1",
+                    control: str = BETA_CONTROL) -> float:
+    """변동성으로 설명되는 부분을 뺀 **잔차**의 순위상관.
+
+    횡단면 demeaning(_spearman 이 날짜 내 순위를 쓰는 것)은 그날 시장 '수준'만
+    제거한다. 베타는 수익률의 레벨이 아니라 **종목의 성질**이라 그대로 남는다.
+    실측 2026-07-27: 7피처 전부가 익일 상승일/하락일에 부호를 뒤집었다 —
+    피처 집합 전체가 단일 요인에 실려 있다는 뜻이다.
+
+    피처 순위를 대조축(변동성) 순위에 1차 회귀시킨 잔차를 쓰면 '변동성으로
+    설명되지 않는 부분' 만 남는다. 회귀계수는 b = cov(x,z)/var(z) — scipy 도
+    numpy polyfit 도 필요 없다(_spearman 이 scipy 를 피한 것과 같은 방식).
+    """
+    if feat == control:
+        return float("nan")        # 자기 자신에 회귀시키면 잔차가 0이다
+    if len(g) < MIN_CROSS_SECTION or control not in g.columns:
+        return float("nan")
+    x, z = g[feat].rank(), g[control].rank()
+    if x.nunique() < 2 or z.nunique() < 2:
+        return float("nan")
+    if target not in g.columns or g[target].nunique() < 2:
+        return float("nan")
+    var_z = float(z.var())
+    if not var_z or not math.isfinite(var_z):
+        return float("nan")
+    resid = x - (float(x.cov(z)) / var_z) * z
+    if resid.nunique() < 2:
+        return float("nan")
+    return resid.corr(g[target].rank())
+
+
+def bonferroni_t(k: int, alpha: float = 0.05) -> float:
+    """k개를 동시에 검정할 때의 t 문턱. 7피처 α=0.05 → 2.69.
+
+    피처를 여러 개 훑으면 그중 하나쯤은 우연히 |t|>2 를 넘는다. 문턱을 올리지
+    않으면 '살아남은 피처'가 발견이 아니라 다중검정의 산물이 된다.
+    """
+    return round(NormalDist().inv_cdf(1 - alpha / (2 * max(1, k))), 2)
+
+
+def _ic(df: pd.DataFrame, target: str = "fwd_1") -> list[dict]:
     """날짜별 순위상관(Spearman IC)의 평균 — 퀀트에서 쓰는 표준 예측력 지표.
 
-    하루하루 '피처 순위와 익일 수익률 순위가 얼마나 같은 방향인가' 를 재고,
-    그 값들의 평균이 0에서 유의하게 떨어져 있는지 본다. 시장 전체가 오르내린
-    효과는 순위로 보기 때문에 자동으로 빠진다.
+    하루하루 '피처 순위와 결과 순위가 얼마나 같은 방향인가' 를 재고, 그 값들의
+    평균이 0에서 유의하게 떨어져 있는지 본다. 시장 전체가 오르내린 효과는
+    순위로 보기 때문에 자동으로 빠진다 — 다만 **베타는 빠지지 않으므로**
+    변동성 잔차 IC(resid_ic)를 함께 낸다.
     """
     out = []
     for feat in panel_mod.IC_FEATURES:
         if feat not in df.columns:
             continue
-        daily_ic = df.groupby("date").apply(_spearman, feat, include_groups=False)
-        daily_ic = daily_ic.dropna()
+        daily_ic = df.groupby("date").apply(
+            _spearman, feat, target, include_groups=False).dropna()
         n = len(daily_ic)
         if n < 5:
             continue
-        mean = float(daily_ic.mean())
-        std = float(daily_ic.std())
-        out.append({
+        mean, std = float(daily_ic.mean()), float(daily_ic.std())
+        row = {
             "feature": feat,
             "mean_ic": round(mean, 4),
             "std_ic": round(std, 4),
             "t_stat": _t_stat(mean, std, n),
             "days": n,
             "hit_rate": round(float((daily_ic > 0).mean()) * 100, 1),
-        })
+            "is_control": feat == BETA_CONTROL,
+        }
+        rd = df.groupby("date").apply(
+            _resid_spearman, feat, target, BETA_CONTROL,
+            include_groups=False).dropna()
+        if len(rd) >= 5:
+            rm, rs = float(rd.mean()), float(rd.std())
+            row |= {"resid_ic": round(rm, 4), "resid_t": _t_stat(rm, rs, len(rd)),
+                    "resid_days": len(rd)}
+        out.append(row)
     return sorted(out, key=lambda r: -abs(r["t_stat"]))
 
 
@@ -207,6 +262,15 @@ def analyze(df: pd.DataFrame, cost_pct: float) -> dict:
         "liquid_rows": len(liq),
         "ic": _ic(df),
         "ic_liquid": _ic(liq) if len(liq) else [],
+        # 목적어별 IC — 발굴이 방향을 공급해야 하는지 변동폭을 공급해야 하는지가
+        # 여기서 갈린다. 판단에 쓰이는 매수 가능 표본 기준.
+        "ic_by_target": {
+            t: _ic(base, t) for t in panel_mod.TARGETS if t in base.columns
+        },
+        "targets": panel_mod.TARGETS,
+        "beta_control": BETA_CONTROL,
+        # 피처를 여러 개 훑으면 하나쯤은 우연히 |t|>2 를 넘는다
+        "bonferroni_t": bonferroni_t(len(panel_mod.IC_FEATURES)),
         # 사전에 알 수 있는 국면 — 실전 적용 가능
         "by_trend": _split(base, "trend", cost_pct),
         # 사후 분해 — 매매에는 못 쓰지만 알파/베타를 가른다

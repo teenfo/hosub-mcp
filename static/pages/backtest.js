@@ -283,11 +283,14 @@ export default {
       el("option", { value: "liquid" }, "매수 가능 종목만"),
       el("option", { value: "all" }, "전종목"),
     ]);
+    // 목적어 — 발굴이 '방향'을 공급해야 하는지 '움직임'을 공급해야 하는지가 갈린다.
+    // orb·momentum 은 장중 규칙이라 익일 종가 방향이 아니라 변동폭이 필요하다.
+    const esTarget = el("select", { class: "form-select form-select-sm", style: "max-width:230px" });
     const esBody = el("div", {}, emptyRow("불러오는 중…"));
     studyC.body.append(
       el("div", { class: "small text-secondary mb-2" },
         el("span", { html: '<i class="bi bi-bar-chart-steps"></i> 발굴 3규칙 점수(0~3)와 <b>익일 수익률</b>의 관계. 진입 기준은 <b>익일 시가</b> — 발굴 배치가 17:30에 도니 당일 종가에는 못 산다. <b>초과수익</b>은 같은 날 전 종목 평균을 뺀 값이라 시장이 오른 날의 덕을 규칙 성적으로 세지 않는다.' })),
-      el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, [esScope, esRun]),
+      el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, [esScope, esTarget, esRun]),
       esBody,
     );
 
@@ -302,7 +305,20 @@ export default {
       }
       const liquid = esScope.value === "liquid";
       const buckets = (liquid ? d.buckets_liquid : d.buckets) || [];
-      const ic = (liquid ? d.ic_liquid : d.ic) || [];
+      // 목적어 드롭다운 채우기 — 서버가 내려준 목록에서 생성한다
+      const targets = d.targets || { fwd_1: "익일 방향" };
+      if (esTarget.options.length !== Object.keys(targets).length) {
+        esTarget.innerHTML = "";
+        for (const [k, label] of Object.entries(targets)) {
+          esTarget.appendChild(el("option", { value: k }, `목적어: ${label}`));
+        }
+      }
+      const tgt = esTarget.value || "fwd_1";
+      // 목적어별 IC 는 매수 가능 표본 기준으로만 계산한다(판단에 쓰이는 쪽)
+      const ic = (tgt === "fwd_1" && !liquid)
+        ? (d.ic || [])
+        : ((d.ic_by_target || {})[tgt] || (liquid ? d.ic_liquid : d.ic) || []);
+      const bonf = d.bonferroni_t || 2;
       esBody.appendChild(el("div", { class: "small text-secondary mb-2" },
         `${d.date_from} ~ ${d.date_to} · ${d.days}거래일 · ${d.symbols}종목 · ` +
         `표본 ${(liquid ? d.liquid_rows : d.rows).toLocaleString()}건 · ` +
@@ -338,20 +354,45 @@ export default {
       // IC
       if (ic.length) {
         esBody.appendChild(el("div", { class: "fw-semibold small mt-3 mb-1" },
-          "피처별 예측력 (일별 순위상관 IC)"));
-        esBody.appendChild(el("div", { class: "small text-secondary mb-1" },
-          "같은 점수 안에서 줄을 세울 수 있는지 — 평균 IC 0.02~0.05면 실전에서 쓸 만한 수준으로 본다. |t값| 2 미만은 우연과 구분되지 않는다."));
+          `피처별 예측력 — 목적어: ${targets[tgt] || tgt}`));
+        esBody.appendChild(el("div", { class: "small text-secondary mb-1", html:
+          "평균 IC 0.02~0.05면 실전에서 쓸 만한 수준으로 본다. " +
+          `피처를 ${ic.length}개 훑으므로 우연히 넘는 것을 걸러내려면 <b>|t| > ${bonf}</b>(본페로니)를 요구한다.<br>` +
+          `<b>잔차 IC</b>는 변동성(<code>${d.beta_control || "atr_pct"}</code>) 순위로 설명되는 부분을 뺀 값이다. ` +
+          "날짜별 순위상관은 그날 시장 <i>수준</i>만 제거할 뿐, 베타는 종목의 <i>성질</i>이라 그대로 남는다 — " +
+          "<b>잔차 IC가 살아남아야 알파다.</b>" }));
         esBody.appendChild(tableOf(
           "<th>피처</th><th class='text-end'>평균 IC</th><th class='text-end'>t값</th>" +
+          "<th class='text-end'>잔차 IC</th><th class='text-end'>잔차 t</th>" +
           "<th class='text-end'>양수 비율</th><th class='text-end'>일수</th>",
-          ic.map((r) => el("tr", { class: Math.abs(r.t_stat) > 2 ? "" : "opacity-50" }, [
-            el("td", {}, r.feature),
-            el("td", { class: "text-end " + (r.mean_ic > 0 ? "text-danger" : "text-primary") },
-               r.mean_ic.toFixed(4)),
-            el("td", { class: "text-end" }, r.t_stat),
-            el("td", { class: "text-end" }, `${r.hit_rate}%`),
-            el("td", { class: "text-end text-secondary" }, r.days),
-          ]))));
+          ic.map((r) => {
+            const tone = (v) => (v > 0 ? "text-danger" : v < 0 ? "text-primary" : "");
+            const survives = r.resid_t != null && Math.abs(r.resid_t) > bonf;
+            return el("tr", { class: Math.abs(r.t_stat) > bonf ? "" : "opacity-50" }, [
+              el("td", {}, [r.feature, r.is_control
+                ? el("span", { class: "badge text-bg-secondary ms-1",
+                               title: "잔차화의 대조축 — 자기 자신에 회귀시킬 수 없다" }, "대조축")
+                : null]),
+              el("td", { class: "text-end " + tone(r.mean_ic) }, r.mean_ic.toFixed(4)),
+              el("td", { class: "text-end" }, r.t_stat),
+              el("td", { class: "text-end " + (survives ? "fw-semibold " : "") + tone(r.resid_ic),
+                         title: r.is_control ? "대조축이라 계산하지 않음" : "" },
+                 r.resid_ic == null ? "—" : r.resid_ic.toFixed(4)),
+              el("td", { class: "text-end " + (survives ? "fw-semibold" : "text-secondary") },
+                 r.resid_t == null ? "—" : r.resid_t),
+              el("td", { class: "text-end" }, `${r.hit_rate}%`),
+              el("td", { class: "text-end text-secondary" }, r.days),
+            ]);
+          })));
+        // 판정 — 이 숫자가 관제센터 가중치 착수 여부를 정한다
+        const survivors = ic.filter((r) => r.resid_t != null && Math.abs(r.resid_t) > bonf);
+        esBody.appendChild(el("div", { class: "small mt-2" }, [
+          el("span", { class: "badge me-2 " + (survivors.length >= 2 ? "text-bg-success" : "text-bg-secondary") },
+             `잔차 생존 ${survivors.length}개`),
+          el("span", { class: "text-secondary" }, survivors.length >= 2
+            ? `${survivors.map((r) => r.feature).join(", ")} — 변동성으로 설명되지 않는 예측력이 남았다. 관제센터 가중치 설계의 근거가 된다.`
+            : "변동성 잔차에서 살아남은 피처가 2개 미만이다 — 발굴 랭킹의 근거가 약하다. 유동성·체결가능성 게이트만 남기는 편이 정직하다."),
+        ]));
       }
       // 국면 분리 — 알파인가 저베타 효과인가
       const icRow = (sec, label) => {
@@ -399,6 +440,7 @@ export default {
         (d.caveats || []).map((c) => el("li", {}, c))));
     };
     esScope.onchange = renderStudy;
+    esTarget.onchange = renderStudy;
     const loadStudy = async () => {
       try { esData = await fetchJSON("/api/trading/research/event-study"); }
       catch (e) { return; }

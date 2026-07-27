@@ -46,6 +46,10 @@ def panel(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     out = pd.DataFrame(index=df.index)
     out["close"] = c
     out["open"] = df["open"]
+    # 고가·저가는 forward() 의 '변동폭' 목적어 재료다. 종전에는 버려서
+    # 익일 종가 방향밖에 잴 수 없었다 — 발굴이 먹이는 건 장중 규칙인데.
+    out["high"] = h
+    out["low"] = lo
     out["vol_surge"] = vol_surge.astype(int)
     out["near_high"] = near_high.astype(int)
     out["ma_aligned_new"] = aligned_new.astype(int)
@@ -66,19 +70,41 @@ def panel(df: pd.DataFrame, cfg: dict | None = None) -> pd.DataFrame:
     return out.iloc[MIN_ROWS - 1:].dropna()
 
 
+# 이벤트 스터디가 재는 '목적어'. 발굴이 무엇을 공급해야 하는가에 따라 답이 달라진다.
+TARGETS = {
+    "fwd_1": "익일 방향 (시가→종가)",
+    "fwd_up_1": "익일 최대 상승 (시가→고가)",
+    "fwd_range_1": "익일 변동폭 (고가−저가)",
+}
+
+
 def forward(p: pd.DataFrame, horizons=(1, 3, 5)) -> pd.DataFrame:
-    """익일 이후 수익률을 붙인다 — **실제로 잡을 수 있는 시점 기준**.
+    """익일 이후 결과를 붙인다 — **실제로 잡을 수 있는 시점 기준**.
 
     발굴 배치는 t일 장 마감 후(17:30)에 돌아 t+1일 후보를 낸다. 따라서 진입은
     빨라야 t+1 시가다. t 종가 → t+1 시가의 갭은 배치가 끝난 뒤에 열리므로
     잡을 수 없다 — gap_pct 로 따로 재서 '엣지가 못 먹는 구간에 있었는지' 를
     드러낸다.
-      fwd_k : t+1 시가 → t+k 종가 (%)   ← 실현 가능
-      gap_pct : t 종가 → t+1 시가 (%)   ← 실현 불가(참고)
+
+    목적어가 셋인 이유: 발굴이 먹이는 것은 orb(09:00~09:15 범위 돌파)·momentum
+    같은 **장중** 규칙이다. 그 규칙들이 필요로 하는 건 익일 종가가 어느 쪽으로
+    끝나는가가 아니라 **체결 가능한 R 을 낼 만큼 움직이는가**다. 방향만 재면
+    잘못된 것을 최적화하게 된다.
+
+      fwd_k       : t+1 시가 → t+k 종가 (%)      ← 방향
+      fwd_up_1    : t+1 시가 → t+1 고가 (%)      ← 롱 진입이 잡을 수 있었던 상한
+      fwd_range_1 : (t+1 고가 − t+1 저가) / 시가 ← 변동폭
+      gap_pct     : t 종가 → t+1 시가 (%)        ← 실현 불가(참고)
+
+    진입가는 셋 다 t+1 시가로 같다 — 그래야 서로 비교된다.
     """
     nxt_open = p["open"].shift(-1)
     out = p.copy()
     out["gap_pct"] = (nxt_open / p["close"] - 1) * 100
     for k in horizons:
         out[f"fwd_{k}"] = (p["close"].shift(-k) / nxt_open - 1) * 100
+    if "high" in p.columns and "low" in p.columns:
+        nxt_high, nxt_low = p["high"].shift(-1), p["low"].shift(-1)
+        out["fwd_up_1"] = (nxt_high / nxt_open - 1) * 100
+        out["fwd_range_1"] = (nxt_high - nxt_low) / nxt_open * 100
     return out
