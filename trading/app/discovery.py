@@ -63,33 +63,9 @@ def parse_stock_list(raw: dict) -> list[dict]:
     return out
 
 
-# ETF·ETN·리츠·스팩·채권형 등 '일반 보통주가 아닌' 종목 판별용 기본값.
-# config.yaml discovery.exclude_keywords / suffixes / prefixes 로 덮어쓸 수 있다.
-# 주의: '리츠'는 부분일치로 두면 '메리츠금융지주'가 오탐되므로 접미사로만 본다.
-_DEFAULT_EXCLUDE_KEYWORDS = [
-    "스팩", "ETN", "ETF", "레버리지", "인버스", "선물", "채권", "국채",
-    "금리", "액티브", "커버드콜",
-]
-_DEFAULT_EXCLUDE_SUFFIXES = ["리츠"]
-_DEFAULT_EXCLUDE_PREFIXES = [
-    "KODEX", "TIGER", "KOSEF", "ARIRANG", "HANARO", "TIMEFOLIO", "KOACT",
-    "TREX", "PLUS", "RISE", "ACE", "SOL", "KBSTAR", "히어로즈", "마이다스",
-]
-
-
-def is_excluded(name: str, cfg: dict) -> bool:
-    """ETF/ETN/리츠/채권형 등 발굴 대상에서 뺄 종목이면 True."""
-    n = (name or "").upper().replace(" ", "")
-    for kw in cfg.get("exclude_keywords", _DEFAULT_EXCLUDE_KEYWORDS):
-        if kw.upper() in n:
-            return True
-    for sf in cfg.get("exclude_suffixes", _DEFAULT_EXCLUDE_SUFFIXES):
-        if n.endswith(sf.upper()):
-            return True
-    for pf in cfg.get("exclude_prefixes", _DEFAULT_EXCLUDE_PREFIXES):
-        if n.startswith(pf.upper()):
-            return True
-    return False
+# 제외 정책은 data/exclude.py 가 단일 소스다 — scanner 와 서로 다르게 판정해
+# 실매수 사고가 났다(2026-07-27 462900 KoAct). 여기서는 재노출만 한다.
+from .data.exclude import is_excluded  # noqa: E402  (기존 import 경로 유지)
 
 
 def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:

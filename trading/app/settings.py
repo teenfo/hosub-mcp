@@ -228,6 +228,16 @@ def save_risk(daily_target_pct=None, daily_loss_limit_pct=None,
 # 재시작·재배포 후에도 유지된다. config.yaml 의 enabled 는 기본값 역할.
 RULES_FILE = DATA_DIR / "rules.json"
 
+# 오버라이드가 덮기 전의 config 원값. _load_rules_overrides 가 RULES 를 제자리
+# 수정하므로, 스냅샷을 떠 두지 않으면 '설정 기본값'이 영영 사라진다.
+# 화면에서 기본값과 현재값이 어긋난 것을 보여 주려면 이게 있어야 한다 —
+# 실측 2026-07-27: config 가 false 로 둔 6개를 rules.json 이 전부 켜 놓았는데
+# 어디에도 그 사실이 드러나지 않았고, 그날 신호 17건 중 15건이 그 규칙들에서 나왔다.
+RULES_CONFIG_ENABLED: dict[str, bool] = {
+    n: bool(c.get("enabled")) for n, c in RULES.items()
+    if isinstance(c, dict) and "enabled" in c
+}
+
 
 def _load_rules_overrides() -> None:
     import json
