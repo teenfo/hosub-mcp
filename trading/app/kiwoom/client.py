@@ -5,6 +5,7 @@ TR ID / 경로는 공개 자료 기준 초안이다. 공식 문서(openapi.kiwoo
 초당 요청 제한을 지키기 위해 간단한 토큰버킷을 둔다.
 """
 import asyncio
+import logging
 from collections import deque
 import time
 from datetime import datetime
@@ -32,19 +33,56 @@ PATH_ACCOUNT = "/api/dostk/acnt"
 PATH_RANK = "/api/dostk/rkinfo"
 PATH_STOCK_INFO = "/api/dostk/stkinfo"
 
+log = logging.getLogger("trading.kiwoom")
+
 
 class RateLimiter:
-    """초당 max_rps 회로 호출을 제한하는 토큰버킷."""
+    """초당 호출을 제한하는 토큰버킷 + 429 자동 감속(적응형).
 
-    def __init__(self, max_rps: int = 4) -> None:
-        self.max_rps = max_rps
-        self.interval = 1.0 / max_rps
+    한도 초과(429)를 받으면 유효 rps 를 즉시 절반으로 낮추고(최소 MIN_RPS),
+    이후 무사고 구간이 이어지면 단계적으로 원래 상한까지 회복한다.
+    서버가 스스로 눌러주므로 사용자가 주기를 잘못 잡아도 폭주하지 않는다.
+    """
+
+    MIN_RPS = 0.5
+    RECOVER_AFTER_SEC = 120      # 마지막 429 이후 이 시간이 지나면 1단계 회복
+    RECOVER_STEP = 0.5           # 회복 폭(rps)
+
+    def __init__(self, max_rps: float = 4) -> None:
+        self.max_rps = float(max_rps)        # 설정 상한(원복 목표)
+        self.effective_rps = float(max_rps)  # 현재 적용 중인 상한
         self._last = 0.0
         self._lock = asyncio.Lock()
         self.waited_sec = 0.0        # 누적 대기 — 한도에 눌린 정도(부하 지표)
+        self.throttled_until = 0.0   # 감속 상태 표시용(마지막 429 시각 기준)
+        self.penalties = 0           # 자동 감속 발동 횟수
+
+    @property
+    def interval(self) -> float:
+        return 1.0 / max(self.effective_rps, self.MIN_RPS)
+
+    def penalize(self) -> None:
+        """429 수신 — 유효 rps 를 절반으로 즉시 감속."""
+        self.effective_rps = max(self.MIN_RPS, round(self.effective_rps / 2, 2))
+        self.throttled_until = time.monotonic() + self.RECOVER_AFTER_SEC
+        self.penalties += 1
+
+    def _maybe_recover(self) -> None:
+        """무사고 구간이 이어지면 상한까지 단계적 회복."""
+        if self.effective_rps >= self.max_rps:
+            return
+        if time.monotonic() >= self.throttled_until:
+            self.effective_rps = min(self.max_rps,
+                                     round(self.effective_rps + self.RECOVER_STEP, 2))
+            self.throttled_until = time.monotonic() + self.RECOVER_AFTER_SEC
+
+    @property
+    def throttled(self) -> bool:
+        return self.effective_rps < self.max_rps
 
     async def wait(self) -> None:
         async with self._lock:
+            self._maybe_recover()
             now = time.monotonic()
             delta = now - self._last
             if delta < self.interval:
@@ -86,8 +124,8 @@ class ApiUsage:
         now = time.time()
         last_min = sum(1 for t in self._calls if t >= now - 60)
         last_10s = sum(1 for t in self._calls if t >= now - 10)
-        max_rps = limiter.max_rps if limiter else 0
-        # 최근 10초 실측 rps 대비 클라이언트 상한 사용률
+        max_rps = limiter.effective_rps if limiter else 0
+        # 최근 10초 실측 rps 대비 현재 유효 상한 사용률
         rps = round(last_10s / 10, 2)
         return {
             "calls_1m": last_min,
@@ -95,6 +133,9 @@ class ApiUsage:
             "calls_total": self.total,
             "rps_10s": rps,
             "max_rps": max_rps,
+            "configured_rps": limiter.max_rps if limiter else 0,
+            "auto_throttled": bool(limiter and limiter.throttled),
+            "penalties": limiter.penalties if limiter else 0,
             "usage_pct": round(rps / max_rps * 100) if max_rps else 0,
             "errors_1h": len(self._errors),
             "rate_limited_1h": sum(1 for _, s in self._errors if s == 429),
@@ -113,6 +154,14 @@ class KiwoomClient:
     def usage_snapshot(self) -> dict:
         return self.usage.snapshot(self._limiter)
 
+    def _record(self, status: int) -> None:
+        """계측 + 429 자동 감속."""
+        self.usage.record(status)
+        if status == 429:
+            self._limiter.penalize()
+            log.warning("키움 API 한도 초과(429) — 자동 감속: %.2f rps",
+                        self._limiter.effective_rps)
+
     async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N") -> dict:
         await self._limiter.wait()
         token = await token_manager.get()
@@ -128,9 +177,9 @@ class KiwoomClient:
                 },
             )
         except httpx.HTTPError:
-            self.usage.record(599)          # 네트워크 실패도 부하 지표에 포함
+            self._record(599)               # 네트워크 실패도 부하 지표에 포함
             raise
-        self.usage.record(resp.status_code)
+        self._record(resp.status_code)
         resp.raise_for_status()
         return resp.json()
 
