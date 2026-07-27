@@ -203,8 +203,13 @@ def facts(entry: dict) -> list[str]:
     else:
         out.append("기록된 신호 없음 — 규칙 조건이 하루 종일 성립하지 않았다.")
 
-    if entry.get("guard", {}).get("halted"):
-        out.append("일일 가드 작동: " + entry["guard"].get("reason", ""))
+    ovr = (entry.get("guard") or {}).get("override")
+    if ovr:
+        grants = [h for h in ovr.get("history", []) if h.get("mode") != "clear"]
+        if grants:
+            out.append(
+                f"일일 손실 가드를 {len(grants)}회 임시 해제(총 +{ovr.get('extra_loss_pct', 0):g}% 허용). "
+                "이 날의 손익은 한도를 열고 낸 결과이므로 다른 날과 같은 기준으로 비교할 수 없다.")
     if entry.get("carried"):
         out.append(
             f"다음 날로 넘어간 미청산 포지션 {len(entry['carried'])}건 — "
@@ -250,7 +255,7 @@ def _path(day: str) -> Path:
 
 def build(day: str | None = None) -> dict:
     """하루치 일지를 계산한다(LLM 요약 제외 — 순수 함수에 가깝게 유지)."""
-    from .trade import ledger
+    from .trade import ledger, override
 
     day = day or datetime.now(KST).date().isoformat()
     closed = [p for p in ledger.positions(status="closed", limit=500)
@@ -281,7 +286,9 @@ def build(day: str | None = None) -> dict:
             "by_rule": dict(Counter(s.get("rule") or "—" for s in sigs)),
             "rows": sigs,
         },
-        "guard": {},
+        # 그날 손실 가드를 임시로 열었다면 그 사실을 함께 남긴다 — 성과를 읽을 때
+        # '한도를 열고 낸 결과'인지 아닌지가 해석을 바꾼다.
+        "guard": {"override": override.record_for(day)} if override.record_for(day) else {},
         "summary": {},
     }
     entry["facts"] = facts(entry)

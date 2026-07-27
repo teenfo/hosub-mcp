@@ -122,6 +122,61 @@ export default {
       finally { scanSave.disabled = false; }
     };
 
+    // --- 일일 손실 가드 임시 해제 ---
+    // 한도에 걸렸을 때 수동 승인으로 내려가지 않고 자동 매매를 이어가기 위한 장치.
+    // 당일 실현손익은 그대로 두고 '멈추는 선'만 옮긴다.
+    const ovMinutes = el("select", { class: "form-select form-select-sm w-auto" },
+      [["", "장 마감까지"], [30, "30분"], [60, "1시간"], [120, "2시간"]]
+        .map(([v, t]) => el("option", { value: v }, t)));
+    const ovReset = el("button", { class: "btn btn-sm btn-warning", type: "button" },
+      "기준 리셋");
+    const ovExtra = el("input", { class: "form-control form-control-sm", type: "number",
+      step: "0.1", min: "0.1", max: "10", value: "0.5", style: "max-width:76px" });
+    const ovExtend = el("button", { class: "btn btn-sm btn-outline-warning", type: "button" },
+      "추가 허용");
+    const ovClear = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" },
+      "해제 취소");
+    const ovMsg = el("div", { class: "small mt-1" });
+    const ovBox = el("div", { class: "border rounded p-2 mt-2 d-none" });
+
+    const ovCall = async (path, body, btn) => {
+      if (!confirm("일일 손실 가드를 임시로 엽니다. 당일 실현손익은 그대로 유지되고, "
+        + "자동 매매가 멈추는 기준선만 옮겨집니다. 계속할까요?")) return;
+      btn.disabled = true;
+      ovMsg.textContent = "";
+      try {
+        const r = await postJSON("/api/trading/" + path, body);
+        _memo["risk"] = undefined;
+        await loadRisk();
+        const ov = r.override || {};
+        ovMsg.className = "small mt-1 text-success";
+        ovMsg.textContent = ov.active
+          ? `적용됨 — 추가 허용 +${ov.extra_loss_pct}% · ${String(ov.until).slice(11, 16)}까지 (오늘 ${ov.count}/${ov.max_count}회)`
+          : "임시 해제 취소됨 — 설정 한도로 복귀";
+      } catch (e) {
+        ovMsg.className = "small mt-1 text-danger";
+        ovMsg.textContent = "실패: " + e.message;
+      } finally { btn.disabled = false; }
+    };
+    ovReset.onclick = () => ovCall("guard/override",
+      { mode: "reset", minutes: ovMinutes.value ? Number(ovMinutes.value) : null }, ovReset);
+    ovExtend.onclick = () => ovCall("guard/override",
+      { mode: "extend", extra_pct: parseFloat(ovExtra.value),
+        minutes: ovMinutes.value ? Number(ovMinutes.value) : null }, ovExtend);
+    ovClear.onclick = async () => {
+      ovClear.disabled = true;
+      try {
+        await postJSON("/api/trading/guard/override/clear", {});
+        _memo["risk"] = undefined;
+        await loadRisk();
+        ovMsg.className = "small mt-1 text-secondary";
+        ovMsg.textContent = "임시 해제 취소됨 — 설정 한도로 복귀";
+      } catch (e) {
+        ovMsg.className = "small mt-1 text-danger";
+        ovMsg.textContent = "실패: " + e.message;
+      } finally { ovClear.disabled = false; }
+    };
+
     // --- 일일 목표·가드 카드: 상태 표시 전용 ---
     const openCfgBtn = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" },
       [el("i", { class: "bi bi-gear" }), " 매매 설정"]);
@@ -132,6 +187,7 @@ export default {
         openCfgBtn,
       ]),
       gStatus,
+      ovBox,
     );
 
     const loadRisk = async () => {
@@ -187,6 +243,52 @@ export default {
       ]));
       if (!r.halted && hi > 0 && r.pct < hi) {
         gStatus.appendChild(el("div", { class: "text-secondary mt-1" }, `목표까지 ${(hi - r.pct).toFixed(2)}% 남음`));
+      }
+      renderOverride(r);
+    };
+
+    // 임시 해제 영역 — 한도에 걸렸거나 이미 해제가 살아 있을 때만 펼친다.
+    const renderOverride = (r) => {
+      const ov = r.override || {};
+      const lossHalt = r.halted && String(r.reason || "").includes("손실");
+      const show = ov.enabled && (lossHalt || ov.active || ov.count > 0);
+      ovBox.classList.toggle("d-none", !show);
+      if (!show) return;
+      ovBox.innerHTML = "";
+      const base = r.daily_loss_limit_pct ?? 0;
+      const eff = r.loss_limit_effective_pct ?? base;
+      ovBox.append(
+        el("div", { class: "small fw-semibold mb-1",
+          html: '<i class="bi bi-unlock"></i> 손실 가드 임시 해제' }),
+        el("div", { class: "small text-secondary mb-2 lh-sm" },
+          `당일 실현손익(${pct(r.pct)})은 그대로 유지되고 '멈추는 선'만 옮깁니다. ` +
+          `기준 리셋 = 지금 손익부터 한도를 다시 셈 · 추가 허용 = 한도에 그만큼만 더함. ` +
+          `오늘 총량 상한 ${ov.max_pct}% · ${ov.max_count}회.`),
+        el("div", { class: "d-flex gap-2 align-items-center flex-wrap mb-1" }, [
+          el("span", { class: "badge text-bg-" + (ov.active ? "danger" : "secondary") },
+            ov.active
+              ? `임시 허용 +${ov.extra_loss_pct}% · ${String(ov.until).slice(11, 16)}까지`
+              : "임시 허용 없음"),
+          el("span", { class: "small text-secondary" },
+            `정지선 ${base}%` + (eff !== base ? ` → ${eff}%` : "")),
+          el("span", { class: "small text-secondary" }, `오늘 ${ov.count}/${ov.max_count}회`),
+        ]),
+        el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+          ovMinutes, ovReset,
+          el("div", { class: "input-group input-group-sm w-auto" },
+            [ovExtra, el("span", { class: "input-group-text" }, "%")]),
+          ovExtend,
+          ov.active ? ovClear : null,
+        ]),
+        ovMsg,
+      );
+      const spent = ov.granted_pct || 0;
+      if (spent >= ov.max_pct || ov.count >= ov.max_count) {
+        ovReset.disabled = ovExtend.disabled = true;
+        ovBox.appendChild(el("div", { class: "small text-danger mt-1" },
+          "오늘 임시 해제 한도를 모두 썼습니다 — 더 늘리려면 매매를 멈추고 점검하세요."));
+      } else {
+        ovReset.disabled = ovExtend.disabled = false;
       }
     };
 

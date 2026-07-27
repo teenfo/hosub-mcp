@@ -82,3 +82,14 @@ def test_journal_proxy_paths():
         for path in ("journal/2026-07-27", "journal/delete", "journal/run"):
             assert c.get(f"/api/trading/{path}").status_code == 404, path
         assert c.post("/api/trading/journal", json={}).status_code == 404
+
+
+def test_guard_override_proxy_paths():
+    """가드 임시 해제는 POST 만, 지정 경로만 통과한다."""
+    with _client() as c:
+        _login(c)
+        for path in ("guard/override", "guard/override/clear"):
+            assert c.post(f"/api/trading/{path}", json={}).status_code == 502, path
+            assert c.get(f"/api/trading/{path}").status_code == 404, path   # GET 불가
+        for path in ("guard", "guard/override/x", "guard/disable"):
+            assert c.post(f"/api/trading/{path}", json={}).status_code == 404, path

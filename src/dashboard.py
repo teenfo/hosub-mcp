@@ -75,7 +75,7 @@ _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
     r"|rules/[a-z_]{1,30}/toggle"
     r"|discovery/run|symbols/refresh|backtest/report/run|backtest/sweep/run|risk"
-    r"|journal/run"
+    r"|journal/run|guard/override(/clear)?"
     r"|positions/[0-9a-f]{12}/close)$"
 )
 # 백테스트는 오래 걸린다(전 종목 리포트 수십 초, 종목별 재생도 봉이 쌓일수록·

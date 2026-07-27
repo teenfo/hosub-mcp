@@ -396,6 +396,48 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
             "tf": tf, "days": days, "stats": result.stats(), "trades": trades}
 
 
+@app.post("/api/guard/override")
+async def api_guard_override(payload: dict, _=Depends(require_auth)):
+    """일일 손실 가드 임시 해제 — 자동 매매를 유지한 채 한도만 늘린다.
+
+    mode=reset  : 지금 손익을 기준선으로 한도를 다시 센다(추가치를 서버가 계산)
+    mode=extend : extra_pct 만큼만 한도에 더한다
+    minutes     : 유효 시간(미지정 시 장 마감까지)
+    당일 실현손익은 그대로 유지된다 — 바뀌는 것은 정지선뿐이다.
+    """
+    from .trade import override
+
+    mode = str(payload.get("mode") or "reset")
+    guard = await asyncio.to_thread(engine.day_guard_status)
+    if mode == "reset":
+        extra = override.reset_extra(guard["pct"], guard["daily_loss_limit_pct"])
+        if extra <= 0:
+            return JSONResponse(
+                {"ok": False, "error": "지금은 손실 구간이 아니라 기준 리셋이 필요 없습니다"},
+                400)
+    else:
+        extra = payload.get("extra_pct")
+        if extra is None:
+            return JSONResponse({"ok": False, "error": "extra_pct 가 필요합니다"}, 400)
+    try:
+        st = await asyncio.to_thread(
+            lambda: override.grant(mode=mode, extra_pct=float(extra),
+                                   pct_at=guard["pct"],
+                                   minutes=payload.get("minutes")))
+    except (OSError, ValueError, TypeError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, 400)
+    return {"ok": True, "override": st, **engine.day_guard_status()}
+
+
+@app.post("/api/guard/override/clear")
+async def api_guard_override_clear(_=Depends(require_auth)):
+    """임시 해제 즉시 취소 — 설정 한도로 복귀(이력은 남는다)."""
+    from .trade import override
+
+    st = await asyncio.to_thread(override.clear)
+    return {"ok": True, "override": st, **engine.day_guard_status()}
+
+
 @app.get("/api/journal")
 async def api_journal(date: str | None = None, _=Depends(require_auth)):
     """하루치 매매일지. 저장본이 있으면 그대로, 없으면 즉석 계산(요약은 제외).

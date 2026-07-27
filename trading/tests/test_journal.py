@@ -332,3 +332,20 @@ def test_history_reports_final_flag(db):
     rows = {r["date"]: r for r in journal.history(30)}
     assert rows["2026-07-27"]["final"] is False and rows["2026-07-27"]["has_summary"] is False
     assert rows["2026-07-24"]["final"] is True and rows["2026-07-24"]["has_summary"] is True
+
+
+def test_journal_records_guard_override(db, monkeypatch):
+    """가드를 열고 낸 하루라는 사실이 일지에 남아야 한다 — 성과 해석이 달라진다."""
+    from app.trade import override
+
+    monkeypatch.setattr(override, "FILE", db / "guard_override.json")
+    monkeypatch.setitem(settings.RISK, "guard_override_max_pct", 2.0)
+    monkeypatch.setitem(settings.RISK, "guard_override_max_count", 2)
+    now = datetime(2026, 7, 27, 11, 0, tzinfo=ZoneInfo("Asia/Seoul"))
+    override.grant(mode="reset", extra_pct=1.86, pct_at=-1.86, now=now)
+
+    entry = journal.build("2026-07-27")
+    assert entry["guard"]["override"]["extra_loss_pct"] == 1.86
+    assert any("임시 해제" in f and "같은 기준으로 비교할 수 없다" in f
+               for f in entry["facts"])
+    assert journal.build("2026-07-24")["guard"] == {}   # 다른 날엔 안 붙는다

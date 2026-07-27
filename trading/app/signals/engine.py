@@ -170,15 +170,25 @@ class SignalEngine:
                 self._equity_synced_at = now
 
     def day_guard_status(self) -> dict:
-        """당일 실현손익 + 목표/한도 대비 신규 진입 중단 여부."""
-        from ..trade import ledger
+        """당일 실현손익 + 목표/한도 대비 신규 진입 중단 여부.
+
+        임시 해제(override)가 살아 있으면 **손실 한도만** 늘려 잡는다. 실현손익
+        자체는 손대지 않으므로 화면·일지의 숫자는 진실 그대로다 — 바뀌는 것은
+        '어느 선에서 멈추는가' 뿐이다. (이익 목표는 성격이 달라 대상 아님)
+        """
+        from ..trade import ledger, override
 
         self._effective_regime()   # 대시보드 표시용으로 유효 국면 최신화
         today = ledger.realized_today(self.equity)
         target = float(settings.RISK.get("daily_target_pct", 0) or 0)
         loss = float(settings.RISK.get("daily_loss_limit_pct", 0) or 0)
-        halted, why = risk.day_guard(today["pct"], target, loss)
+        ov = override.state()
+        loss_eff = round(loss + (ov["extra_loss_pct"] if ov["active"] else 0.0), 4)
+        halted, why = risk.day_guard(today["pct"], target, loss_eff)
+        if halted and ov["active"] and "손실" in why:
+            why += f" (임시 허용 +{ov['extra_loss_pct']:g}% 반영 후에도 초과)"
         return {**today, "daily_target_pct": target, "daily_loss_limit_pct": loss,
+                "loss_limit_effective_pct": loss_eff, "override": ov,
                 "equity": self.equity, "halted": halted, "reason": why,
                 "regime": self.regime, "base_regime": self.base_regime,
                 "gap_bias": self.gap_bias, "night_bias": self.night_bias}
