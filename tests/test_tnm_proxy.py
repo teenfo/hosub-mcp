@@ -93,3 +93,12 @@ def test_guard_override_proxy_paths():
             assert c.get(f"/api/trading/{path}").status_code == 404, path   # GET 불가
         for path in ("guard", "guard/override/x", "guard/disable"):
             assert c.post(f"/api/trading/{path}", json={}).status_code == 404, path
+
+
+def test_trade_marks_proxy_path():
+    """차트 체결 오버레이는 6자리 종목코드만 통과한다."""
+    with _client() as c:
+        _login(c)
+        assert c.get("/api/trading/trades/005930?date=2026-07-27").status_code == 502
+        for path in ("trades", "trades/12345", "trades/abcdef", "trades/005930/x"):
+            assert c.get(f"/api/trading/{path}").status_code == 404, path

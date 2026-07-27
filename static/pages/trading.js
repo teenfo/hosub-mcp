@@ -470,7 +470,14 @@ export default {
     let mBBon = false;
     mBB.onclick = () => { mBBon = !mBBon; mBB.classList.toggle("active", mBBon); mChart.setIndicator("bb", mBBon); };
     const mLegend = el("div", { class: "small d-flex gap-2 flex-wrap align-items-center ms-auto" },
-      MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`)));
+      MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`))
+        .concat([
+          el("span", { style: "color:#7a5cff;font-weight:600",
+            title: "실제 매수 체결가 — 삼각형 꼭짓점이 그 가격입니다" }, "▲ 매수"),
+          el("span", { class: "text-secondary", style: "font-weight:600",
+            title: "실제 매도 체결가(이익=빨강 / 손실=파랑). ~ 표시는 실체결 미확인(이론가)" },
+            "▼ 매도"),
+        ]));
     // 분봉은 하루 단위로 본다 — 기본 오늘(최근 거래일), 데이터 있는 날짜만 선택 가능
     const mDate = el("input", { type: "date", class: "form-control form-control-sm w-auto",
                                 title: "데이터가 있는 날짜만 선택됩니다" });
@@ -508,6 +515,16 @@ export default {
         : "저장된 분봉 없음";
     };
 
+    // 체결 오버레이 — 그날 이 종목을 실제로 얼마에 사고팔았는지 차트에 겹쳐 본다.
+    const loadMarks = async () => {
+      if (!symbolSel.value) return;
+      const day = mCurDate || (mDates[0] || new Date().toLocaleDateString("sv-SE"));
+      try {
+        mChart.setMarkers(await fetchJSON(
+          `/api/trading/trades/${symbolSel.value}?date=${encodeURIComponent(day)}`));
+      } catch (e) { mChart.setMarkers(null); }   // 조회 실패는 차트 자체를 막지 않는다
+    };
+
     const loadChart = async (force = false) => {
       if (!symbolSel.value) return;
       try {
@@ -518,6 +535,7 @@ export default {
           mCurSym = key;
           mChart.setData(bars);                       // 종목·날짜 전환 → 새로 그림
           mPeriodBtns.forEach((x) => x.classList.remove("active"));
+          loadMarks();                                // 전환 시에만 체결 재조회
         } else {
           mChart.update(bars);                        // 실시간 갱신 → 확대/이동 보존
         }
@@ -1019,5 +1037,6 @@ export default {
     ctx.addTimer(setInterval(loadRisk, 30_000));
     ctx.addTimer(setInterval(loadPositions, 15_000));
     ctx.addTimer(setInterval(() => { if (!mCurDate) loadChart(); }, 5_000)); // 실시간 분봉(오늘일 때만)
+    ctx.addTimer(setInterval(loadMarks, 20_000));    // 새 체결 반영(오늘·과거 공통)
   },
 };

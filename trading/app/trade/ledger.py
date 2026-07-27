@@ -379,6 +379,56 @@ def realized_today(equity: float) -> dict:
     return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows)}
 
 
+def _epoch(iso: str) -> int | None:
+    """ISO(KST) → 차트 x축과 같은 단위(유닉스 초)."""
+    try:
+        t = datetime.fromisoformat(iso)
+    except (TypeError, ValueError):
+        return None
+    return int((t.replace(tzinfo=KST) if t.tzinfo is None else t).timestamp())
+
+
+def marks_for(symbol: str, day: str) -> dict:
+    """그 종목·그 날짜의 체결 지점과 보유 중 손절/목표선 — 1분봉 차트 오버레이용.
+
+    marks  : 진입(▲)·청산(▼) 각각의 시각과 **실제 기록된 체결가**
+    levels : 아직 열려 있는 포지션의 손절·목표 가격(수평 점선)
+    """
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE symbol=? "
+            "AND (substr(opened,1,10)=? OR substr(closed,1,10)=?) ORDER BY opened",
+            (symbol, day, day),
+        ).fetchall()
+    marks: list[dict] = []
+    levels: list[dict] = []
+    for r in rows:
+        if str(r["opened"] or "")[:10] == day and r["entry"]:
+            t = _epoch(r["opened"])
+            if t:
+                marks.append({
+                    "time": t, "price": round(float(r["entry"]), 2), "kind": "entry",
+                    "side": r["side"], "qty": r["qty"], "rule": r["rule"],
+                    "confirmed": bool(r["fill_confirmed"]),
+                })
+        if r["status"] == "closed" and str(r["closed"] or "")[:10] == day and r["exit"]:
+            t = _epoch(r["closed"])
+            if t:
+                marks.append({
+                    "time": t, "price": round(float(r["exit"]), 2), "kind": "exit",
+                    "reason": r["exit_reason"], "qty": r["qty"], "rule": r["rule"],
+                    "pnl_pct": r["pnl_pct"], "pnl_krw": r["pnl_krw"],
+                    "confirmed": bool(r["exit_fill_confirmed"]),
+                })
+        if r["status"] == "open":
+            for price, kind in ((r["stop"], "stop"), (r["target"], "target")):
+                if price:
+                    levels.append({"price": round(float(price), 2), "kind": kind,
+                                   "rule": r["rule"]})
+    marks.sort(key=lambda m: m["time"])
+    return {"marks": marks, "levels": levels}
+
+
 def open_symbols() -> set[str]:
     """지금 열려 있는 포지션의 종목코드 집합 — 같은 종목 중복 진입 차단용."""
     with _conn() as conn:

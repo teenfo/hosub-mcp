@@ -270,3 +270,50 @@ def test_open_symbols(tmp_path, monkeypatch):
     assert ledger.open_symbols() == {"005930", "000660"}
     ledger.close_position("s1", 9_800, "stop")
     assert ledger.open_symbols() == {"000660"}
+
+
+# --- 차트 체결 오버레이 ---
+
+def test_marks_for_entry_and_exit(tmp_path, monkeypatch):
+    """진입·청산 지점과 실제 기록된 체결가가 차트용으로 나온다."""
+    _fresh(tmp_path, monkeypatch)
+    ledger.open_position(_order(), fill=10_050)
+    day = ledger.positions(status="open")[0]["opened"][:10]
+    m = ledger.marks_for("005930", day)
+    assert len(m["marks"]) == 1
+    e = m["marks"][0]
+    assert e["kind"] == "entry" and e["price"] == 10_050
+    assert e["qty"] == 10 and e["rule"] == "orb" and e["confirmed"] is False
+    assert isinstance(e["time"], int) and e["time"] > 0
+    # 보유 중이므로 손절·목표선이 함께 나온다
+    assert {lv["kind"] for lv in m["levels"]} == {"stop", "target"}
+    assert {lv["price"] for lv in m["levels"]} == {9_800.0, 10_400.0}
+
+    ledger.close_position("a1", 9_800, "stop", ord_no="EXM")
+    m = ledger.marks_for("005930", day)
+    kinds = [x["kind"] for x in m["marks"]]
+    assert kinds == ["entry", "exit"]              # 시각순
+    x = m["marks"][1]
+    assert x["price"] == 9_800 and x["reason"] == "stop" and x["pnl_pct"] < 0
+    assert m["levels"] == []                       # 청산됐으면 선도 사라진다
+
+
+def test_marks_use_actual_fill(tmp_path, monkeypatch):
+    """실체결이 반영되면 차트에 찍히는 가격도 실체결가가 된다."""
+    _fresh(tmp_path, monkeypatch)
+    ledger.open_position(_order(), fill=10_000)
+    day = ledger.positions(status="open")[0]["opened"][:10]
+    ledger.close_position("a1", 9_800, "stop", ord_no="EXN")
+    ledger.record_fill(_fill("EXN", "005930", 9_700))
+    x = ledger.marks_for("005930", day)["marks"][1]
+    assert x["price"] == 9_700 and x["confirmed"] is True
+
+
+def test_marks_scoped_by_symbol_and_day(tmp_path, monkeypatch):
+    _fresh(tmp_path, monkeypatch)
+    ledger.open_position(_order("m1", symbol="005930"), fill=10_000)
+    ledger.open_position(_order("m2", symbol="000660"), fill=10_000)
+    day = ledger.positions(status="open")[0]["opened"][:10]
+    assert len(ledger.marks_for("005930", day)["marks"]) == 1
+    assert ledger.marks_for("005930", "2020-01-01") == {"marks": [], "levels": []}
+    assert ledger.marks_for("999999", day) == {"marks": [], "levels": []}
