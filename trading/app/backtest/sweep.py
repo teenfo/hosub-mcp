@@ -32,6 +32,22 @@ def run_sweep() -> dict:
         running = False
 
 
+async def run_offloaded() -> dict:
+    """스윕을 별도 프로세스에서 실행한다 — 리포트와 같은 이유(GIL 격리).
+    전 규칙 × 전 종목이라 리포트보다 무겁다. 같은 프로세스에서 돌리면
+    토요일 오전 내내 API 가 응답하지 않는다."""
+    global running
+    from . import offload
+
+    if running:
+        return latest()
+    running = True
+    try:
+        return await offload.run_job("sweep")
+    finally:
+        running = False
+
+
 def _run_sweep() -> dict:
     from ..data import store
     from ..signals.rules import REGISTRY
@@ -98,7 +114,7 @@ async def loop(check_sec: int = 60) -> None:
                 and now.hour == cfg.get("hour", 9)
                 and latest().get("run_ts", "")[:10] != now.date().isoformat()
             ):
-                await asyncio.to_thread(run_sweep)
+                await run_offloaded()
         except Exception:  # noqa: BLE001
             log.exception("주간 스윕 루프 오류")
         await asyncio.sleep(check_sec)

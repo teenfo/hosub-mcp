@@ -515,7 +515,7 @@ async def api_backtest_report_run(_=Depends(require_auth)):
     """백테스트 리포트 수동 실행(조회성 — 주문 없음)."""
     if reporter.running:
         return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
-    return await asyncio.to_thread(reporter.run_once)
+    return await reporter.run_offloaded()   # 별도 프로세스 — 루프를 막지 않는다
 
 
 @app.get("/api/backtest/sweep/latest")
@@ -533,7 +533,8 @@ async def api_sweep_run(_=Depends(require_auth)):
 
     if sweep.running:
         return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
-    asyncio.create_task(asyncio.to_thread(sweep.run_sweep))
+    asyncio.create_task(sweep.run_offloaded())   # 별도 프로세스
+
     return {"ok": True, "message": "스윕 시작 — 수 분 후 결과가 갱신됩니다"}
 
 

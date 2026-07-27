@@ -140,6 +140,11 @@ def test_reset_extra_calculation():
 # --- 가드와의 결합 ---
 
 def _engine(monkeypatch, ov_dir, pct):
+    # 가드 결합 테스트는 '지금'을 그대로 쓴다(state 가 실시간 시계를 읽으므로).
+    # 만료 시각만 시계에서 떼어 놓지 않으면 장 마감 후에 돌릴 때 grant 가
+    # '이미 마감' 으로 거절해 테스트가 깨진다(2026-07-27 16:06 실측).
+    # _close_at 자체의 동작은 별도 테스트가 검증한다.
+    monkeypatch.setattr(override, "_close_at", lambda now: now + timedelta(hours=6))
     eng = SignalEngine(equity=1_000_000)
     monkeypatch.setattr(eng, "_effective_regime", lambda: "중립")
     monkeypatch.setattr(ledger, "realized_today",
@@ -163,8 +168,8 @@ def test_guard_uses_effective_limit(ov, monkeypatch):
 
 
 def test_guard_halts_again_past_extended_limit(ov, monkeypatch):
-    override.grant(mode="extend", extra_pct=0.5, pct_at=-1.5)
     eng = _engine(monkeypatch, ov, -2.1)              # 2.0% 초과
+    override.grant(mode="extend", extra_pct=0.5, pct_at=-1.5)
     g = eng.day_guard_status()
     assert g["halted"] is True
     assert "임시 허용 +0.5% 반영 후에도 초과" in g["reason"]
