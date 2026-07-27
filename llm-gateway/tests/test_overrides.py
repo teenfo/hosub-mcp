@@ -187,6 +187,40 @@ def test_revert_restores_yaml_default(client):
     assert client.delete("/v1/admin/roles?role=chat", headers=H).status_code == 404
 
 
+def test_partial_edits_merge_instead_of_replacing(client):
+    """두 번째 편집이 첫 번째를 지우면 안 된다 — 모델 교체가 조용히 사라진다."""
+    client.post("/v1/admin/roles", headers=H,
+                json={"role": "chat", "fields": {"model": "big"}})
+    client.post("/v1/admin/roles", headers=H,
+                json={"role": "chat", "fields": {"timeout": 99}})
+    view = client.get("/v1/admin/roles", headers=H).json()["roles"]
+    chat = next(x for x in view if x["name"] == "chat")
+    assert chat["model"] == "big" and chat["timeout"] == 99
+    assert chat["overridden_fields"] == ["model", "timeout"]
+
+
+def test_values_equal_to_default_are_not_overrides(client):
+    """기본값과 같은 값을 보내면 오버라이드로 세지 않는다.
+
+    UI 는 폼 전체(model·lane·timeout·options)를 보낸다. 그대로 저장하면
+    아무것도 안 바꿨는데 드리프트 배지가 "roles.yaml 과 다름"이라고 거짓말한다.
+    """
+    base = {"model": "mid", "lane": "interactive", "timeout": 60, "options": {}}
+    r = client.post("/v1/admin/roles", headers=H, json={"role": "chat", "fields": base})
+    assert r.json()["role"]["overridden_fields"] == []
+    assert r.json()["overrides"]["count"] == 0
+
+    # 한 필드만 실제로 다르면 그것만 잡힌다
+    r = client.post("/v1/admin/roles", headers=H,
+                    json={"role": "chat", "fields": dict(base, model="big")})
+    assert r.json()["role"]["overridden_fields"] == ["model"]
+
+    # 다시 기본값으로 되돌리면 오버라이드가 사라진다(행까지 삭제)
+    r = client.post("/v1/admin/roles", headers=H, json={"role": "chat", "fields": base})
+    assert r.json()["overrides"]["count"] == 0
+    assert client.get("/v1/status", headers=H).json()["overrides"]["count"] == 0
+
+
 def test_override_to_missing_model_suggests_install(client):
     r = client.post("/v1/admin/roles", headers=H,
                     json={"role": "chat", "fields": {"model": "qwen2.5:14b"}})

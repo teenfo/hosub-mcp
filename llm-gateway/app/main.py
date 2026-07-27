@@ -528,26 +528,37 @@ def build_app(
                 fields, require_model=(origin == "db" and existing is None),
                 allow_kind=(origin == "db"),
             )
-            if origin == "db":
+            if origin == "db" and existing is not None:
                 # kind 는 생성 시에만 정한다 — 나중에 generate→embed 로 바뀌면
                 # 그 역할이 큐와 메모리 예산을 우회하는 동기 경로로 넘어간다.
-                if existing is not None:
-                    clean.pop("kind", None)
-                    prev = next((o for o in store.list_role_overrides()
-                                 if o["role"] == name), None)
-                    merged = dict((prev or {}).get("fields") or {})
-                    merged.update(clean)
-                    clean = merged
+                clean.pop("kind", None)
         except ConfigError as exc:
             return JSONResponse(
                 {"error": "invalid_fields", "detail": str(exc)}, status_code=400
             )
 
-        store.set_role_override(
-            name, origin=origin, fields=clean,
-            note=(str(body.get("note")) if body.get("note") else None),
-            updated_by=svc.name,
-        )
+        # **부분 수정은 병합이다.** 보낸 필드만 저장하면 model 을 바꾼 뒤 timeout 만
+        # 다시 바꿨을 때 모델 교체가 조용히 사라진다.
+        prev = next((o for o in store.list_role_overrides() if o["role"] == name), None)
+        merged = dict((prev or {}).get("fields") or {})
+        merged.update(clean)
+
+        if origin == "yaml":
+            # 기본값과 같아진 필드는 오버라이드가 아니다. 남겨 두면
+            # overridden_fields 와 드리프트 배지가 "바뀐 게 있다"고 거짓말한다.
+            merged = {k: v for k, v in merged.items()
+                      if v != getattr(base, k, object())}
+
+        if origin == "yaml" and not merged:
+            # 전부 기본값으로 되돌아왔다 = 오버라이드 없음
+            store.delete_role_override(name)
+        else:
+            store.set_role_override(
+                name, origin=origin, fields=merged,
+                note=(str(body.get("note")) if body.get("note") else None),
+                updated_by=svc.name,
+            )
+        clean = merged
         invalid = _reload_overrides()
         view = roles.role_view(name)
         store.record_audit(actor=svc.name, action="role_override", target=name,
