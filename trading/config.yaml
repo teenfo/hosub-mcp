@@ -311,6 +311,12 @@ rules:
     require_volume: false
     vol_confirm_ratio: 1.2
 
+# 연구·검증(매매하지 않음) — 발굴 규칙이 실제로 익일 수익률과 상관이 있는지.
+# 머신러닝을 얹기 전에 답해야 할 질문이다. 상관이 없으면 어떤 모델도 소용없다.
+research:
+  # 왕복 비용%: 수수료 0.015×2 + 거래세 0.15 + 슬리피지 5bp×2 = 0.28
+  cost_pct: 0.28
+
 costs:
   commission_pct: 0.015       # 위탁 수수료(편도)
   sell_tax_pct: 0.15          # 증권거래세(매도)
