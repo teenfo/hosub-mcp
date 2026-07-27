@@ -26,6 +26,30 @@ def scrub(text: str) -> str:
     return _QUERY.sub(lambda m: f"{m.group(1)}={MASK}", text)
 
 
+def _scrub_arg(a):
+    """포매팅 인자 하나를 가린다 — **문자열이 아닌 것도 본다.**
+
+    httpx 는 URL 을 `httpx.URL` **객체**로 넘긴다:
+
+        logger.info('HTTP Request: %s %s "%s %d %s"', request.method, request.url, ...)
+
+    문자열만 검사하면 이게 그대로 통과한다 — 실서버에서 정확히 그렇게 새고
+    있었다(2026-07-27, 필터를 넣고도 키가 12번 찍혔다). 그렇다고 전부
+    `str()` 로 바꾸면 `%d` 인자가 깨지므로, **시크릿이 실제로 들어 있을 때만**
+    문자열로 치환한다.
+    """
+    if isinstance(a, str):
+        return scrub(a) if "=" in a else a
+    try:
+        s = str(a)
+    except Exception:  # noqa: BLE001 - __str__ 이 터져도 로깅을 막지 않는다
+        return a
+    if "=" not in s:
+        return a
+    masked = scrub(s)
+    return masked if masked != s else a
+
+
 class SecretFilter(logging.Filter):
     """레코드의 메시지와 인자에서 시크릿 쿼리값을 지운다."""
 
@@ -34,11 +58,9 @@ class SecretFilter(logging.Filter):
             record.msg = scrub(record.msg)
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: scrub(v) if isinstance(v, str) else v
-                               for k, v in record.args.items()}
+                record.args = {k: _scrub_arg(v) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
-                record.args = tuple(scrub(a) if isinstance(a, str) else a
-                                    for a in record.args)
+                record.args = tuple(_scrub_arg(a) for a in record.args)
         return True
 
 

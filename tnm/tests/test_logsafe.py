@@ -62,6 +62,53 @@ def test_filter_scrubs_args_not_just_message():
     assert "crtfc_key=***" in r.getMessage()
 
 
+class _UrlLike:
+    """httpx.URL 흉내 — 문자열이 아니지만 str() 하면 키가 들어 있다."""
+
+    def __init__(self, s):
+        self._s = s
+
+    def __str__(self):
+        return self._s
+
+
+def test_filter_scrubs_non_string_args():
+    """httpx 는 URL 을 **객체**로 넘긴다 — 문자열만 보면 그대로 샌다.
+
+    실서버 회귀(2026-07-27): 필터를 넣고 배포했는데도 키가 12번 찍혔다.
+    isinstance(a, str) 검사에서 httpx.URL 객체가 통과했기 때문이다.
+    """
+    r = _record('HTTP Request: %s %s "%s"',
+                ("GET", _UrlLike("https://x/api?crtfc_key=LEAKED&page=2"), "200 OK"))
+    logsafe.SecretFilter().filter(r)
+    msg = r.getMessage()
+    assert "LEAKED" not in msg
+    assert "crtfc_key=***" in msg and "page=2" in msg
+
+
+def test_numeric_args_survive_formatting():
+    """전부 str() 로 바꾸면 %d 가 깨진다 — 시크릿이 있을 때만 치환한다."""
+    r = _record("%s took %d ms", ("GET", 42))
+    logsafe.SecretFilter().filter(r)
+    assert r.getMessage() == "GET took 42 ms"
+
+
+def test_object_without_secret_is_left_alone():
+    obj = _UrlLike("https://x/api?page=2")
+    r = _record("%s", (obj,))
+    logsafe.SecretFilter().filter(r)
+    assert r.args[0] is obj          # 바꾸지 않는다
+
+
+def test_broken_str_does_not_break_logging():
+    class _Boom:
+        def __str__(self):
+            raise RuntimeError("nope")
+
+    r = _record("%r", (_Boom(),))
+    assert logsafe.SecretFilter().filter(r) is True
+
+
 def test_filter_handles_dict_args():
     # LogRecord 는 1-튜플 안의 Mapping 을 풀어 args 로 삼는다 — 그 형태로 넘긴다
     r = _record("%(url)s", ({"url": "http://x?token=SECRET"},))
