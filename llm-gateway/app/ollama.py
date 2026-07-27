@@ -187,8 +187,12 @@ class OllamaClient:
             duration_ms=round(total / 1_000_000) if total else None,
         )
 
-    async def tags(self, timeout: int = 5) -> list[str]:
-        """보유 모델 목록. 실패 시 BackendError."""
+    async def tags_detailed(self, timeout: int = 5) -> list[dict]:
+        """보유 모델 상세. /api/tags 는 이름 말고도 크기·양자화를 준다.
+
+        디스크 크기를 알면 "모델 크기 20GB 로 가정" 이라는 위험한 기본값을 쓸
+        일이 줄고, 대시보드에서 무엇이 맥 디스크를 먹는지 보여줄 수 있다.
+        """
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 res = await client.get(f"{self.base_url}/api/tags")
@@ -196,6 +200,51 @@ class OllamaClient:
                 data = res.json()
         except httpx.HTTPError as exc:
             raise BackendError(f"{type(exc).__name__}: {exc}") from exc
-        return sorted(
-            m["name"] for m in (data.get("models") or []) if m.get("name")
-        )
+        out = []
+        for m in data.get("models") or []:
+            name = m.get("name")
+            if not name:
+                continue
+            details = m.get("details") or {}
+            size = m.get("size")
+            out.append({
+                "name": name,
+                "size_bytes": size,
+                "size_gb": round(size / 1_000_000_000, 2) if size else None,
+                "parameter_size": details.get("parameter_size"),
+                "quantization": details.get("quantization_level"),
+                "family": details.get("family"),
+                "modified_at": m.get("modified_at"),
+            })
+        return sorted(out, key=lambda d: d["name"])
+
+    async def tags(self, timeout: int = 5) -> list[str]:
+        """보유 모델 이름 목록. 실패 시 BackendError."""
+        return [m["name"] for m in await self.tags_detailed(timeout=timeout)]
+
+    async def delete(self, model: str, *, timeout: int = 30) -> bool:
+        """맥에서 모델을 지운다. 이미 없으면(404) 성공으로 본다(멱등).
+
+        반환값은 "실제로 지웠는가" — 404 였으면 False 지만 예외는 아니다.
+        """
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                res = await client.request(
+                    "DELETE", f"{self.base_url}/api/delete", json={"model": model}
+                )
+            if res.status_code == 404:
+                return False
+            if res.status_code >= 500:
+                raise BackendError(f"백엔드 오류 HTTP {res.status_code}", retryable=True)
+            if res.status_code >= 400:
+                raise BackendError(
+                    f"삭제 거부 HTTP {res.status_code}: {res.text[:200]}",
+                    retryable=False,
+                )
+        except httpx.TimeoutException as exc:
+            raise BackendError(f"삭제 타임아웃: {exc}", retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise BackendError(
+                f"삭제 연결 실패: {type(exc).__name__}: {exc}", retryable=True
+            ) from exc
+        return True
