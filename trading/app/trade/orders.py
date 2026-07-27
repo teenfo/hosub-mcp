@@ -136,6 +136,9 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
         status, detail = "sent", json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # noqa: BLE001
         status, detail, result = "error", str(e), {"error": str(e)}
+    # 시장가 청산이라 실제 체결가는 exit_px(손절선·목표가)와 다르다. 주문번호를
+    # 남겨 두면 실시간 체결 수신 시 손익이 실측으로 정정된다.
+    exit_ord_no = str(result.get("ord_no") or "") if isinstance(result, dict) else ""
     with _conn() as conn:
         conn.execute(
             f"INSERT INTO orders ({_ENTRY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -147,7 +150,7 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
         )
         _audit(conn, order_id, f"exit_{reason}", detail)
     if status == "sent":
-        ledger.close_position(pos["id"], float(exit_px), reason)
+        ledger.close_position(pos["id"], float(exit_px), reason, ord_no=exit_ord_no)
     return {"ok": status == "sent", "status": status, "result": result}
 
 

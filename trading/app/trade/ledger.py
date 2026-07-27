@@ -8,6 +8,7 @@
 손익은 백테스터와 동일하게 '신호 종목의 역방향 수익률'로 근사 — 일관성 유지).
 장중 30초 주기로 손절/목표 터치를 확인하고, 장 마감에 미청산분을 종가로 정리한다.
 """
+import logging
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from .. import settings
 from ..data import store
 
 KST = ZoneInfo("Asia/Seoul")
+log = logging.getLogger(__name__)
 DB_PATH = Path(settings.DATA_DIR) / "trading.db"
 
 
@@ -36,7 +38,12 @@ def _conn() -> sqlite3.Connection:
     )
     # 기존 DB(구버전) 호환: 없는 컬럼만 추가
     for col, ddl in (("ord_no", "TEXT"), ("exec_symbol", "TEXT"),
-                     ("fill_confirmed", "INTEGER DEFAULT 0")):
+                     ("fill_confirmed", "INTEGER DEFAULT 0"),
+                     # 청산 주문번호와 실측 반영 여부 — 시장가 청산의 실체결가를
+                     # 되받아 손익을 정정하기 위해 필요하다(이론가로 남기지 않는다).
+                     ("exit_ord_no", "TEXT"),
+                     ("exit_fill_confirmed", "INTEGER DEFAULT 0"),
+                     ("model_exit", "REAL")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -103,6 +110,27 @@ def record_fill(fill: dict) -> bool:
                 (float(price), int(qty) or row["qty"], round(slip, 4), row["id"]),
             )
             updated = True
+        elif ord_no and price > 0:
+            # 청산 체결 — 이론가로 적어 둔 손익을 실체결가로 정정한다.
+            # (진입과 주문번호가 다르고 이미 status='closed' 라 위 조회에 걸리지 않는다)
+            ex = conn.execute(
+                "SELECT * FROM positions WHERE exit_ord_no=? AND status='closed'",
+                (ord_no,)
+            ).fetchone()
+            if ex and float(price) != (ex["exit"] or 0):
+                net = _net_pnl_pct(ex["side"], ex["entry"], float(price))
+                conn.execute(
+                    "UPDATE positions SET exit=?, pnl_pct=?, pnl_krw=?, "
+                    "exit_fill_confirmed=1 WHERE id=?",
+                    (round(float(price), 2), round(net, 4),
+                     round(ex["qty"] * ex["entry"] * net / 100, 1), ex["id"]),
+                )
+                log.info("청산 실체결 반영 %s: %s → %s (%+.2f%%)", ex["symbol"],
+                         ex["exit"], price, net)
+                updated = True
+            elif ex:
+                conn.execute(
+                    "UPDATE positions SET exit_fill_confirmed=1 WHERE id=?", (ex["id"],))
         conn.execute(
             "INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
             (datetime.now(KST).isoformat(timespec="seconds"), ord_no,
@@ -161,25 +189,53 @@ def open_position(order: dict, fill: float | None = None,
         )
 
 
-def _close(conn: sqlite3.Connection, row: sqlite3.Row, exit_px: float, reason: str) -> None:
+def _close(conn: sqlite3.Connection, row: sqlite3.Row, exit_px: float, reason: str,
+           *, ord_no: str | None = None, confirmed: bool = False,
+           model_exit: float | None = None) -> None:
     net = _net_pnl_pct(row["side"], row["entry"], exit_px)
     pnl_krw = row["qty"] * row["entry"] * net / 100
     conn.execute(
         "UPDATE positions SET closed=?, exit=?, exit_reason=?, pnl_pct=?, pnl_krw=?, "
-        "status='closed' WHERE id=?",
+        "status='closed', exit_ord_no=?, exit_fill_confirmed=?, model_exit=? "
+        "WHERE id=?",
         (datetime.now(KST).isoformat(timespec="seconds"), round(exit_px, 2), reason,
-         round(net, 4), round(pnl_krw, 1), row["id"]),
+         round(net, 4), round(pnl_krw, 1), ord_no or row["exit_ord_no"],
+         1 if confirmed else 0,
+         round(float(model_exit if model_exit is not None else exit_px), 2), row["id"]),
     )
 
 
-def close_position(pos_id: str, exit_px: float, reason: str = "manual") -> bool:
+def fill_price_of(ord_no: str) -> float | None:
+    """이미 도착한 체결 중 그 주문번호의 체결가(없으면 None).
+    실시간 체결이 청산 기록보다 먼저 올 수 있어, 닫을 때 한 번 확인한다."""
+    if not ord_no:
+        return None
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT price FROM exec_fills WHERE ord_no=? AND price>0 "
+            "ORDER BY ts DESC LIMIT 1", (ord_no,)
+        ).fetchone()
+    return float(row["price"]) if row else None
+
+
+def close_position(pos_id: str, exit_px: float, reason: str = "manual",
+                   ord_no: str | None = None) -> bool:
+    """포지션을 청산 기록한다.
+
+    exit_px 는 '이론가'(손절선·목표가·종가)다. 시장가 청산의 실제 체결가가 이미
+    들어와 있으면 그 값으로 대체하고, 아직이면 나중에 record_fill 이 정정한다.
+    이 구분이 없으면 급락장에서 stop 가격으로 팔린 것처럼 기록돼 실현손익이
+    실제보다 좋게 남는다 — 그 숫자를 가드·성과·일지가 그대로 쓴다.
+    """
+    filled = fill_price_of(ord_no) if ord_no else None
     with _conn() as conn:
         row = conn.execute(
             "SELECT * FROM positions WHERE id=? AND status='open'", (pos_id,)
         ).fetchone()
         if not row:
             return False
-        _close(conn, row, exit_px, reason)
+        _close(conn, row, filled if filled else exit_px, reason, ord_no=ord_no,
+               confirmed=filled is not None, model_exit=exit_px)
     return True
 
 
@@ -204,10 +260,39 @@ def monitor(price_of) -> int:
     return closed
 
 
-def due_exits(price_of) -> list[dict]:
-    """손절/목표에 닿은 오픈 포지션 목록(청산 대상). 실제 청산·기록은 호출자가.
-    이미 청산 승인 대기(exit_pending)인 포지션은 제외한다. 포지션을 변경하지 않는다."""
+def max_hold_min(rule: str) -> int:
+    """그 규칙의 최대 보유 시간(분). 0 이면 시간 손절 없음.
+    규칙별 설정이 전역 기본값(rules.max_hold_min)을 덮어쓴다."""
+    cfg = settings.RULES
+    r = cfg.get(rule)
+    v = r.get("max_hold_min") if isinstance(r, dict) and "max_hold_min" in r \
+        else cfg.get("max_hold_min", 0)
+    try:
+        return max(0, int(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def held_minutes(opened: str, now: datetime | None = None) -> float | None:
+    try:
+        t = datetime.fromisoformat(opened)
+    except (TypeError, ValueError):
+        return None
+    now = now or datetime.now(KST)
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=KST)
+    return (now - t).total_seconds() / 60
+
+
+def due_exits(price_of, now: datetime | None = None) -> list[dict]:
+    """손절/목표/시간초과에 걸린 오픈 포지션 목록(청산 대상).
+
+    시간 손절: 인트라데이 셋업은 첫 30분 안에 결판난다. 오래 끌수록 원래 논리는
+    사라지고 자금만 묶인다(실측: 60분 이상 보유 5건 전패 vs 8분 승리 1건).
+    실제 청산·기록은 호출자가 한다. exit_pending 인 포지션은 제외하고,
+    포지션을 변경하지 않는다."""
     out: list[dict] = []
+    now = now or datetime.now(KST)
     with _conn() as conn:
         rows = conn.execute(
             "SELECT * FROM positions WHERE status='open' "
@@ -221,9 +306,16 @@ def due_exits(price_of) -> list[dict]:
             reason = "stop" if p <= row["stop"] else ("target" if p >= row["target"] else None)
         else:
             reason = "stop" if p >= row["stop"] else ("target" if p <= row["target"] else None)
+        px = None
         if reason:
-            px = row["stop"] if reason == "stop" else row["target"]
-            out.append(dict(row) | {"reason": reason, "exit_px": float(px)})
+            px = float(row["stop"] if reason == "stop" else row["target"])
+        else:
+            limit = max_hold_min(row["rule"])
+            held = held_minutes(row["opened"], now) if limit else None
+            if limit and held is not None and held >= limit:
+                reason, px = "timeout", float(p)   # 시간 손절은 현재가로 정리
+        if reason:
+            out.append(dict(row) | {"reason": reason, "exit_px": px})
     return out
 
 
@@ -285,6 +377,14 @@ def realized_today(equity: float) -> dict:
     krw = sum((r["pnl_krw"] or 0) for r in rows)
     pct = (krw / equity * 100) if equity else 0.0
     return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows)}
+
+
+def open_symbols() -> set[str]:
+    """지금 열려 있는 포지션의 종목코드 집합 — 같은 종목 중복 진입 차단용."""
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT symbol FROM positions WHERE status='open'").fetchall()
+    return {r["symbol"] for r in rows}
 
 
 def open_count() -> int:
