@@ -161,10 +161,10 @@ async def api_watch_settings(ticker: str, payload: dict, _=Depends(require_auth)
 async def api_items(date: str | None = None, ticker: str | None = None,
                     min_score: int | None = None, status: str | None = None,
                     novelty: str | None = None, limit: int = 100,
-                    _=Depends(require_auth)):
+                    offset: int = 0, _=Depends(require_auth)):
     _require_db()
     return {"items": await db.list_items(date, ticker, min_score, status,
-                                         novelty, limit)}
+                                         novelty, limit, offset)}
 
 
 @app.get("/api/items/{analysis_id}")

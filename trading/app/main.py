@@ -536,6 +536,31 @@ async def api_backtest_report_run(_=Depends(require_auth)):
     return await reporter.run_offloaded()   # 별도 프로세스 — 루프를 막지 않는다
 
 
+@app.get("/api/research/news-impact")
+async def api_news_impact(_=Depends(require_auth)):
+    """뉴스 영향 소급 측정 최신 결과(조회성 — 주문 없음)."""
+    from .research import newsimpact
+
+    return await asyncio.to_thread(newsimpact.latest)
+
+
+_news_running = {"on": False}
+
+
+@app.post("/api/research/news-impact/run")
+async def api_news_impact_run(_=Depends(require_auth)):
+    """TNM 분석 전량 × 일봉 조인 — 무겁다. 별도 프로세스."""
+    from .backtest import offload
+
+    if _news_running["on"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    _news_running["on"] = True
+    try:
+        return await offload.run_job("news")
+    finally:
+        _news_running["on"] = False
+
+
 @app.get("/api/regime/history")
 async def api_regime_history(_=Depends(require_auth)):
     """국면 판정 이력 + 신호별 적중률(조회성 — 주문 없음).
