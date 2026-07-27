@@ -77,20 +77,43 @@ def _z(s: pd.Series) -> pd.Series:
     return (s - s.mean()) / sd
 
 
-def resid_weights(df: pd.DataFrame, target: str = TARGET) -> dict[str, float]:
-    """구간의 잔차 IC 를 가중치로. 변동성으로 설명되는 부분은 이미 빠져 있다."""
-    out: dict[str, float] = {}
+MIN_IC_DAYS = 5        # 이보다 적은 날의 IC 평균은 가중치로 쓰지 않는다
+
+
+def daily_resid_ic(df: pd.DataFrame, target: str = TARGET) -> pd.DataFrame:
+    """날짜 × 피처 잔차 IC 표 — **전 구간에 대해 딱 한 번만** 계산한다.
+
+    잔차 IC 는 날짜 안에서만 정의된다(횡단면 순위상관). 따라서 어떤 학습창의
+    가중치든 이 표의 해당 구간 평균일 뿐이다. 창마다 다시 계산하면 같은 날을
+    창 개수만큼 반복해서 재는 셈이라, 191일 × 방식 × 손절폭이면 연산이 수십만
+    회로 불어난다(첫 실서버 실행이 30분 오프로드 한도를 넘길 기세였다).
+    """
+    cols = {}
     for feat in panel_mod.IC_FEATURES:
         if feat == eventstudy.BETA_CONTROL or feat not in df.columns:
             continue
-        daily = df.groupby("date").apply(
+        cols[feat] = df.groupby("date").apply(
             eventstudy._resid_spearman, feat, target,
-            eventstudy.BETA_CONTROL, include_groups=False).dropna()
-        if len(daily) >= 5:
-            m = float(daily.mean())
+            eventstudy.BETA_CONTROL, include_groups=False)
+    return pd.DataFrame(cols).sort_index() if cols else pd.DataFrame()
+
+
+def _mean_weights(ic: pd.DataFrame) -> dict[str, float]:
+    """잔차 IC 표의 구간 평균 → 가중치. 표본이 얇은 피처는 뺀다."""
+    out: dict[str, float] = {}
+    for feat in ic.columns:
+        s = ic[feat].dropna()
+        if len(s) >= MIN_IC_DAYS:
+            m = float(s.mean())
             if np.isfinite(m):
                 out[feat] = m
     return out
+
+
+def resid_weights(df: pd.DataFrame, target: str = TARGET) -> dict[str, float]:
+    """구간의 잔차 IC 를 가중치로. 변동성으로 설명되는 부분은 이미 빠져 있다."""
+    ic = daily_resid_ic(df, target)
+    return _mean_weights(ic) if len(ic) else {}
 
 
 def _composite(g: pd.DataFrame, weights: dict[str, float]) -> pd.Series:
@@ -122,39 +145,56 @@ METHODS = ("score", "atr", "composite_is", "composite_wf", "liquid_only", "rando
 _ALL_UNIVERSE = ("random",)
 
 
-def wf_weights(df: pd.DataFrame, dates: list, i: int) -> dict[str, float] | None:
+def wf_weights(ic: pd.DataFrame, dates: list, i: int) -> dict[str, float] | None:
     """i번째 날에 쓸 walk-forward 가중치 — **직전 TRAIN_DAYS 일만** 본다.
 
     별도 함수로 뺀 이유는 테스트 때문이다. "미래를 보지 않는다"는 주장은
-    전체 데이터로 계산한 값과 그날까지 잘라낸 데이터로 계산한 값이 **같다**는
-    것으로만 증명된다(test_ranking.py). 루프 안에 인라인돼 있으면 그 비교를
-    할 수 없다.
+    창 밖(당일 이후)의 값을 아무리 흔들어도 결과가 **변하지 않는다**는 것으로만
+    증명된다(test_ranking.py). 루프 안에 인라인돼 있으면 그 비교를 할 수 없다.
     """
     if i < TRAIN_DAYS:
         return None                      # 학습창 미달 — 평가에서 제외한다
-    return resid_weights(df[df["date"].isin(dates[i - TRAIN_DAYS:i])])
+    return _mean_weights(ic.loc[ic.index.isin(dates[i - TRAIN_DAYS:i])])
+
+
+def prepare(df: pd.DataFrame) -> dict:
+    """방식·손절폭 전부가 공유하는 사전 계산 — 날짜별 묶음과 가중치.
+
+    24개 조합(방식 6 × 손절폭 4)이 같은 날짜 필터와 같은 잔차 IC 를 다시
+    계산하는 것을 막는다. 손절폭은 **랭킹에 영향을 주지 않으므로**(브래킷
+    판정에만 쓰인다) 가중치는 손절폭과 무관하게 한 번만 구하면 된다.
+    """
+    dates = sorted(df["date"].unique())
+    groups = {d: g for d, g in df.groupby("date")}
+    ic = daily_resid_ic(df)
+    return {
+        "dates": dates,
+        "groups": groups,
+        "liquid": {d: g[g["liquid"] == 1] for d, g in groups.items()},
+        "is_w": _mean_weights(ic) if len(ic) else {},
+        "wf": {i: wf_weights(ic, dates, i) for i in range(len(dates))} if len(ic) else {},
+    }
 
 
 def evaluate(df: pd.DataFrame, method: str, stop_pct: float, target_r: float,
-             cost_pct: float, top_n: int = TOP_N) -> dict:
+             cost_pct: float, top_n: int = TOP_N, ctx: dict | None = None) -> dict:
     """방식 × 손절폭 → 성적. 날짜별 상위 N 을 뽑아 브래킷 R 을 낸다."""
     rng = np.random.default_rng(SEED)
-    is_w = resid_weights(df) if method == "composite_is" else None
-    dates = sorted(df["date"].unique())
+    ctx = ctx or prepare(df)
+    dates = ctx["dates"]
     rs: list[float] = []
     used_days = 0
     for i, day in enumerate(dates):
-        g = df[df["date"] == day]
-        if method not in _ALL_UNIVERSE:
-            g = g[g["liquid"] == 1]          # 실제로 살 수 있는 종목만
+        # 실제로 살 수 있는 종목만 — random 대조군만 전 종목에서 뽑는다
+        g = ctx["groups"][day] if method in _ALL_UNIVERSE else ctx["liquid"][day]
         if len(g) < top_n:
             continue
         if method == "composite_wf":
-            w = wf_weights(df, dates, i)
+            w = ctx["wf"].get(i)
             if not w:
                 continue                     # 학습창 미달 또는 가중치 미성립
         else:
-            w = is_w
+            w = ctx["is_w"]
         picks = g.loc[rank_series(g, method, w, rng).nlargest(top_n).index]
         used_days += 1
         for r in picks.itertuples():
@@ -188,7 +228,8 @@ CAVEATS = [
 
 def analyze(df: pd.DataFrame, stops: list[float], target_r: float,
             cost_pct: float, top_n: int = TOP_N) -> dict:
-    rows = [evaluate(df, m, s, target_r, cost_pct, top_n)
+    ctx = prepare(df)                        # 24개 조합이 공유 — 한 번만 계산한다
+    rows = [evaluate(df, m, s, target_r, cost_pct, top_n, ctx)
             for m in METHODS for s in stops]
     ok = [r for r in rows if r.get("reliable")]
     best = max(ok, key=lambda r: r["avg_r"], default=None)

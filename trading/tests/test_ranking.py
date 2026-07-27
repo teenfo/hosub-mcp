@@ -92,18 +92,34 @@ def _panel(n_days=30, n_sym=24, seed=5, flip_after=None):
 
 # --- ② walk-forward 가 미래를 보지 않는다 ---
 
+def test_daily_ic_is_computed_per_day_only(monkeypatch):
+    """어떤 날의 잔차 IC 도 다른 날 데이터에 흔들리지 않아야 한다.
+
+    잔차 IC 는 날짜 안의 횡단면 순위상관이다. 이 독립성이 성립해야 학습창
+    가중치를 '표의 구간 평균' 으로 계산하는 최적화가 원래 정의와 같아진다.
+    """
+    df = _panel(n_days=20)
+    dates = sorted(df["date"].unique())
+    base = ranking.daily_resid_ic(df)
+    tampered = df.copy()
+    other = tampered["date"] != dates[7]
+    for col in ("fwd_up_1", "fwd_dn_1", "fwd_1", "vol_ratio20"):
+        tampered.loc[other, col] *= -7.0
+    after = ranking.daily_resid_ic(tampered)
+    pd.testing.assert_series_equal(base.loc[dates[7]], after.loc[dates[7]])
+
+
 def test_wf_weights_ignore_future(monkeypatch):
-    """미래를 크게 왜곡해도 그날 가중치는 변하지 않아야 한다."""
+    """학습창 밖(당일 이후)을 크게 왜곡해도 그날 가중치는 변하지 않아야 한다."""
     monkeypatch.setattr(ranking, "TRAIN_DAYS", 10)
     df = _panel(n_days=30)
     dates = sorted(df["date"].unique())
-    base = ranking.wf_weights(df, dates, 15)
+    ic = ranking.daily_resid_ic(df)
+    base = ranking.wf_weights(ic, dates, 15)
     assert base, "가중치가 서지 않으면 판별이 무의미하다"
 
-    tampered = df.copy()
-    future = tampered["date"] >= dates[15]
-    for col in ("fwd_up_1", "fwd_dn_1", "fwd_1", "vol_ratio20"):
-        tampered.loc[future, col] *= -7.0
+    tampered = ic.copy()
+    tampered.loc[tampered.index >= dates[15]] *= -7.0
     assert ranking.wf_weights(tampered, dates, 15) == base
 
 
@@ -112,16 +128,18 @@ def test_wf_weights_match_truncated_history(monkeypatch):
     monkeypatch.setattr(ranking, "TRAIN_DAYS", 10)
     df = _panel(n_days=30, flip_after=20)
     dates = sorted(df["date"].unique())
-    truncated = df[df["date"] < dates[15]]
-    assert ranking.wf_weights(df, dates, 15) == ranking.wf_weights(truncated, dates, 15)
+    full = ranking.wf_weights(ranking.daily_resid_ic(df), dates, 15)
+    cut = df[df["date"] < dates[15]]
+    assert full == ranking.wf_weights(ranking.daily_resid_ic(cut), dates, 15)
 
 
 def test_wf_weights_none_before_training_window(monkeypatch):
     monkeypatch.setattr(ranking, "TRAIN_DAYS", 10)
     df = _panel(n_days=20)
     dates = sorted(df["date"].unique())
-    assert ranking.wf_weights(df, dates, 9) is None
-    assert ranking.wf_weights(df, dates, 10) is not None
+    ic = ranking.daily_resid_ic(df)
+    assert ranking.wf_weights(ic, dates, 9) is None
+    assert ranking.wf_weights(ic, dates, 10) is not None
 
 
 def test_wf_skips_days_without_training_window(monkeypatch):
@@ -142,6 +160,27 @@ def test_wf_unreliable_when_too_few_eval_days(monkeypatch):
     out = ranking.evaluate(_panel(n_days=15), "composite_wf", 2.0, 1.5, 0.28, top_n=3)
     assert out["reliable"] is False
     assert "avg_r" not in out
+
+
+def test_wf_weights_equal_recomputing_the_window(monkeypatch):
+    """최적화(표 1회 계산)가 원래 정의(창마다 재계산)와 같은 값을 내야 한다."""
+    monkeypatch.setattr(ranking, "TRAIN_DAYS", 10)
+    df = _panel(n_days=30)
+    dates = sorted(df["date"].unique())
+    fast = ranking.wf_weights(ranking.daily_resid_ic(df), dates, 22)
+    slow = ranking.resid_weights(df[df["date"].isin(dates[12:22])])
+    assert fast == slow
+
+
+def test_prepare_shares_work_without_changing_results(monkeypatch):
+    """사전 계산을 넘겨도 성적이 달라지면 안 된다 — 속도 최적화의 전제."""
+    monkeypatch.setattr(ranking, "TRAIN_DAYS", 10)
+    monkeypatch.setattr(ranking, "MIN_EVAL_DAYS", 5)
+    df = _panel(n_days=30)
+    ctx = ranking.prepare(df)
+    for m in ("score", "composite_is", "composite_wf", "random"):
+        assert (ranking.evaluate(df, m, 2.0, 1.5, 0.28, top_n=3)
+                == ranking.evaluate(df, m, 2.0, 1.5, 0.28, top_n=3, ctx=ctx))
 
 
 def test_resid_weights_skip_control_feature():
