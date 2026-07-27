@@ -9,7 +9,6 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-import pandas as pd
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
@@ -259,16 +258,11 @@ async def api_bars(symbol: str, tf: str = "1m", live: int = 0,
             pass
     df = store.load_bars(symbol, tf, limit=5000 if tf == "1m" else 500)
     if tf == "1m" and not df.empty:
-        days = df.index.normalize()
-        want = None
-        if date:
-            try:
-                want = pd.Timestamp(date).normalize()
-            except (TypeError, ValueError):
-                want = None
-        if want is None:
-            want = days.max()                 # 최근 거래일(오늘)
-        df = df[days == want]
+        # 날짜 문자열로 비교한다 — 인덱스 tz(aware/naive) 차이에 영향받지 않고
+        # /dates 응답(str(d.date()))과 정확히 같은 키를 쓴다.
+        days = [str(d.date()) for d in df.index]
+        want = date if (date and date in days) else max(days)
+        df = df[[d == want for d in days]]
     bars = [] if df.empty else [
         {"time": int(ts.timestamp()), "open": r.open, "high": r.high,
          "low": r.low, "close": r.close, "volume": int(r.volume)}
