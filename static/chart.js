@@ -51,6 +51,9 @@ function niceStep(range, ticks) {
   return step * mag;
 }
 
+const EXIT_KO = { stop: "손절", target: "목표", eod: "마감정리",
+                  timeout: "시간초과", manual: "수동" };
+
 export function createProChart(host, opts = {}) {
   const UP = opts.up || "#d64545";
   const DOWN = opts.down || "#3a6fd8";
@@ -71,6 +74,10 @@ export function createProChart(host, opts = {}) {
   let ma = {};          // {5:[...],20:[...],60:[...],120:[...]}
   let bb = null;        // {mid,up,lo}
   let showBB = false;
+  // 체결 오버레이 — marks: 진입▲/청산▼ 지점(실제 거래된 가격),
+  // levels: 보유 중 포지션의 손절·목표 수평선. 미설정이면 아무것도 그리지 않는다.
+  let marks = [];
+  let levels = [];
   let i0 = 0, i1 = 0;   // 보이는 구간 [i0, i1)
   let cursor = null;    // {x,y}
   let raf = 0;
@@ -131,6 +138,22 @@ export function createProChart(host, opts = {}) {
   function setIndicator(name, on) {
     if (name === "bb") showBB = !!on;
     schedule();
+  }
+
+  function setMarkers(data) {
+    marks = Array.isArray(data && data.marks) ? data.marks.slice() : [];
+    levels = Array.isArray(data && data.levels) ? data.levels.slice() : [];
+    schedule();
+  }
+
+  /** 체결 시각에 해당하는 봉 인덱스(같거나 직전 봉). 없으면 -1. */
+  function barIndexAt(t) {
+    let lo = 0, hi = bars.length - 1, best = -1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (bars[m].time <= t) { best = m; lo = m + 1; } else hi = m - 1;
+    }
+    return best;
   }
 
   function schedule() {
@@ -241,6 +264,43 @@ export function createProChart(host, opts = {}) {
     }
     g.lineWidth = 1;
 
+    // --- 보유 중 손절·목표선 ---
+    for (const lv of levels) {
+      const y = yOf(lv.price);
+      if (!(y >= TPAD && y <= TPAD + priceH)) continue;
+      const col = lv.kind === "target" ? UP : DOWN;
+      g.strokeStyle = col; g.setLineDash([5, 4]); g.lineWidth = 1;
+      g.beginPath(); g.moveTo(LPAD, y); g.lineTo(LPAD + plotW, y); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = col;
+      g.fillText((lv.kind === "target" ? "목표 " : "손절 ") + fmt(lv.price), LPAD + 4, y - 4);
+    }
+
+    // --- 체결 지점(진입 ▲ / 청산 ▼) + 실제 거래된 가격 ---
+    for (const mk of marks) {
+      const idx = barIndexAt(mk.time);
+      if (idx < i0 || idx >= i1) continue;         // 보이는 구간 밖
+      const x = xOf(idx), y = yOf(mk.price);
+      if (!(y >= TPAD - 6 && y <= TPAD + priceH + 6)) continue;
+      const entry = mk.kind === "entry";
+      // 진입은 보라(방향과 무관한 '내 행동'), 청산은 손익 색(한국식: 이익 빨강)
+      const col = entry ? "#7a5cff" : ((mk.pnl_pct || 0) >= 0 ? UP : DOWN);
+      const s2 = 5;
+      g.fillStyle = g.strokeStyle = col;
+      g.beginPath();
+      if (entry) { g.moveTo(x, y); g.lineTo(x - s2, y + s2 * 2); g.lineTo(x + s2, y + s2 * 2); }
+      else { g.moveTo(x, y); g.lineTo(x - s2, y - s2 * 2); g.lineTo(x + s2, y - s2 * 2); }
+      g.closePath(); g.fill();
+      // 체결가 눈금 — 삼각형 꼭짓점이 정확히 그 가격
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(x - 10, y); g.lineTo(x + 10, y); g.stroke();
+      // 가격 라벨(겹침 방지로 진입은 아래, 청산은 위)
+      const txt = fmt(mk.price) + (mk.confirmed ? "" : "~");
+      const tw = g.measureText(txt).width;
+      const tx = Math.max(LPAD + 2, Math.min(LPAD + plotW - tw - 2, x - tw / 2));
+      g.fillText(txt, tx, entry ? y + s2 * 2 + 11 : y - s2 * 2 - 4);
+    }
+
     // 거래량 구분선
     g.strokeStyle = grid; g.beginPath(); g.moveTo(LPAD, volTop - 4); g.lineTo(LPAD + plotW, volTop - 4); g.stroke();
     g.fillStyle = axis; g.fillText("거래량 " + fmt(vmax), LPAD + plotW + 6, volTop + 8);
@@ -289,6 +349,17 @@ export function createProChart(host, opts = {}) {
       [`${chg >= 0 ? "▲" : "▼"} ${fmt2(Math.abs(chg))}%  거래량 ${fmt(b.volume)}`, col],
     ];
     for (const d of MA_DEFS) { const v = ma[d.p][idx]; if (v != null) lines.push([`MA${d.p} ${fmt(v)}`, d.color]); }
+    // 이 봉에서 체결이 있었으면 함께 보여준다
+    for (const mk of marks) {
+      if (barIndexAt(mk.time) !== idx) continue;
+      if (mk.kind === "entry") {
+        lines.push([`▲ 매수 ${mk.qty}주 @ ${fmt(mk.price)} (${mk.rule})`, "#7a5cff"]);
+      } else {
+        const col = (mk.pnl_pct || 0) >= 0 ? UP : DOWN;
+        lines.push([`▼ ${EXIT_KO[mk.reason] || mk.reason || "청산"} @ ${fmt(mk.price)}` +
+                    ` ${fmt2(mk.pnl_pct || 0)}%`, col]);
+      }
+    }
     g.font = "11px sans-serif";
     const wBox = 176, hBox = 14 * lines.length + 8;
     g.globalAlpha = 0.85; g.fillStyle = bg; g.fillRect(6, 6, wBox, hBox); g.globalAlpha = 1;
@@ -355,7 +426,8 @@ export function createProChart(host, opts = {}) {
     host.removeChild(canvas);
   }
 
-  return { setData, update, setVisibleCount, setIndicator, redraw: schedule, destroy, MA_DEFS };
+  return { setData, update, setVisibleCount, setIndicator, setMarkers,
+           redraw: schedule, destroy, MA_DEFS };
 }
 
 export { MA_DEFS };

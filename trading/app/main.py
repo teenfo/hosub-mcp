@@ -398,6 +398,16 @@ async def api_backtest(symbol: str, tf: str = "1m", _=Depends(require_auth)):
             "tf": tf, "days": days, "stats": result.stats(), "trades": trades}
 
 
+@app.get("/api/trades/{symbol}")
+async def api_trades(symbol: str, date: str | None = None,
+                     _=Depends(require_auth)):
+    """1분봉 차트에 겹쳐 그릴 체결 지점 — 실제 매매한 가격을 차트에서 확인한다."""
+    from .trade import ledger
+
+    day = date or datetime.now(KST).date().isoformat()
+    return await asyncio.to_thread(ledger.marks_for, symbol, day)
+
+
 @app.post("/api/guard/override")
 async def api_guard_override(payload: dict, _=Depends(require_auth)):
     """일일 손실 가드 임시 해제 — 자동 매매를 유지한 채 한도만 늘린다.
