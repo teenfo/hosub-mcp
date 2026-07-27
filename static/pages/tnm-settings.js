@@ -9,6 +9,7 @@ const ORIGIN_BADGE = {
   trading: '<span class="badge text-bg-primary">감시목록</span>',
   holding: '<span class="badge text-bg-danger">보유</span>',
   manual: '<span class="badge text-bg-success">수동</span>',
+  dart: '<span class="badge text-bg-warning" title="감시목록 밖 공시에서 발굴된 종목">공시발굴</span>',
 };
 
 export default {

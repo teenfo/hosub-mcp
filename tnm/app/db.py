@@ -134,6 +134,62 @@ async def add_manual(ticker: str, name: str) -> dict:
         return _row_to_watch(await cur.fetchone())
 
 
+async def add_discovered(rows: list[dict], tier: str = "other") -> int:
+    """DART 발굴 종목을 관심종목에 등록한다(origin='dart').
+
+    `add_manual` 과 다른 점 셋:
+
+    1. **origin='dart'** — 수동 등록과 구분해야 발굴 경로의 성적을 잴 수 있다.
+       watchsync 는 origin in ('trading','holding') 만 비활성화하므로 dart 행은
+       살아남는다(사라지지 않는다는 뜻이지, trading 감시목록에 나중에 나타나면
+       origin 은 trading 으로 덮인다).
+    2. **tier 기본값이 'other'** — 기본 'trade' 로 넣으면 종목마다 30분 주기
+       RSS 폴링이 붙어 발굴할수록 호출이 선형으로 늘어난다. 발굴 종목은
+       12시간 주기로 시작하고, 승격되면 trading 쪽에서 tier 가 올라온다.
+    3. **dart_corp_code 를 넣는다** — 이게 비어 있으면 다음 사이클의 공시
+       매칭 대상(watch_by_corp_code)에 안 들어가서, 정작 발굴의 근거였던
+       공시가 수집되지 않는다. watchsync 의 fill_corp_codes 를 기다리면
+       최대 30분이 비는데 그 사이 공시는 커서를 지나가 버린다.
+
+    이미 있는 ticker 는 건드리지 않는다 — 제외 처리한 종목을 발굴이 되살리면
+    사용자 의도를 덮는 것이다.
+    """
+    if not rows:
+        return 0
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "insert into tnm_watchlist (ticker, name, origin, tier, dart_corp_code,"
+            " score_threshold, daily_alert_cap)"
+            " select * from unnest(%s::text[], %s::text[], %s::text[], %s::text[],"
+            "                      %s::text[], %s::int[], %s::int[])"
+            " on conflict (ticker) do nothing",
+            ([r["ticker"] for r in rows],
+             [r.get("name") or r["ticker"] for r in rows],
+             ["dart"] * len(rows),
+             [tier] * len(rows),
+             [r.get("corp_code") or None for r in rows],
+             [int(settings.ALERTS.get("default_threshold", 60))] * len(rows),
+             [int(settings.ALERTS.get("default_daily_cap", 5))] * len(rows)))
+        return cur.rowcount or 0
+
+
+async def count_origin(origin: str) -> int:
+    """해당 출처의 활성 관심종목 수 — 발굴 상한 판정에 쓴다."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select count(*) from tnm_watchlist"
+            " where origin = %s and is_active and not is_excluded", (origin,))
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
+
+
+async def known_tickers() -> set[str]:
+    """이미 등록된 ticker 전부(제외·비활성 포함) — 발굴이 되살리지 않게."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute("select ticker from tnm_watchlist")
+        return {r[0] for r in await cur.fetchall()}
+
+
 async def set_excluded(ticker: str, excluded: bool) -> bool:
     """제외/복원. 제외하면 비활성화까지 — 동기화가 되살리지 않는다."""
     async with _pool.connection() as conn:

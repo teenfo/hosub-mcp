@@ -41,7 +41,7 @@ def test_parse_market_payload_keeps_corp_code():
     pairs, cursor = dart.parse_market_payload(
         _payload([_item("20260727000001", corp_code="AAA"),
                   _item("20260727000002", corp_code="BBB")]), None)
-    assert [c for c, _ in pairs] == ["AAA", "BBB"]
+    assert [c for c, _, _ in pairs] == ["AAA", "BBB"]
     assert cursor == "20260727000002"
     assert pairs[0][1].url.endswith("20260727000001")
 
@@ -154,7 +154,7 @@ def test_fetch_market_keeps_out_of_order_rcept_no(monkeypatch):
     monkeypatch.setattr(dart.httpx, "AsyncClient", lambda **k: FakeClient())
     monkeypatch.setattr(settings, "DART_API_KEY", "K")
     pairs, cursor, _ = asyncio.run(dart.fetch_market(None))
-    assert [c for c, _ in pairs] == ["AAA", "BBB", "CCC"]     # 하나도 잃지 않는다
+    assert [c for c, _, _ in pairs] == ["AAA", "BBB", "CCC"]  # 하나도 잃지 않는다
     assert cursor == "20260727900635"                         # 커서는 최대값
 
 
