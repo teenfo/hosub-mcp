@@ -26,6 +26,35 @@ class GenerateResult:
     response: str
     eval_count: int | None
     duration_ms: int | None
+    # 성능 비교용 세부 지표(ns). Ollama 가 주는데 지금까지 버리고 있었다.
+    # 전부 기본값이 있어 가짜 백엔드는 안 채워도 된다.
+    #
+    # 정직한 속도 지표는 eval_count / eval_duration (tok/s) 이다 —
+    # total_duration 만 보면 "콜드 32b vs 웜 7b" 비교가 무의미해진다.
+    # load_duration 은 따로 표기해 콜드/웜을 라벨링한다.
+    load_duration: int | None = None
+    prompt_eval_count: int | None = None
+    prompt_eval_duration: int | None = None
+    eval_duration: int | None = None
+
+    def metrics(self) -> dict:
+        tps = None
+        if self.eval_count and self.eval_duration:
+            tps = round(self.eval_count / (self.eval_duration / 1e9), 2)
+        return {
+            "eval_count": self.eval_count,
+            "eval_duration_ms": (round(self.eval_duration / 1e6)
+                                 if self.eval_duration else None),
+            "load_duration_ms": (round(self.load_duration / 1e6)
+                                 if self.load_duration else None),
+            "prompt_eval_count": self.prompt_eval_count,
+            "prompt_eval_duration_ms": (round(self.prompt_eval_duration / 1e6)
+                                        if self.prompt_eval_duration else None),
+            "total_duration_ms": self.duration_ms,
+            "tokens_per_sec": tps,
+            # 100ms 넘게 로딩했으면 모델이 메모리에 없었다는 뜻
+            "cold": bool(self.load_duration and self.load_duration > 100_000_000),
+        }
 
 
 @dataclass
@@ -49,12 +78,16 @@ class OllamaClient:
         options: dict | None = None,
         timeout: int = 180,
         client: httpx.AsyncClient | None = None,
+        keep_alive: str | None = None,
     ) -> GenerateResult:
+        # keep_alive 기본값은 10분이다. A/B 비교처럼 큰 모델 둘을 잇달아 부르는
+        # 경우엔 짧게 줘야 한다 — 21GB 두 개를 10분 붙잡아 두면 그동안 맥 전체가
+        # 느려진다.
         payload: dict = {
             "model": model,
             "prompt": prompt,
             "stream": False,
-            "keep_alive": self.keep_alive,
+            "keep_alive": keep_alive or self.keep_alive,
         }
         if system:
             payload["system"] = system
@@ -88,6 +121,10 @@ class OllamaClient:
             response=data.get("response") or "",
             eval_count=data.get("eval_count"),
             duration_ms=round(total / 1_000_000) if total else None,
+            load_duration=data.get("load_duration"),
+            prompt_eval_count=data.get("prompt_eval_count"),
+            prompt_eval_duration=data.get("prompt_eval_duration"),
+            eval_duration=data.get("eval_duration"),
         )
 
     async def pull(

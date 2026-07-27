@@ -45,6 +45,11 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 **응답 형태는 항상 같다** — `status` 가 `ok` | `pending` | `failed` 이고 `job_id` 는 언제나
 포함된다. 동기/비동기를 구분해 분기할 필요가 없다.
 
+> **역할 이름이 계약이고 모델은 정책이다.** 역할의 모델은 운영자가 런타임에 바꿀 수
+> 있으므로 소비자는 모델 이름을 하드코딩하지 말아야 한다 —
+> [`docs/integration.md` 6-1절](docs/integration.md)에 소비자용으로 정리해 두었고,
+> 그 문서는 `GET /v1/integration` 으로 서빙되므로 고치면 자동 전파된다.
+
 ## API
 
 | 엔드포인트 | 설명 |
@@ -73,6 +78,8 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `DELETE /v1/admin/models?model=` | 맥에서 모델 삭제 (차단 사유가 있으면 409) |
 | `POST /v1/admin/models/install` | 설치 지시 — `{"model": "qwen3:4b"}` |
 | `GET /v1/admin/catalog?q=` | 내장 카탈로그 검색 |
+| `POST /v1/admin/compare` | 모델 A/B — `{"prompt":…, "models":["a","b"]}` |
+| `GET /v1/admin/compare[/{id}]` | 비교 결과·이력 |
 | `GET /v1/admin/audit` | 관리 작업 감사 로그 |
 
 ## 역할 모델을 재배포 없이 바꾼다
@@ -154,6 +161,22 @@ Slack 을 울리고, `rejected` 로 바꾸면 이후 잡이 "설치가 거부됨
 
 `config/catalog.yaml` 은 `git pull` 만으로 갱신된다 — compose 가 `config/` 를
 `:ro` 로 바인드하므로 이미지 재빌드가 필요 없다.
+
+## 두 모델 중 뭐가 나은지 재본다
+
+대시보드 **LLM 모델 → 모델 비교**. 같은 프롬프트를 두 모델에 돌린다.
+
+- **새 실행 경로를 만들지 않았다** — 각 측이 "워밍업 1회 + 측정 1회" 의 평범한 잡이다.
+  재시도·영속성·메모리 예산 가드를 그대로 쓰고, 레인 동시성이 1이라 순차 실행된다
+- **정직한 지표는 tok/s (`eval_count / eval_duration`)** — 모델 로드를 제외한다.
+  `total_duration` 만 보면 "콜드 32b vs 웜 7b" 비교가 아무 의미가 없다.
+  로드 시간은 콜드/웜 라벨로 따로 보여 준다
+- **변수는 하나뿐** — 양쪽 동일 옵션(`temperature 0, seed 0`)·동일 `system`.
+  각 역할의 옵션을 상속하지 않는다
+- **실사용 잡을 밀지 않는다** — 우선순위 −1 + 동시 1건. TNM 분류가 A/B 뒤에서
+  기다리는 일은 없다
+- **`keep_alive` 를 30초로 줄인다** — 21GB 두 개를 기본값(10분)으로 붙잡아 두면
+  그동안 맥 전체가 느려진다
 
 ## 역할 = 모델 정책, 프롬프트 = 호출자 소유
 

@@ -64,6 +64,8 @@ class FakeOllama:
         self.fail_times = fail_times
         self.retryable = retryable
         self.calls: list[str] = []
+        self.keep_alives: list[str | None] = []
+        self.options_seen: list[dict | None] = []
         self.concurrent = 0
         self.max_concurrent = 0
         self._models = models if models is not None else ["small", "mid", "big", "bge-m3"]
@@ -80,10 +82,15 @@ class FakeOllama:
         self.deleted: list[str] = []
         self.delete_fail = False
         self.model_disk_gb: dict[str, float] = {}
+        # A/B 비교용 성능 흉내 (모델 → 나노초)
+        self.eval_ns: dict[str, int] = {}
+        self.load_ns: dict[str, int] = {}
 
     async def generate(self, *, model, prompt, system=None, options=None,
-                       timeout=180, client=None) -> GenerateResult:
+                       timeout=180, client=None, keep_alive=None) -> GenerateResult:
         self.calls.append(model)
+        self.keep_alives.append(keep_alive)
+        self.options_seen.append(options)
         self.concurrent += 1
         self.max_concurrent = max(self.max_concurrent, self.concurrent)
         try:
@@ -93,8 +100,13 @@ class FakeOllama:
             delay = self.delays.get(model, self.delay)
             if delay:
                 await asyncio.sleep(delay)
+            # 모델별로 다른 속도를 흉내내 A/B 비교 지표를 검증할 수 있게 한다
+            eval_ns = self.eval_ns.get(model, 500_000_000)
             return GenerateResult(
-                response=f"[{model}] {prompt[:20]}", eval_count=10, duration_ms=5
+                response=f"[{model}] {prompt[:20]}", eval_count=10, duration_ms=5,
+                load_duration=self.load_ns.get(model, 0),
+                prompt_eval_count=3, prompt_eval_duration=1_000_000,
+                eval_duration=eval_ns,
             )
         finally:
             self.concurrent -= 1

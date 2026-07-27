@@ -233,6 +233,25 @@ def build_app(
         if system is None:
             system = role.system
 
+        # model 지정은 **관리 전용**이다. 소비자가 역할을 우회해 임의 모델을 고르면
+        # 역할이 모델 정책이라는 계약이 무너지고, 메모리 예산 추정도 흔들린다.
+        # A/B 비교가 "모델만 다른 평범한 잡" 이 되도록 열어 둔 문이다.
+        model = role.model
+        if body.get("model"):
+            if not svc.admin:
+                return JSONResponse(
+                    {"error": "forbidden",
+                     "detail": "model 지정은 관리 서비스만 가능합니다. "
+                               "역할이 모델을 정합니다(GET /v1/roles)."},
+                    status_code=403,
+                )
+            try:
+                model = validate_model_name(body["model"])
+            except ConfigError as exc:
+                return JSONResponse(
+                    {"error": "invalid_model", "detail": str(exc)}, status_code=400
+                )
+
         try:
             wait = float(body.get("wait", DEFAULT_WAIT))
         except (TypeError, ValueError):
@@ -248,7 +267,7 @@ def build_app(
         # 런타임에 바꿀 수 있으므로, 큐에 남아 있던 잡이 "옛 모델 + 새 옵션" 으로
         # 도는 일이 없어야 한다.
         job = store.create_job(
-            service=svc.name, role=role_name, model=role.model, lane=role.lane,
+            service=svc.name, role=role_name, model=model, lane=role.lane,
             prompt=prompt, system=system, priority=priority,
             metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
             options=dict(role.options), timeout=role.timeout,
@@ -790,6 +809,151 @@ def build_app(
         return JSONResponse({"status": "approved",
                              "request": store.get_model_request(model)})
 
+    # --- A/B 비교 ---
+    #
+    # 새 실행 경로를 만들지 않는다. 각 측을 "워밍업 1회 + 측정 1회" 의 평범한 잡으로
+    # 큐에 넣으면 재시도·영속성·메모리 예산 가드를 그대로 쓴다. 자원 경합이 없어
+    # 측정도 공정하다(레인 동시성이 1이라 순차 실행된다).
+    AB_LANE = "batch"
+
+    def _ab_snapshot(run: dict) -> dict:
+        sides = {}
+        done = True
+        for side in ("a", "b"):
+            ids = (run["jobs"] or {}).get(side) or {}
+            measure = store.get_job(ids.get("measure") or "")
+            warm = store.get_job(ids.get("warmup") or "")
+            for j in (measure, warm):
+                if j is None or j["status"] not in (SUCCEEDED, "failed", "cancelled"):
+                    done = False
+            sides[side] = {
+                "model": run[f"model_{side}"],
+                "status": (measure or {}).get("status"),
+                "response": (measure or {}).get("response"),
+                "error": (measure or {}).get("error"),
+                "metrics": (measure or {}).get("metrics"),
+                "warmup_status": (warm or {}).get("status"),
+                "job_id": ids.get("measure"),
+            }
+        return {"run": {k: v for k, v in run.items() if k != "jobs"},
+                "sides": sides, "done": done}
+
+    def _ab_in_flight() -> dict | None:
+        for run in store.list_ab_runs(limit=5):
+            if run["status"] != "running":
+                continue
+            snap = _ab_snapshot(run)
+            if snap["done"]:
+                store.set_ab_run_status(run["id"], "done")
+                continue
+            return run
+        return None
+
+    async def admin_compare(request: Request):
+        svc, err = _require_admin(request)
+        if err:
+            return err
+        body = await _json_body(request)
+        prompt = body.get("prompt") or ""
+        models = body.get("models")
+        if (not isinstance(prompt, str) or not prompt.strip()
+                or not isinstance(models, list) or len(models) != 2):
+            return JSONResponse(
+                {"error": "invalid_request",
+                 "detail": "prompt 와 models[2] 가 필요합니다"},
+                status_code=400,
+            )
+        try:
+            model_a, model_b = (validate_model_name(m) for m in models)
+        except ConfigError as exc:
+            return JSONResponse(
+                {"error": "invalid_model", "detail": str(exc)}, status_code=400
+            )
+        if model_a == model_b:
+            return JSONResponse(
+                {"error": "invalid_request", "detail": "서로 다른 모델이어야 합니다"},
+                status_code=400,
+            )
+        missing = [m for m in (model_a, model_b) if not scheduler.model_ready(m)]
+        if missing:
+            return JSONResponse(
+                {"error": "not_installed", "models": missing,
+                 "detail": f"먼저 설치하세요: {', '.join(missing)}"},
+                status_code=409,
+            )
+        too_big = [m for m in (model_a, model_b)
+                   if roles.model_size_gb(m) > roles.mem_budget_gb]
+        if too_big:
+            return JSONResponse(
+                {"error": "too_large", "models": too_big}, status_code=400
+            )
+        # 동시 1건 — A/B 가 TNM classify_news 같은 실사용 잡을 밀면 안 된다
+        if (busy := _ab_in_flight()):
+            return JSONResponse(
+                {"error": "in_progress", "run_id": busy["id"],
+                 "detail": "이미 진행 중인 비교가 있습니다"},
+                status_code=409,
+            )
+
+        # 변수는 하나(모델)뿐이어야 한다 — 양쪽 동일 옵션·동일 system.
+        # 각 역할의 옵션을 상속하지 않는다.
+        opts = {"temperature": 0, "seed": 0}
+        if isinstance(body.get("options"), dict):
+            try:
+                opts.update(validate_role_fields(
+                    {"options": body["options"]})["options"])
+            except ConfigError as exc:
+                return JSONResponse(
+                    {"error": "invalid_fields", "detail": str(exc)}, status_code=400
+                )
+        system = body.get("system") or None
+        timeout = min(int(body.get("timeout") or 300), 900)
+
+        jobs: dict = {}
+        for side, model in (("a", model_a), ("b", model_b)):
+            side_jobs = {}
+            for phase in ("warmup", "measure"):
+                # 워밍업은 1토큰만 — 모델 로드 시간을 측정에서 빼기 위한 것이다
+                phase_opts = dict(opts, num_predict=1) if phase == "warmup" else opts
+                j = store.create_job(
+                    service=svc.name, role="_compare", model=model, lane=AB_LANE,
+                    prompt=prompt, system=system,
+                    priority=-1,        # 실사용 잡보다 항상 뒤
+                    metadata={"ab_side": side, "ab_phase": phase,
+                              "keep_alive": "30s"},
+                    options=phase_opts, timeout=timeout,
+                )
+                side_jobs[phase] = j["id"]
+            jobs[side] = side_jobs
+
+        run = store.create_ab_run(actor=svc.name, prompt=prompt, system=system,
+                                  options=opts, model_a=model_a, model_b=model_b,
+                                  jobs=jobs)
+        store.record_audit(actor=svc.name, action="ab_compare", target=run["id"],
+                           detail={"models": [model_a, model_b]})
+        return JSONResponse(_ab_snapshot(run), status_code=202)
+
+    async def admin_compare_get(request: Request):
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        run_id = request.path_params["run_id"]
+        run = store.get_ab_run(run_id)
+        if run is None:
+            return JSONResponse({"error": "not_found"}, status_code=404)
+        snap = _ab_snapshot(run)
+        if snap["done"] and run["status"] == "running":
+            store.set_ab_run_status(run_id, "done")
+            snap["run"]["status"] = "done"
+        return JSONResponse(snap)
+
+    async def admin_compare_list(request: Request):
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        return JSONResponse({"runs": [_ab_snapshot(r)
+                                      for r in store.list_ab_runs(limit=10)]})
+
     async def admin_audit(request: Request):
         _svc, err = _require_admin(request)
         if err:
@@ -869,6 +1033,9 @@ def build_app(
         Route("/v1/admin/models", admin_delete_model, methods=["DELETE"]),
         Route("/v1/admin/models/install", admin_install_model, methods=["POST"]),
         Route("/v1/admin/catalog", admin_catalog, methods=["GET"]),
+        Route("/v1/admin/compare", admin_compare, methods=["POST"]),
+        Route("/v1/admin/compare", admin_compare_list, methods=["GET"]),
+        Route("/v1/admin/compare/{run_id}", admin_compare_get, methods=["GET"]),
         Route("/v1/admin/audit", admin_audit, methods=["GET"]),
     ]
 

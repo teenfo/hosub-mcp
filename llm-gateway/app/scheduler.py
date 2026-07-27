@@ -447,6 +447,9 @@ class Scheduler:
         timeout = job.get("timeout_s")
         if timeout is None:
             timeout = role.timeout if role else 180
+        # A/B 비교 잡은 모델을 오래 붙잡아 두면 안 된다 — 21GB 두 개를 기본
+        # keep_alive(10분)로 잡아 두면 그동안 맥 전체가 느려진다.
+        keep_alive = (job.get("metadata") or {}).get("keep_alive")
         try:
             result = await self.client.generate(
                 model=model,
@@ -454,13 +457,16 @@ class Scheduler:
                 system=job["system"],
                 options=options,
                 timeout=timeout,
+                keep_alive=keep_alive,
             )
         except BackendError as exc:
             await self._handle_failure(job, exc)
         except Exception as exc:  # 예상 못한 오류도 잡 단위로 격리
             await self._handle_failure(job, BackendError(str(exc), retryable=False))
         else:
-            self.store.finish(job["id"], status=SUCCEEDED, response=result.response)
+            metrics = result.metrics() if hasattr(result, "metrics") else None
+            self.store.finish(job["id"], status=SUCCEEDED, response=result.response,
+                              metrics=metrics)
             self.store.record_usage(
                 service=job["service"], role=job["role"], model=model,
                 eval_count=result.eval_count,

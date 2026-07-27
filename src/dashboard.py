@@ -207,9 +207,17 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         if not prompt:
             return JSONResponse({"status": "rejected", "reason": "prompt 가 비어 있습니다."},
                                 status_code=400)
-        result = await run_in_threadpool(gateway.generate, role, prompt)
+        # system 을 그대로 넘긴다(프롬프트는 호출자 소유).
+        # ⚠️ 게이트웨이는 system 이 **None 일 때만** 역할 기본값을 쓴다 — 빈 문자열은
+        #    "시스템 프롬프트 없음" 이라는 다른 의미다. 프런트가 키를 생략하면
+        #    역할 기본값, ""를 보내면 의도적으로 비우기.
+        system = body.get("system")
+        if system is not None and not isinstance(system, str):
+            system = None
+        result = await run_in_threadpool(gateway.generate, role, prompt, system=system)
         ctx.audit.log(
-            tool="llm_generate", params={"role": role, "prompt_chars": len(prompt), "via": "dashboard"},
+            tool="llm_generate", params={"role": role, "prompt_chars": len(prompt),
+                                         "system": bool(system), "via": "dashboard"},
             risk="low", outcome=result.get("status", "error"),
             result_summary=(result.get("response") or result.get("error") or "")[:300],
         )
@@ -258,6 +266,84 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
             result_summary=str(result.get("request") or result.get("error") or "")[:300],
         )
         return JSONResponse(result)
+
+    # --- 역할 운영 (게이트웨이 /v1/admin/roles) ---
+    async def api_llm_roles(request):
+        """역할별 유효값 + roles.yaml 기본값 대비 차이 + 붙여 넣을 스니펫."""
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(gateway.list_admin_roles))
+
+    async def api_llm_role_save(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        role = (body.get("role") or "").strip()
+        fields = body.get("fields")
+        if not role or not isinstance(fields, dict) or not fields:
+            return JSONResponse(
+                {"status": "rejected", "reason": "role 과 fields 가 필요합니다."},
+                status_code=400)
+        result = await run_in_threadpool(
+            gateway.set_role_override, role, fields, note=body.get("note"))
+        ctx.audit.log(
+            tool="llm_set_role", params={"role": role, "fields": fields,
+                                         "via": "dashboard"},
+            # 새 역할 생성은 계약 추가라 등급을 올린다
+            risk="high" if result.get("role", {}).get("origin") == "db" else "medium",
+            outcome=result.get("status", "error"),
+            result_summary=str(result.get("detail") or result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
+    async def api_llm_role_revert(request):
+        """오버라이드 해제 — DB 전용 역할이면 역할 자체가 사라진다(high)."""
+        if (d := _require_auth_json(request)):
+            return d
+        role = (request.query_params.get("role") or "").strip()
+        if not role:
+            return JSONResponse({"status": "rejected", "reason": "role 이 필요합니다."},
+                                status_code=400)
+        result = await run_in_threadpool(gateway.revert_role, role)
+        ctx.audit.log(
+            tool="llm_revert_role", params={"role": role, "via": "dashboard"},
+            risk="high" if result.get("removed") else "medium",
+            outcome=result.get("status", "error"),
+            result_summary=str(result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
+    # --- 모델 A/B 비교 ---
+    async def api_llm_compare(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        prompt = (body.get("prompt") or "").strip()
+        models = body.get("models")
+        if not prompt or not isinstance(models, list) or len(models) != 2:
+            return JSONResponse(
+                {"status": "rejected", "reason": "prompt 와 모델 2개가 필요합니다."},
+                status_code=400)
+        result = await run_in_threadpool(
+            gateway.compare_models, prompt, models, system=body.get("system"))
+        ctx.audit.log(
+            tool="llm_compare", params={"models": models, "via": "dashboard"},
+            risk="low", outcome=result.get("status", "error"),
+            result_summary=str(result.get("detail") or result.get("error") or "")[:300],
+        )
+        return JSONResponse(result)
+
+    async def api_llm_compare_get(request):
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(
+            gateway.get_comparison, request.path_params["run_id"]))
 
     # --- 모델 운영 (게이트웨이 /v1/admin/*) ---
     async def api_llm_installed(request):
@@ -455,6 +541,11 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/llm/jobs/{job_id}", api_llm_job),
         Route("/api/llm/models", api_llm_models),
         Route("/api/llm/models/decide", api_llm_models_decide, methods=["POST"]),
+        Route("/api/llm/roles", api_llm_roles),
+        Route("/api/llm/roles", api_llm_role_save, methods=["POST"]),
+        Route("/api/llm/roles", api_llm_role_revert, methods=["DELETE"]),
+        Route("/api/llm/compare", api_llm_compare, methods=["POST"]),
+        Route("/api/llm/compare/{run_id}", api_llm_compare_get),
         Route("/api/llm/installed", api_llm_installed),
         Route("/api/llm/catalog", api_llm_catalog),
         Route("/api/llm/models/install", api_llm_model_install, methods=["POST"]),

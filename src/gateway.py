@@ -173,3 +173,19 @@ def search_catalog(query: str = "", kind: str | None = None, *,
     if kind:
         path += f"&kind={quote(kind, safe='')}"
     return _call("GET", path, client_factory=client_factory)
+
+
+def compare_models(prompt: str, models: list, *, system: str | None = None,
+                   options: dict | None = None, client_factory=httpx.Client) -> dict:
+    """같은 프롬프트를 두 모델에 돌려 tok/s 를 비교한다(잡 큐 경유·순차)."""
+    body: dict = {"prompt": prompt, "models": models}
+    if system:
+        body["system"] = system
+    if options:
+        body["options"] = options
+    return _call("POST", "/v1/admin/compare", json=body,
+                 client_factory=client_factory)
+
+
+def get_comparison(run_id: str, *, client_factory=httpx.Client) -> dict:
+    return _call("GET", f"/v1/admin/compare/{run_id}", client_factory=client_factory)

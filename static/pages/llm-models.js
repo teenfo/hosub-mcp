@@ -85,6 +85,39 @@ export default {
     catCol.appendChild(catCard);
     row.appendChild(catCol);
 
+    // --- A/B 비교 ---
+    const abCol = el("div", { class: "col-12" });
+    const abCard = el("div", { class: "card shadow-sm" }, [
+      el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
+        el("span", { html: '<i class="bi bi-speedometer2"></i> 모델 비교' }),
+        el("span", { class: "small text-secondary ms-auto" },
+          "같은 프롬프트를 두 모델에 돌려 tok/s 를 잰다 — 워밍업 후 측정"),
+      ]),
+    ]);
+    const abBody = el("div", { class: "card-body" });
+    const abA = el("select", { class: "form-select form-select-sm", style: "max-width:200px" });
+    const abB = el("select", { class: "form-select form-select-sm", style: "max-width:200px" });
+    const abPrompt = el("textarea", {
+      class: "form-control form-control-sm mb-2", rows: "3",
+      placeholder: "두 모델에 똑같이 보낼 프롬프트",
+    });
+    const abSystem = el("input", {
+      class: "form-control form-control-sm mb-2",
+      placeholder: "system (선택) — 양쪽 동일하게 적용됩니다",
+    });
+    const abRun = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "비교 실행");
+    const abOut = el("div", { class: "mt-3" });
+    abBody.appendChild(el("div", { class: "d-flex gap-2 align-items-center mb-2 flex-wrap" }, [
+      el("span", { class: "small text-secondary" }, "A"), abA,
+      el("span", { class: "small text-secondary" }, "B"), abB, abRun,
+    ]));
+    abBody.appendChild(abSystem);
+    abBody.appendChild(abPrompt);
+    abBody.appendChild(abOut);
+    abCard.appendChild(abBody);
+    abCol.appendChild(abCard);
+    row.appendChild(abCol);
+
     const alertBox = (tone, title, detail) =>
       el("div", { class: `alert alert-${tone} mb-0` }, [
         el("div", { class: "fw-medium" }, title),
@@ -203,6 +236,7 @@ export default {
       instBody.appendChild(el("div", { class: "small text-secondary mt-2" },
         "쓰는 역할이 남아 있으면 지울 수 없습니다 — 지워도 다음 요청에서 "
         + "곧바로 재설치 대기가 걸리기 때문입니다. 역할의 모델을 먼저 바꾸세요."));
+      fillAbSelects(list.map((m) => m.name));
     };
 
     // --- 카탈로그 ---
@@ -253,6 +287,101 @@ export default {
         ]));
       }
     };
+
+    // --- A/B 비교 실행 ---
+    const fillAbSelects = (names) => {
+      for (const [sel, def] of [[abA, 0], [abB, 1]]) {
+        const cur = sel.value;
+        sel.innerHTML = "";
+        for (const n of names) sel.appendChild(el("option", { value: n }, n));
+        if (cur && names.includes(cur)) sel.value = cur;
+        else if (names[def]) sel.value = names[def];
+      }
+    };
+
+    const sideCard = (label, s) => {
+      const m = s.metrics || {};
+      const stats = s.status === "succeeded"
+        ? [
+            m.tokens_per_sec ? `${m.tokens_per_sec} tok/s` : null,
+            m.eval_count ? `${m.eval_count} 토큰` : null,
+            m.total_duration_ms ? `${(m.total_duration_ms / 1000).toFixed(1)}s` : null,
+          ].filter(Boolean).join(" · ")
+        : (s.error || "실행 중…");
+      return el("div", { class: "col-12 col-lg-6" },
+        el("div", { class: "border rounded p-2 h-100" }, [
+          el("div", { class: "d-flex align-items-center gap-2 flex-wrap" }, [
+            el("span", { class: "badge text-bg-secondary" }, label),
+            el("span", { class: "mono fw-medium" }, s.model),
+            // 콜드/웜은 따로 표기한다 — 로드 시간을 속도에 섞으면 비교가 무의미해진다
+            m.cold ? badge(`콜드 로드 ${(m.load_duration_ms / 1000).toFixed(1)}s`, "warning")
+                   : (s.status === "succeeded" ? badge("웜", "success") : null),
+          ]),
+          el("div", { class: "small text-secondary mt-1" }, stats),
+          el("pre", {
+            class: "border rounded p-2 mt-2 mb-0 small",
+            style: "white-space:pre-wrap; word-break:break-word; max-height:240px; overflow:auto",
+          }, s.response || ""),
+        ]));
+    };
+
+    const showComparison = (d) => {
+      abOut.innerHTML = "";
+      if (!d.sides) {
+        abOut.appendChild(alertBox("warning", "비교를 시작하지 못했습니다",
+          d.detail || d.error || d.reason));
+        return;
+      }
+      if (!d.done) {
+        abOut.appendChild(spinner(
+          "각 모델을 워밍업한 뒤 측정합니다 — 실사용 잡보다 뒤에서 실행됩니다"));
+      }
+      const a = d.sides.a, b = d.sides.b;
+      abOut.appendChild(el("div", { class: "row g-2 mt-1" },
+        [sideCard("A", a), sideCard("B", b)]));
+      if (d.done) {
+        const ta = (a.metrics || {}).tokens_per_sec;
+        const tb = (b.metrics || {}).tokens_per_sec;
+        if (ta && tb) {
+          const [fast, slow] = ta >= tb ? [a, b] : [b, a];
+          const ratio = (Math.max(ta, tb) / Math.min(ta, tb)).toFixed(2);
+          abOut.appendChild(el("div", { class: "alert alert-info mt-2 mb-0 small" },
+            `${fast.model} 이(가) ${slow.model} 보다 ${ratio}배 빠릅니다 `
+            + "(모델 로드 시간 제외, 출력 품질은 직접 비교하세요)."));
+        }
+      }
+    };
+
+    abRun.addEventListener("click", async () => {
+      const prompt = abPrompt.value.trim();
+      if (!prompt) return;
+      if (abA.value === abB.value) {
+        window.alert("서로 다른 모델을 골라 주세요.");
+        return;
+      }
+      abRun.disabled = true;
+      abRun.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 실행 중';
+      abOut.innerHTML = "";
+      try {
+        const body = { prompt, models: [abA.value, abB.value] };
+        if (abSystem.value.trim()) body.system = abSystem.value;
+        let d = await send("/api/llm/compare", { body });
+        showComparison(d);
+        const runId = (d.run || {}).id;
+        for (let i = 0; runId && !d.done && i < 300; i++) {
+          await new Promise((r) => setTimeout(r, 2000));
+          d = await fetchJSON(`/api/llm/compare/${runId}`);
+          showComparison(d);
+        }
+      } catch (e) {
+        if (e.message !== "unauthorized") {
+          abOut.appendChild(alertBox("danger", "비교 실패", e.message));
+        }
+      } finally {
+        abRun.disabled = false;
+        abRun.textContent = "비교 실행";
+      }
+    });
 
     manualBtn.addEventListener("click", () => {
       const name = manual.value.trim();

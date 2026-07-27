@@ -382,6 +382,25 @@ def test_integration_doc_is_served_as_markdown(store, mroles, mservices):
         assert "/v1/generate" in body          # 실제 계약이 담겨 있다
 
 
+def test_integration_doc_broadcasts_runtime_model_changes(store, mroles, mservices):
+    """소비자에게 보이는 변화는 이 문서로 전파된다 — 여기가 유일한 전파 경로다.
+
+    소비 프로젝트(roxlogy 등)는 레포가 아니라 이 URL 을 참조한다. 계약이 바뀌었는데
+    문서에 안 들어가면 아무도 모른 채 모델 이름을 하드코딩한 코드가 깨진다.
+    """
+    with _client(store, mroles, mservices, fake_backend()) as c:
+        body = c.get("/v1/integration",
+                     headers={"Authorization": f"Bearer {TOKEN_ALPHA}"}).text
+    for must in (
+        "런타임에 바뀔 수 있다",     # 역할 모델 교체
+        "하드코딩",                  # 소비자가 할 일
+        "GET /v1/roles",             # 현재 값 확인 방법
+        "관리 서비스 전용",          # generate 의 model 필드는 403
+        "/v1/admin/*",               # 공개 경로에서 404
+    ):
+        assert must in body, f"통합 가이드에 '{must}' 안내가 없습니다"
+
+
 def test_integration_doc_requires_auth(store, mroles, mservices):
     """공개 경로(/llm/v1/*)에 놓이므로 스캐너에게 내부 구조를 주지 않는다."""
     with _client(store, mroles, mservices, fake_backend()) as c:

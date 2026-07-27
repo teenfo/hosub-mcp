@@ -89,6 +89,21 @@ CREATE TABLE IF NOT EXISTS admin_audit (
 CREATE INDEX IF NOT EXISTS idx_admin_audit_ts ON admin_audit(ts DESC);
 
 CREATE INDEX IF NOT EXISTS idx_usage_model_ts ON usage(model, ts);
+
+-- 모델 A/B 비교 실행. 실행 자체는 평범한 잡 4개(각 측 워밍업 1 + 측정 1)이고,
+-- 이 표는 그것들을 묶어 "무엇을 왜 비교했는지" 를 남긴다.
+CREATE TABLE IF NOT EXISTS ab_runs (
+  id           TEXT PRIMARY KEY,
+  created_at   TEXT NOT NULL,
+  actor        TEXT NOT NULL,
+  prompt       TEXT NOT NULL,
+  system       TEXT,
+  options_json TEXT,
+  model_a      TEXT NOT NULL,
+  model_b      TEXT NOT NULL,
+  jobs_json    TEXT NOT NULL,     -- {"a": {"warmup": id, "measure": id}, "b": {...}}
+  status       TEXT NOT NULL      -- running|done
+);
 """
 
 # 기존 표에 **덧붙이는** 컬럼. CREATE TABLE IF NOT EXISTS 로는 못 하므로
@@ -100,6 +115,8 @@ _ADD_COLUMNS = (
     # 안 그러면 역할 모델을 바꿨을 때 큐에 있던 잡이 옛 모델 + 새 옵션으로 돈다.
     ("jobs", "options_json", "TEXT"),
     ("jobs", "timeout_s", "INTEGER"),
+    # Ollama 가 주는 load/prompt_eval/eval 세부 시간. A/B 비교의 tok/s 근거.
+    ("jobs", "metrics_json", "TEXT"),
 )
 
 MR_PENDING = "pending"
@@ -138,6 +155,8 @@ def _row_to_job(row: sqlite3.Row) -> dict:
     # 옛 행에는 스냅샷 컬럼이 없다(NULL) — 호출부가 "없으면 live 역할"로 폴백한다
     if "options_json" in d:
         d["options"] = _loads_dict(d.pop("options_json"))
+    if "metrics_json" in d:
+        d["metrics"] = _loads_dict(d.pop("metrics_json"))
     return d
 
 
@@ -293,12 +312,14 @@ class Store:
             return cur.rowcount == 1
 
     def finish(self, job_id: str, *, status: str, response: str | None = None,
-               error: str | None = None) -> None:
+               error: str | None = None, metrics: dict | None = None) -> None:
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE jobs SET status=?, response=?, error=?, finished_at=?"
-                " WHERE id=?",
-                (status, response, error, utcnow(), job_id),
+                "UPDATE jobs SET status=?, response=?, error=?, finished_at=?,"
+                " metrics_json=? WHERE id=?",
+                (status, response, error, utcnow(),
+                 json.dumps(metrics, ensure_ascii=False) if metrics else None,
+                 job_id),
             )
 
     def cancel(self, job_id: str, service: str) -> bool:
@@ -529,6 +550,44 @@ class Store:
         with self._lock, self._connect() as conn:
             cur = conn.execute("DELETE FROM role_overrides WHERE role=?", (role,))
             return cur.rowcount == 1
+
+    # --- A/B 비교 ---
+    def create_ab_run(self, *, actor: str, prompt: str, system: str | None,
+                      options: dict | None, model_a: str, model_b: str,
+                      jobs: dict) -> dict:
+        run_id = secrets.token_hex(6)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO ab_runs (id, created_at, actor, prompt, system,"
+                " options_json, model_a, model_b, jobs_json, status)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (run_id, utcnow(), actor, prompt, system,
+                 json.dumps(options or {}, ensure_ascii=False),
+                 model_a, model_b, json.dumps(jobs, ensure_ascii=False), "running"),
+            )
+        return self.get_ab_run(run_id)
+
+    def get_ab_run(self, run_id: str) -> dict | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT * FROM ab_runs WHERE id=?", (run_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["options"] = _loads_dict(d.pop("options_json")) or {}
+        d["jobs"] = _loads_dict(d.pop("jobs_json")) or {}
+        return d
+
+    def list_ab_runs(self, limit: int = 10) -> list[dict]:
+        limit = max(1, min(int(limit), 50))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id FROM ab_runs ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [self.get_ab_run(r["id"]) for r in rows]
+
+    def set_ab_run_status(self, run_id: str, status: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE ab_runs SET status=? WHERE id=?", (status, run_id))
 
     # --- 감사 로그 ---
     def record_audit(self, *, actor: str, action: str, target: str | None = None,
