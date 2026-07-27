@@ -334,10 +334,14 @@ class SignalEngine:
         if not self._fired_restored:
             self._restore_fired()
             self._fired_restored = True
-        # 수집: 전체 감시목록 백필(매매·수집전용 공통). 수집전용 종목도 데이터는 모은다.
-        # 매매 판단보다 **앞에** 둔다 — 잔고 조회 실패나 일일 가드로 매매가 멈춰도
-        # 분봉 축적은 이어져야 한다(차트·백테스트·다음 날 지표가 이 데이터를 쓴다).
-        for symbol in settings.WATCHLIST:
+        # 수집: 장중 실시간 백필. 매매 판단보다 **앞에** 둔다 — 잔고 조회 실패나
+        # 일일 가드로 매매가 멈춰도 분봉 축적은 이어져야 한다(차트·백테스트가 쓴다).
+        #
+        # 수집전용(COLLECT_ONLY)은 기본적으로 제외한다. 매매하지 않으므로 30초마다
+        # 최신화할 이유가 없고, 분봉 API 는 1회 호출로 900봉(≈2.3거래일)을 주므로
+        # 장 마감 후 한 번만 불러도 그날치가 통째로 들어온다(eod_backfill_once).
+        # 아낀 호출은 매매 대상의 감시 주기를 줄이는 데 쓸 수 있다.
+        for symbol in self._collect_targets():
             await collector.backfill_minutes(symbol)
         # 실계좌 자산 동기화 — 포지션 사이징이 가짜 기본값(1천만원)으로 계산되는 것 방지
         await self._sync_equity()
@@ -566,6 +570,56 @@ class SignalEngine:
             except Exception:  # noqa: BLE001
                 log.exception("엔진 루프 오류")
             await asyncio.sleep(interval_sec or self.scan_interval())
+
+    @staticmethod
+    def _collect_targets() -> list[str]:
+        """장중 실시간 백필 대상. 기본은 매매 대상만(수집전용 제외).
+        collection.realtime_trading_only=false 면 종전대로 감시목록 전체."""
+        cfg = settings.CONFIG.get("collection", {})
+        if not cfg.get("realtime_trading_only", True):
+            return list(settings.WATCHLIST)
+        return [s for s in settings.WATCHLIST if s not in settings.COLLECT_ONLY]
+
+    async def eod_backfill_once(self) -> int:
+        """장 마감 후 감시목록 **전체**를 1회 백필해 그날 분봉을 확정한다.
+
+        두 가지를 한 번에 메운다.
+        1. 수집전용 종목 — 장중에 실시간 백필을 하지 않으므로 여기서 하루치를 받는다.
+        2. 매매 대상의 마지막 구간 — 장중 루프는 15:30 에 멈추므로 그 이후
+           체결(종가 동시호가 등)이 저장에 빠질 수 있다.
+        1회 호출이 900봉(≈2.3거래일)을 주므로 하루를 통째로 덮어쓴다.
+        반환: 백필한 종목 수.
+        """
+        n = 0
+        for symbol in list(settings.WATCHLIST):
+            try:
+                await collector.backfill_minutes(symbol)
+                n += 1
+            except Exception:  # noqa: BLE001 - 개별 실패는 나머지를 막지 않는다
+                log.exception("마감 백필 실패 %s", symbol)
+        log.info("마감 백필 완료: %d종목 (수집전용 포함)", n)
+        return n
+
+    async def eod_backfill_loop(self, interval_sec: int = 120) -> None:
+        """평일 마감 후 1회. 재시작해도 당일 중복 실행하지 않는다."""
+        done_for = ""
+        while True:
+            try:
+                cfg = settings.CONFIG.get("collection", {})
+                now = datetime.now(KST)
+                today = now.date().isoformat()
+                if (
+                    cfg.get("eod_backfill", True)
+                    and settings.KIWOOM_APP_KEY
+                    and now.weekday() < 5
+                    and now.strftime("%H:%M") >= cfg.get("eod_backfill_after", "15:35")
+                    and done_for != today
+                ):
+                    await self.eod_backfill_once()
+                    done_for = today
+            except Exception:  # noqa: BLE001
+                log.exception("마감 백필 루프 오류")
+            await asyncio.sleep(interval_sec)
 
     async def collect_roster_once(self) -> int:
         """감시목록에서 이탈했지만 유예기간 내인 종목의 분봉을 백필한다.
