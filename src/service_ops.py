@@ -49,6 +49,23 @@ def query_all(runner: CommandRunner, registry: Registry) -> list[dict]:
 
 def read_logs(runner: CommandRunner, entry: ServiceEntry, lines: int) -> dict:
     lines = max(1, min(int(lines), 1000))
+    if entry.container:
+        # 도커로 도는 서비스는 journald 에 compose 호출만 남고 앱 출력은
+        # 도커 로그 드라이버로 간다 — journalctl 로는 진단이 안 된다.
+        res = runner.run(
+            ["sudo", "-n", "docker", "logs", "--tail", str(lines), entry.container],
+            timeout=30,
+        )
+        # docker logs 는 앱 stdout/stderr 를 모두 내보내므로 합친다.
+        # 응답 형태는 journalctl 경로와 동일하게 유지한다(호출부 분기 불필요).
+        return {
+            "service_name": entry.name,
+            "unit": f"docker:{entry.container}",
+            "lines": lines,
+            "log": (res.stdout + res.stderr) if res.ok else "",
+            "ok": res.ok,
+            "error": None if res.ok else (res.stderr.strip() or "docker logs 조회 실패"),
+        }
     res = runner.run(
         [
             "journalctl",

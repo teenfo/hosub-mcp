@@ -199,7 +199,9 @@ async def test_gives_up_after_max_retries(store, roles):
         assert await wait_until(
             lambda: store.get_job(j["id"])["status"] == FAILED, timeout=8
         )
-        assert store.get_job(j["id"])["attempts"] == 2
+        # max_retries=2 는 "재시도 2회" — 최초 실행까지 총 3번 시도한다.
+        # (전에는 총 시도 2번이라 .env.example 의 "재시도 3회, 2→4→8초"와 어긋났다)
+        assert store.get_job(j["id"])["attempts"] == 3
     finally:
         await sched.stop()
 

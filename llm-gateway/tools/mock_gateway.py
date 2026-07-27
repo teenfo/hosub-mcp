@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import random
 import secrets
 import sys
@@ -37,6 +38,12 @@ from starlette.routing import Route
 ROOT = Path(__file__).resolve().parent.parent
 
 EMBED_DIM = 1024   # bge-m3 차원
+
+
+def _fake_vector(text: str) -> list[float]:
+    """텍스트에서 결정적으로 생성한 벡터(프로세스 재시작에도 동일)."""
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    return [digest[i % len(digest)] / 255.0 for i in range(EMBED_DIM)]
 
 BUILTIN_ROLES = {
     "summarize": ("qwen2.5:7b", "interactive", 120),
@@ -195,9 +202,10 @@ def build_app(opts) -> Starlette:
         texts = [raw] if isinstance(raw, str) else (raw or [])
         if not texts or not all(isinstance(t, str) for t in texts):
             return JSONResponse({"error": "invalid_request"}, status_code=400)
-        # 결정적 가짜 벡터 — 같은 입력이면 같은 값이라 테스트에 쓸 수 있다
-        vecs = [[((hash(t) >> i) % 1000) / 1000.0 for i in range(EMBED_DIM)]
-                for t in texts]
+        # 결정적 가짜 벡터 — SHA-256 기반. 파이썬 hash() 는 프로세스마다 salt 가
+        # 달라 목 서버를 재시작하면 같은 텍스트가 다른 벡터가 된다. 목 임베딩을
+        # 저장해두고 나중에 비교하는 소비자가 있으면 좌표계가 어긋난다.
+        vecs = [_fake_vector(t) for t in texts]
         return JSONResponse({"status": "ok", "model": "bge-m3",
                              "embeddings": vecs, "count": len(vecs),
                              "dimensions": EMBED_DIM, "duration_ms": 5})

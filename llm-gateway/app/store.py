@@ -371,12 +371,21 @@ class Store:
             rows = conn.execute("SELECT model, status FROM model_requests").fetchall()
         return {r["model"]: r["status"] for r in rows}
 
-    def purge_old(self, days: int = 30) -> int:
-        """완료된 오래된 잡 정리."""
+    def purge_old(self, days: int = 30) -> dict:
+        """오래된 잡·사용량 정리. 반환: {"jobs": n, "usage": n}
+
+        모든 요청이 프롬프트·응답·사용량 행을 남기므로 정리하지 않으면 DB 가
+        무한히 커진다. /data 디스크를 채우기 전에 주기적으로 부른다.
+        """
+        cutoff = f"-{int(days)} days"
         with self._lock, self._connect() as conn:
-            cur = conn.execute(
+            jobs = conn.execute(
                 "DELETE FROM jobs WHERE status IN (?,?,?)"
-                " AND finished_at < datetime('now', ?)",
-                (SUCCEEDED, FAILED, CANCELLED, f"-{int(days)} days"),
-            )
-            return cur.rowcount
+                " AND finished_at IS NOT NULL AND finished_at < datetime('now', ?)",
+                (SUCCEEDED, FAILED, CANCELLED, cutoff),
+            ).rowcount
+            # 사용량은 집계용이라 잡보다 오래 남길 이유가 없다
+            usage = conn.execute(
+                "DELETE FROM usage WHERE ts < datetime('now', ?)", (cutoff,)
+            ).rowcount
+        return {"jobs": jobs, "usage": usage}

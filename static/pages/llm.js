@@ -314,6 +314,22 @@ export default {
       runBtn.disabled = true;
       runBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> 실행 중';
       outBox.innerHTML = "";
+      // 폴링이 만료돼도 결과를 되찾을 수 있게 하는 버튼
+      const resumeBtn = (jobId) => {
+        if (!jobId) return null;
+        const b = el("button", { class: "btn btn-sm btn-outline-primary mt-2", type: "button" },
+          "결과 다시 확인");
+        b.addEventListener("click", async () => {
+          b.disabled = true;
+          try {
+            showResult(await fetchJSON(`/api/llm/jobs/${jobId}`));
+          } finally {
+            b.disabled = false;
+          }
+        });
+        return b;
+      };
+
       const showResult = (r) => {
         outBox.innerHTML = "";
         if (r.status === "ok") {
@@ -325,6 +341,19 @@ export default {
             class: "border rounded p-3 mb-0",
             style: "white-space:pre-wrap; word-break:break-word; max-height:420px; overflow:auto",
           }, r.response || ""));
+        } else if (r.status === "pending") {
+          // 폴링 창(5분)을 넘긴 경우. 잡은 계속 돌고 있으므로 job_id 를 반드시
+          // 보여준다 — 이걸 잃으면 결과를 되찾을 방법이 없다.
+          outBox.appendChild(el("div", { class: "alert alert-info mb-0" }, [
+            el("div", { class: "fw-medium" }, "아직 실행 중입니다 — 잡은 계속 돌고 있습니다"),
+            el("div", { class: "small mt-1" }, [
+              el("span", { class: "text-secondary" }, "job_id "),
+              el("code", { class: "mono" }, r.job_id || "?"),
+            ]),
+            el("div", { class: "small text-secondary mt-1" },
+              "모델 설치 승인을 기다리는 중일 수도 있습니다(위 카드 확인)."),
+            resumeBtn(r.job_id),
+          ]));
         } else {
           outBox.appendChild(el("div", { class: "alert alert-warning mb-0" }, [
             el("div", { class: "fw-medium" }, r.reason || r.error || "실행 실패"),
