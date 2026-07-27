@@ -5,6 +5,7 @@ TR ID / 경로는 공개 자료 기준 초안이다. 공식 문서(openapi.kiwoo
 초당 요청 제한을 지키기 위해 간단한 토큰버킷을 둔다.
 """
 import asyncio
+from collections import deque
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -36,37 +37,100 @@ class RateLimiter:
     """초당 max_rps 회로 호출을 제한하는 토큰버킷."""
 
     def __init__(self, max_rps: int = 4) -> None:
+        self.max_rps = max_rps
         self.interval = 1.0 / max_rps
         self._last = 0.0
         self._lock = asyncio.Lock()
+        self.waited_sec = 0.0        # 누적 대기 — 한도에 눌린 정도(부하 지표)
 
     async def wait(self) -> None:
         async with self._lock:
             now = time.monotonic()
             delta = now - self._last
             if delta < self.interval:
-                await asyncio.sleep(self.interval - delta)
+                pause = self.interval - delta
+                self.waited_sec += pause
+                await asyncio.sleep(pause)
             self._last = time.monotonic()
+
+
+class ApiUsage:
+    """키움 REST 호출 계측 — 화면에 부하·한도 여유를 보여주기 위한 관측치.
+
+    최근 60초/1시간 호출 타임스탬프만 들고 있어 메모리 부담이 없다.
+    한도 초과(429)·에러는 별도 카운트해 '지금 눌리고 있는지'를 판단한다.
+    """
+
+    def __init__(self, window_sec: int = 3600) -> None:
+        self.window = window_sec
+        self._calls: deque[float] = deque()
+        self._errors: deque[tuple[float, int]] = deque()   # (ts, status)
+        self.total = 0
+        self.rate_limited = 0                              # 429 누적
+
+    def record(self, status: int | None = None) -> None:
+        now = time.time()
+        self._calls.append(now)
+        self.total += 1
+        if status and status >= 400:
+            self._errors.append((now, status))
+            if status == 429:
+                self.rate_limited += 1
+        cutoff = now - self.window
+        while self._calls and self._calls[0] < cutoff:
+            self._calls.popleft()
+        while self._errors and self._errors[0][0] < cutoff:
+            self._errors.popleft()
+
+    def snapshot(self, limiter: "RateLimiter | None" = None) -> dict:
+        now = time.time()
+        last_min = sum(1 for t in self._calls if t >= now - 60)
+        last_10s = sum(1 for t in self._calls if t >= now - 10)
+        max_rps = limiter.max_rps if limiter else 0
+        # 최근 10초 실측 rps 대비 클라이언트 상한 사용률
+        rps = round(last_10s / 10, 2)
+        return {
+            "calls_1m": last_min,
+            "calls_1h": len(self._calls),
+            "calls_total": self.total,
+            "rps_10s": rps,
+            "max_rps": max_rps,
+            "usage_pct": round(rps / max_rps * 100) if max_rps else 0,
+            "errors_1h": len(self._errors),
+            "rate_limited_1h": sum(1 for _, s in self._errors if s == 429),
+            "rate_limited_total": self.rate_limited,
+            "throttle_wait_sec": round(limiter.waited_sec, 1) if limiter else 0.0,
+            "last_error": (f"HTTP {self._errors[-1][1]}" if self._errors else ""),
+        }
 
 
 class KiwoomClient:
     def __init__(self) -> None:
         self._http = httpx.AsyncClient(timeout=15)
         self._limiter = RateLimiter()
+        self.usage = ApiUsage()
+
+    def usage_snapshot(self) -> dict:
+        return self.usage.snapshot(self._limiter)
 
     async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N") -> dict:
         await self._limiter.wait()
         token = await token_manager.get()
         # base URL 은 호출 시점에 읽는다 — 설정 화면에서 mock/real 전환 즉시 반영
-        resp = await self._http.post(
-            settings.REST_BASE + path,
-            json=body,
-            headers={
-                "authorization": f"Bearer {token}",
-                "api-id": tr_id,
-                "cont-yn": cont,
-            },
-        )
+        try:
+            resp = await self._http.post(
+                settings.REST_BASE + path,
+                json=body,
+                headers={
+                    "authorization": f"Bearer {token}",
+                    "api-id": tr_id,
+                    "cont-yn": cont,
+                },
+            )
+        except httpx.HTTPError:
+            self.usage.record(599)          # 네트워크 실패도 부하 지표에 포함
+            raise
+        self.usage.record(resp.status_code)
         resp.raise_for_status()
         return resp.json()
 

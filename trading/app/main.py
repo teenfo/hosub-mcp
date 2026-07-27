@@ -64,6 +64,16 @@ async def _resubscribe() -> None:
     await feed.update(list(settings.WATCHLIST.keys()))
 
 
+def _api_usage() -> dict:
+    """키움 REST 호출 계측 스냅샷 (클라이언트 미초기화·구버전 대비 방어)."""
+    from .kiwoom.client import client
+
+    try:
+        return client.usage_snapshot()
+    except AttributeError:      # 계측 미탑재 빌드
+        return {}
+
+
 def _price_of(symbol: str) -> float | None:
     """실시간 형성 봉(우선) → 최근 저장 분봉 종가."""
     snap = aggregator.snapshot(symbol)
@@ -201,6 +211,8 @@ async def api_status(_=Depends(require_auth)):
         "clock_synced": synced,
         # 매매 데스크에서 "지금 감시 중인가"를 한눈에 보기 위한 상태
         "market": engine.market_status(),
+        # 키움 REST 호출 부하 — 주기를 줄일 여유가 있는지 판단 근거
+        "api_usage": _api_usage(),
     }
 
 
