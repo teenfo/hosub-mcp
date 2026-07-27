@@ -78,13 +78,19 @@ class BacktestReporter:
             store.prune_minutes(keep_days)
             universe = store.minute_symbols(min_days)
             run_ts = datetime.now(KST).isoformat(timespec="seconds")
+            # 평가 창은 최근 max_bars 봉으로 제한한다. 심층 백필(연속조회)로
+            # 종목당 봉이 크게 늘었고 keep_days 만큼 계속 쌓이므로, 상한이 없으면
+            # 리포트 비용이 무한정 커진다. 최근 구간이 현재 시장에 더 가깝다.
+            max_bars = int(cfg.get("max_bars", 8000))
             rows: list[dict] = []
-            for symbol, days in universe:
-                df = store.load_bars(symbol, "1m", limit=200000)
+            for symbol, _days in universe:
+                df = store.load_bars(symbol, "1m", limit=max_bars)
                 if df.empty:
                     continue
                 sides = ("long",) if settings.RISK.get("long_only") else None
                 st = runner.run(symbol, df, sides=sides).stats()
+                # 실제 평가한 일수 — universe 의 전체 축적일수와 다를 수 있다
+                days = int(df.index.normalize().nunique())
                 rows.append({"symbol": symbol, "days": days, **st})
             with _conn() as conn:
                 conn.executemany(
@@ -101,6 +107,25 @@ class BacktestReporter:
             return {"ok": True, "run_ts": run_ts, "summary": summary, "symbols": rows}
         finally:
             self.running = False
+
+    async def run_offloaded(self) -> dict:
+        """리포트를 별도 프로세스에서 실행한다(이벤트 루프 보호).
+
+        백테스트 재생은 순수 파이썬이라 스레드로 옮겨도 GIL 을 계속 쥔다.
+        같은 프로세스에서 돌리면 시세 수신·주문 감시·API 응답이 함께 멈춘다.
+        """
+        from . import offload
+
+        if self.running:
+            return {"ok": False, "error": "이미 실행 중"}
+        self.running = True
+        try:
+            result = await offload.run_job("report")
+        finally:
+            self.running = False
+        if result.get("run_ts"):
+            self.last_run = result["run_ts"]
+        return result
 
     def latest(self) -> dict:
         with _conn() as conn:
@@ -143,7 +168,7 @@ class BacktestReporter:
                     and now.strftime("%H:%M") >= cfg.get("run_after", "15:40")
                     and done_for != today
                 ):
-                    await asyncio.to_thread(self.run_once)
+                    await self.run_offloaded()
                     done_for = today
             except Exception:  # noqa: BLE001
                 log.exception("백테스트 리포트 오류")
