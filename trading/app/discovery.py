@@ -124,6 +124,26 @@ def compute_market(rows: list[dict], cfg: dict) -> dict:
     }
 
 
+def latest_picks() -> tuple[str | None, list[dict]]:
+    """가장 최근 발굴일의 후보 목록 — **인스턴스 없이** DB 만 읽는다.
+
+    `Discovery` 싱글턴은 `main` 에 있어서, 그것을 통해 읽으면 어댑터가 main 을
+    임포트하게 되고 순환 참조가 된다. 발굴 엔진 어댑터는 진행률·국면이 아니라
+    후보만 필요하므로 여기서 끊는다. `Discovery.latest()` 도 이 함수를 쓴다.
+    """
+    with _conn() as conn:
+        row = conn.execute("SELECT MAX(date) AS d FROM picks").fetchone()
+        date = row["d"] if row else None
+        if not date:
+            return None, []
+        picks = [
+            dict(r) | {"reasons": json.loads(r["reasons"])}
+            for r in conn.execute(
+                "SELECT * FROM picks WHERE date=? ORDER BY score DESC, code", (date,))
+        ]
+    return date, picks
+
+
 class Discovery:
     def __init__(self) -> None:
         self.running = False
@@ -132,18 +152,7 @@ class Discovery:
         self.market: dict = {}      # 최근 시장 국면·상대강도·하락 후보 요약
 
     def latest(self) -> dict:
-        with _conn() as conn:
-            row = conn.execute("SELECT MAX(date) AS d FROM picks").fetchone()
-            date = row["d"] if row else None
-            picks = []
-            if date:
-                picks = [
-                    dict(r) | {"reasons": json.loads(r["reasons"])}
-                    for r in conn.execute(
-                        "SELECT * FROM picks WHERE date=? ORDER BY score DESC, code",
-                        (date,),
-                    )
-                ]
+        date, picks = latest_picks()
         market = self.market or (export.latest_manifest() or {}).get("market", {})
         return {"date": date, "picks": picks, "running": self.running,
                 "progress": self.progress, "last_run": self.last_run,

@@ -21,6 +21,7 @@ from .signals.engine import SignalEngine
 from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
+from .scout.engine import engine as scout
 from .trade import orders
 from . import journal
 
@@ -143,6 +144,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_feed_starter()),
         asyncio.create_task(scanner.loop()),
         asyncio.create_task(discovery.loop()),
+        # 발굴 엔진 — 기본 shadow. 신호를 모으고 결정을 기록만 하며 감시목록에는
+        # 손대지 않는다. 기존 scanner/discovery 자동편입 경로는 그대로 돈다.
+        asyncio.create_task(scout.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
@@ -530,6 +534,56 @@ async def api_backtest_report_run(_=Depends(require_auth)):
     if reporter.running:
         return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
     return await reporter.run_offloaded()   # 별도 프로세스 — 루프를 막지 않는다
+
+
+@app.get("/api/scout")
+async def api_scout(_=Depends(require_auth)):
+    """발굴 엔진 상태 + 후보 큐 + 최근 결정(조회성 — 주문 없음).
+
+    shadow 모드에서는 `decisions` 가 "엔진이라면 이렇게 했을 것" 이다. 화면이
+    실제 감시목록과 나란히 놓고 보여 준다.
+    """
+    from .scout import store as scout_store
+
+    cur = scout.snapshot_current()
+    return {
+        "status": scout.status(),
+        "candidates": [
+            {"code": c.code, "name": c.name, "score": c.score, "price": c.price,
+             "sources": c.sources, "by_group": c.by_group,
+             "group_count": c.group_count,
+             "tier": cur.tier.get(c.code, "none"),
+             "protected": c.code in cur.protected,
+             "evidence": c.evidence()}
+            for c in scout.candidates[:100]
+        ],
+        "pending": scout.last_decisions,
+        "watchlist": [{"code": k, "name": cur.names.get(k, k), "tier": v,
+                       "protected": k in cur.protected}
+                      for k, v in sorted(cur.tier.items())],
+        "decisions": scout_store.recent_decisions(100),
+    }
+
+
+@app.post("/api/scout/mode")
+async def api_scout_mode(payload: dict = Body(...), _=Depends(require_auth)):
+    """모드 전환 · 킬 스위치. **배포 없이 되돌릴 수 있어야 한다** — 실거래 중이다."""
+    from .scout import engine as scout_mod
+
+    try:
+        st = scout_mod.set_state(
+            mode=payload.get("mode"),
+            frozen=bool(payload["frozen"]) if "frozen" in payload else None)
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, 400)
+    return {"ok": True, "state": st}
+
+
+@app.post("/api/scout/run")
+async def api_scout_run(_=Depends(require_auth)):
+    """수동 1회 실행 — 다음 주기를 기다리지 않고 지금 본다."""
+    scout.next_due.clear()
+    return {"ok": True} | await scout.run_once()
 
 
 @app.get("/api/research/event-study")

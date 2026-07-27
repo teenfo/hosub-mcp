@@ -67,9 +67,16 @@ def parse_surge(raw: dict) -> list[dict]:
     return out
 
 
-def filter_presurge(items: list[dict], cfg: dict) -> list[dict]:
+def filter_presurge(items: list[dict], cfg: dict,
+                    keep: frozenset = frozenset()) -> list[dict]:
     """'급등 조짐' 필터: 거래량은 급증했는데 가격은 아직 크게 안 움직인 종목.
-    거래량이 가격에 선행한다는 전제의 조기 포착 — 확정 신호가 아니라 관찰 후보다."""
+    거래량이 가격에 선행한다는 전제의 조기 포착 — 확정 신호가 아니라 관찰 후보다.
+
+    keep: 이미 감시 중이어도 후보로 유지할 코드. 형제 필터(filter_candidates /
+    filter_gainers)와 같은 규약이다. 발굴 엔진은 여기에 감시목록 전체를 넘겨
+    '이미 감시 중이면 제외' 를 무력화한다 — 그러지 않으면 승격 직후 소스가
+    보고를 멈춰 신호가 만료되고, 강등되면 다시 보고하는 발진이 생긴다.
+    """
     min_surge = cfg.get("min_volume_surge_pct", 300.0)   # 거래량 급증률 최소
     lo = cfg.get("change_pct_min", -1.0)                 # 등락률 하한
     hi = cfg.get("change_pct_max", 3.0)                  # 이 이상 오르면 이미 급등(기존 스캐너 몫)
@@ -80,7 +87,7 @@ def filter_presurge(items: list[dict], cfg: dict) -> list[dict]:
         if it.get("surge_pct", 0) >= min_surge
         and lo <= it["change_pct"] <= hi
         and it["price"] >= min_price
-        and it["code"] not in settings.WATCHLIST
+        and (it["code"] not in settings.WATCHLIST or it["code"] in keep)
     ]
     picked.sort(key=lambda x: x.get("surge_pct", 0), reverse=True)
     return picked[:top_n]
