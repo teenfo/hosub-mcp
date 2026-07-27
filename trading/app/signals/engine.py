@@ -627,8 +627,21 @@ class SignalEngine:
         1회 호출이 900봉(≈2.3거래일)을 주므로 하루를 통째로 덮어쓴다.
         반환: 백필한 종목 수.
         """
+        # 대상은 현재 감시목록 **+ 유예기간 내 이탈 종목**이다. 감시목록만 훑으면
+        # 15:30 직전에 순위에서 밀려 빠진 종목의 그날 분봉이 영영 확정되지 않아
+        # 백테스트 표본에 구멍이 생긴다. 로스터 루프는 15분 주기라 마지막 구간을
+        # 놓칠 수 있으므로 여기서 함께 메운다.
+        from ..data import roster
+
+        cfg0 = settings.CONFIG.get("collection", {})
+        targets = dict.fromkeys(settings.WATCHLIST)
+        try:
+            days = int(cfg0.get("roster_retention_days", 30))
+            targets.update(dict.fromkeys(roster.active(days)))
+        except Exception:  # noqa: BLE001 - 로스터 실패가 마감 확정을 막지 않는다
+            log.warning("로스터 조회 실패 — 감시목록만 마감 백필")
         n = 0
-        for symbol in list(settings.WATCHLIST):
+        for symbol in targets:
             try:
                 await collector.backfill_minutes(symbol)
                 n += 1

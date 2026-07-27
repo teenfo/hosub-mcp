@@ -33,8 +33,17 @@ class RealtimeFeed:
             self._task = asyncio.create_task(self._run())
 
     async def update(self, symbols: list[str]) -> None:
-        """구독 종목 변경 — 현재 연결을 닫아 재접속하며 새 목록으로 REG 한다."""
-        self._symbols = set(symbols)
+        """구독 종목 변경 — 현재 연결을 닫아 재접속하며 새 목록으로 REG 한다.
+
+        **집합이 같으면 아무것도 하지 않는다.** 재접속은 소켓을 닫고 LOGIN+REG 를
+        다시 하는 동안 틱을 잃는다. 스캐너는 60초마다 감시목록을 전량 교체하는데
+        결과가 동일해도 DELETE+INSERT 라 알림이 뜬다 — 그때마다 재접속하면
+        장중 내내 틱이 새는 셈이다.
+        """
+        new = set(symbols)
+        if new == self._symbols and self._ws is not None:
+            return
+        self._symbols = new
         if self._ws is not None:
             try:
                 await self._ws.close()
