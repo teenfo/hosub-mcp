@@ -151,7 +151,8 @@ def test_status_shows_halted_only_in_auto_mode(monkeypatch):
     assert s["phase"] == "halted" and s["entries_blocked"] is True
     assert s["scanning"] is False          # 신호 평가는 멈춤
     assert s["collecting"] is True         # 수집은 계속 — 배너가 구분해 알린다
-    assert "신규 진입 중단" in s["label"]
+    assert s["label"] == HALTED["reason"]   # 사유 그대로 (문구 중복 없이)
+    assert s["label"].count("신규 진입 중단") == 1
     assert s["guard"]["manual_override"] is False
 
     monkeypatch.setitem(settings.RISK, "auto_approve", False)

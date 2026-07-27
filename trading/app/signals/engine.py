@@ -476,8 +476,9 @@ class SignalEngine:
         auto = bool(settings.RISK.get("auto_approve", False))
         blocking = halted and auto and phase == "open"
         if blocking:
+            # 사유 문구가 이미 '… 도달 — 신규 진입 중단' 형태라 접두를 덧붙이지 않는다.
             phase = "halted"
-            label = "신규 진입 중단 — " + (guard.get("reason") or "일일 가드 도달")
+            label = guard.get("reason") or "일일 가드 도달 — 신규 진입 중단"
         # 마지막 스캔 이후 경과(초) — 루프가 실제로 돌고 있는지의 근거
         age = None
         if self.last_run:
