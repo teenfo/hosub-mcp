@@ -58,7 +58,7 @@ PAGE = 500            # TNM list_items 의 limit 상한
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
-def fetch_analyses(limit: int = 5000, min_score: int = 0) -> list[dict]:
+def fetch_analyses(limit: int = 20_000, min_score: int = 0) -> list[dict]:
     """TNM 분석 전량을 페이지로 받아 온다.
 
     **trading 자신의 INTERNAL_TOKEN 이 아니라 TNM_TOKEN 을 쓴다** — 서비스마다
@@ -123,6 +123,27 @@ def forward_map(symbols: set[str]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def market_forward(market: dict[str, float],
+                   horizons=(1, 3, 5)) -> dict[str, dict[int, float]]:
+    """날짜별 **선행 k일 누적** 시장 수익률 — 종목 수익률과 기간을 맞춘다.
+
+    이걸 안 하면 3일·5일 종목 수익률에서 **하루치** 시장 수익률만 빼게 되어
+    시장 노출이 덜 빠진다. 초안이 정확히 그랬다 — 게다가 뺄 값도 이벤트 당일
+    (t0)이라 종목 쪽 구간(t+1~t+k)과 하루 어긋나 있었다.
+
+    종목의 fwd_k 는 t+1 시가 → t+k 종가다. 그래서 시장도 t+1 부터 t+k 까지의
+    일간 수익률을 더한다. 거래일이 모자라면 None — 반쪽짜리 창으로 빼지 않는다.
+    """
+    days = sorted(market)
+    out: dict[str, dict[int, float]] = {}
+    for i, d in enumerate(days):
+        out[d] = {}
+        for k in horizons:
+            win = days[i + 1:i + 1 + k]
+            out[d][k] = sum(market[x] for x in win) if len(win) == k else None
+    return out
+
+
 def join(items: list[dict], fwd: pd.DataFrame,
          market: dict[str, float]) -> pd.DataFrame:
     """분석 레코드 × 선행 수익률. 시장 효과를 뺀 초과수익까지 붙인다."""
@@ -141,10 +162,15 @@ def join(items: list[dict], fwd: pd.DataFrame,
     if not rows or fwd.empty:
         return pd.DataFrame()
     df = pd.DataFrame(rows).merge(fwd, on=["symbol", "date"], how="inner")
-    # 뉴스는 시장이 크게 움직인 날에 몰린다 — 그날 시장을 뉴스의 공으로 세지 않는다
-    mkt = df["date"].map(market)
+    # 뉴스는 시장이 크게 움직인 날에 몰린다 — 그날 시장을 뉴스의 공으로 세지 않는다.
+    # **기간을 맞춰서 뺀다** — 3일 수익률에서 하루치 시장을 빼면 노출이 남는다.
+    mf = market_forward(market, horizons=[int(t.split("_")[1]) for t in TARGETS])
     for t in TARGETS:
-        df[f"exc_{t}"] = df[t] - mkt.fillna(0.0)
+        k = int(t.split("_")[1])
+        adj = df["date"].map(lambda d, _k=k: (mf.get(d) or {}).get(_k))
+        # 시장 구간을 못 채운 날(표본 끝)은 초과수익을 내지 않는다 — 0으로
+        # 채우면 시장 몫이 그대로 뉴스의 공으로 남는다.
+        df[f"exc_{t}"] = df[t] - adj
     return df.dropna(subset=[TARGETS[0]])
 
 
