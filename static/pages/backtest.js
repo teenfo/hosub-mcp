@@ -32,9 +32,10 @@ export default {
     const summaryC = card("성과 요약 (실거래)", null, { wide: true, icon: "bi-cash-coin" });
     const posC = card("포지션 · 체결 내역", null, { wide: true, icon: "bi-list-check" });
     const verifyC = card("규칙 검증 (백테스트)", null, { wide: true, icon: "bi-clipboard-data" });
+    const studyC = card("발굴 점수 검증 (이벤트 스터디)", null, { wide: true, icon: "bi-bar-chart-steps" });
     const dataC = card("데이터 확보 현황", null, { wide: true, icon: "bi-database" });
     const CARDS = [["summary", summaryC], ["positions", posC],
-                   ["verify", verifyC], ["data", dataC]];
+                   ["verify", verifyC], ["study", studyC], ["data", dataC]];
     CARDS.forEach(([id, c], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
@@ -272,7 +273,113 @@ export default {
     };
 
     // ==================================================================
-    // ④ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
+    // ④ 발굴 점수 검증 (이벤트 스터디)
+    // 야간 발굴 3규칙 점수가 실제로 익일 수익률과 상관이 있는가. 머신러닝을
+    // 얹기 전에 답해야 할 질문이다 — 상관이 없으면 어떤 모델도 소용없다.
+    // ==================================================================
+    const esRun = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" },
+      "지금 실행");
+    const esScope = el("select", { class: "form-select form-select-sm", style: "max-width:190px" }, [
+      el("option", { value: "liquid" }, "매수 가능 종목만"),
+      el("option", { value: "all" }, "전종목"),
+    ]);
+    const esBody = el("div", {}, emptyRow("불러오는 중…"));
+    studyC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-bar-chart-steps"></i> 발굴 3규칙 점수(0~3)와 <b>익일 수익률</b>의 관계. 진입 기준은 <b>익일 시가</b> — 발굴 배치가 17:30에 도니 당일 종가에는 못 산다. <b>초과수익</b>은 같은 날 전 종목 평균을 뺀 값이라 시장이 오른 날의 덕을 규칙 성적으로 세지 않는다.' })),
+      el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, [esScope, esRun]),
+      esBody,
+    );
+
+    let esData = null;
+    const renderStudy = () => {
+      const d = esData;
+      esBody.innerHTML = "";
+      if (!d || d.ok === false || !d.run_ts) {
+        esBody.appendChild(emptyRow(
+          (d && d.error) || "아직 실행되지 않았습니다 — '지금 실행'을 누르세요 (전종목 × 전 구간, 수 분 소요)"));
+        return;
+      }
+      const liquid = esScope.value === "liquid";
+      const buckets = (liquid ? d.buckets_liquid : d.buckets) || [];
+      const ic = (liquid ? d.ic_liquid : d.ic) || [];
+      esBody.appendChild(el("div", { class: "small text-secondary mb-2" },
+        `${d.date_from} ~ ${d.date_to} · ${d.days}거래일 · ${d.symbols}종목 · ` +
+        `표본 ${(liquid ? d.liquid_rows : d.rows).toLocaleString()}건 · ` +
+        `왕복 비용 ${d.cost_pct}% 반영 · 실행 ${String(d.run_ts).replace("T", " ").slice(0, 16)}`));
+      if (!buckets.length) {
+        esBody.appendChild(emptyRow("표본 없음"));
+        return;
+      }
+      // 점수별 성적
+      esBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, "점수별 익일 성적"));
+      esBody.appendChild(tableOf(
+        "<th>점수</th><th class='text-end'>표본</th><th class='text-end'>익일 수익률</th>" +
+        "<th class='text-end'>초과수익</th><th class='text-end'>비용 반영</th>" +
+        "<th class='text-end'>승률</th><th class='text-end'>t값</th>" +
+        "<th class='text-end'>못 먹는 갭</th>",
+        buckets.map((b) => {
+          const tone = (v) => (v > 0 ? "text-danger" : v < 0 ? "text-primary" : "");
+          // |t| > 2 라야 우연과 구분된다. 그 아래는 흐리게 — 눈이 속지 않게.
+          const solid = b.reliable && Math.abs(b.t_stat) > 2;
+          return el("tr", { class: b.reliable ? "" : "opacity-50" }, [
+            el("td", { class: "fw-semibold" }, `${b.score}점`),
+            el("td", { class: "text-end" }, b.n.toLocaleString()),
+            el("td", { class: "text-end " + tone(b.mean_pct) }, `${b.mean_pct}%`),
+            el("td", { class: "text-end fw-semibold " + tone(b.excess_pct) }, `${b.excess_pct}%`),
+            el("td", { class: "text-end " + tone(b.net_pct) }, `${b.net_pct}%`),
+            el("td", { class: "text-end" }, `${b.win_rate}%`),
+            el("td", { class: "text-end " + (solid ? "fw-semibold" : "text-secondary"),
+                       title: solid ? "우연으로 보기 어려움" : "우연과 구분되지 않음" },
+               b.reliable ? b.t_stat : "표본부족"),
+            el("td", { class: "text-end text-secondary" }, `${b.gap_pct}%`),
+          ]);
+        })));
+      // IC
+      if (ic.length) {
+        esBody.appendChild(el("div", { class: "fw-semibold small mt-3 mb-1" },
+          "피처별 예측력 (일별 순위상관 IC)"));
+        esBody.appendChild(el("div", { class: "small text-secondary mb-1" },
+          "같은 점수 안에서 줄을 세울 수 있는지 — 평균 IC 0.02~0.05면 실전에서 쓸 만한 수준으로 본다. |t값| 2 미만은 우연과 구분되지 않는다."));
+        esBody.appendChild(tableOf(
+          "<th>피처</th><th class='text-end'>평균 IC</th><th class='text-end'>t값</th>" +
+          "<th class='text-end'>양수 비율</th><th class='text-end'>일수</th>",
+          ic.map((r) => el("tr", { class: Math.abs(r.t_stat) > 2 ? "" : "opacity-50" }, [
+            el("td", {}, r.feature),
+            el("td", { class: "text-end " + (r.mean_ic > 0 ? "text-danger" : "text-primary") },
+               r.mean_ic.toFixed(4)),
+            el("td", { class: "text-end" }, r.t_stat),
+            el("td", { class: "text-end" }, `${r.hit_rate}%`),
+            el("td", { class: "text-end text-secondary" }, r.days),
+          ]))));
+      }
+      // 한계 — 숨기지 않는다
+      esBody.appendChild(el("ul", { class: "small text-secondary mt-3 mb-0 ps-3" },
+        (d.caveats || []).map((c) => el("li", {}, c))));
+    };
+    esScope.onchange = renderStudy;
+    const loadStudy = async () => {
+      try { esData = await fetchJSON("/api/trading/research/event-study"); }
+      catch (e) { return; }
+      if (!changed("study", esData)) return;
+      renderStudy();
+    };
+    esRun.onclick = async () => {
+      esRun.disabled = true;
+      esBody.innerHTML = "";
+      esBody.appendChild(emptyRow("실행 중… 전종목 × 전 구간 재현이라 수 분 걸립니다 (별도 프로세스 — 매매는 계속 돕니다)"));
+      try {
+        esData = await postJSON("/api/trading/research/event-study/run");
+        changed.invalidate("study");
+        renderStudy();
+      } catch (e) {
+        esBody.innerHTML = "";
+        esBody.appendChild(el("div", { class: "text-danger small" }, "실패: " + e.message));
+      } finally { esRun.disabled = false; }
+    };
+
+    // ==================================================================
+    // ⑤ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
     // ==================================================================
     const covHead = el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" });
     const covBody = el("div", {}, emptyRow("불러오는 중…"));
@@ -327,8 +434,8 @@ export default {
       runBacktest();
     }
 
-    await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport()]);
+    await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport(), loadStudy()]);
     ctx.addTimer(setInterval(() => { loadPerformance(); loadCoverage(); }, 30_000));
-    ctx.addTimer(setInterval(loadBacktestReport, 300_000));
+    ctx.addTimer(setInterval(() => { loadBacktestReport(); loadStudy(); }, 300_000));
   },
 };

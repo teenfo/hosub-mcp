@@ -518,6 +518,31 @@ async def api_backtest_report_run(_=Depends(require_auth)):
     return await reporter.run_offloaded()   # 별도 프로세스 — 루프를 막지 않는다
 
 
+@app.get("/api/research/event-study")
+async def api_event_study(_=Depends(require_auth)):
+    """발굴 점수 이벤트 스터디 최신 결과(조회성 — 주문 없음)."""
+    from .research import eventstudy
+
+    return await asyncio.to_thread(eventstudy.latest)   # 파일 1개 읽기
+
+
+_study_running = {"on": False}
+
+
+@app.post("/api/research/event-study/run")
+async def api_event_study_run(_=Depends(require_auth)):
+    """이벤트 스터디 실행. 전종목 × 전 구간이라 무겁다 — 별도 프로세스."""
+    from .backtest import offload
+
+    if _study_running["on"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    _study_running["on"] = True
+    try:
+        return await offload.run_job("study")
+    finally:
+        _study_running["on"] = False
+
+
 @app.get("/api/backtest/sweep/latest")
 async def api_sweep_latest(_=Depends(require_auth)):
     """주간 기법 스윕 최신 성적표(규칙별 격리 백테스트, 롱 방향)."""
