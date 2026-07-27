@@ -127,3 +127,14 @@ def test_realized_today_sums_closed(tmp_path, monkeypatch):
     ledger.monitor(lambda s: 10_500)          # 둘 다 목표 청산(이익)
     r = ledger.realized_today(equity=1_000_000)
     assert r["trades"] == 2 and r["krw"] > 0 and r["pct"] > 0
+
+
+def test_open_count_tracks_status(tmp_path, monkeypatch):
+    """동시 포지션 한도 판정용 카운트 — 열린 것만 센다."""
+    _fresh(tmp_path, monkeypatch)
+    assert ledger.open_count() == 0
+    ledger.open_position(_order("c1"), fill=10_000)
+    ledger.open_position(_order("c2", symbol="000660"), fill=10_000)
+    assert ledger.open_count() == 2
+    ledger.monitor(lambda s: 9_700)                   # 둘 다 손절 청산
+    assert ledger.open_count() == 0

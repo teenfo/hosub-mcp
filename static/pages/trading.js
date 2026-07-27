@@ -52,9 +52,11 @@ export default {
     const gTarget = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
     const gLoss = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", style: "max-width:88px" });
     const gRisk = el("input", { class: "form-control form-control-sm", type: "number", step: "0.1", min: "0", max: "50", style: "max-width:88px" });
+    const gWeight = el("input", { class: "form-control form-control-sm", type: "number", step: "1", min: "0", max: "100", style: "max-width:88px" });
     const gAuto = el("input", { class: "form-check-input", type: "checkbox", id: "gAutoChk" });
     const gScan = el("input", { class: "form-control form-control-sm", type: "number",
                                 step: "5", min: "10", max: "300", style: "max-width:88px" });
+    const gConfirm = el("input", { class: "form-check-input", type: "checkbox", id: "gConfirmChk" });
     const gSave = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "저장");
     const gStatus = el("div", { class: "mt-2 small" });
     const saveRisk = async () => {
@@ -64,6 +66,7 @@ export default {
           daily_target_pct: parseFloat(gTarget.value),
           daily_loss_limit_pct: parseFloat(gLoss.value),
           risk_per_trade_pct: parseFloat(gRisk.value),
+          max_position_weight_pct: parseFloat(gWeight.value),
           auto_approve: gAuto.checked,
         });
         _memo["risk"] = undefined;
@@ -75,9 +78,10 @@ export default {
     const fld = (lbl, input) => el("div", {}, [el("label", { class: "form-label small text-secondary mb-0" }, lbl), input]);
     guardC.body.append(
       el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-shield-check"></i> <b>거래당 리스크</b> = 1회 손절 시 계좌 대비 최대 손실 %(주문 수량을 정함). <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춤. (실거래 성과 로그 기준)' })),
+        el("span", { html: '<i class="bi bi-shield-check"></i> <b>거래당 리스크</b> = 1회 손절 시 계좌 대비 최대 손실 %(주문 수량을 정함). <b>종목당 비중</b> = 한 종목이 계좌에서 차지할 수 있는 최대 %(0=상한 없음). <b>일일 목표/손실한도</b> = 당일 실현손익이 도달하면 그날 신규 진입을 멈춤. (실거래 성과 로그 기준)' })),
       el("div", { class: "d-flex gap-3 flex-wrap align-items-end" },
-        [fld("거래당 리스크 %", gRisk), fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss),
+        [fld("거래당 리스크 %", gRisk), fld("종목당 비중 %", gWeight),
+         fld("일일 목표 %", gTarget), fld("손실 한도 %", gLoss),
          el("div", {}, gSave)]),
       el("div", { class: "form-check form-switch mt-2" }, [
         gAuto,
@@ -85,7 +89,7 @@ export default {
           "⚡ 완전 자동 발주 — 신호를 승인 없이 즉시 발주, 목표 청산도 자동 (저장 필요)"),
       ]),
       el("div", { class: "small text-secondary mt-1" },
-        "팁: 거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 소액 계좌는 절대금액이 작아 대부분 1~2주로 잡힙니다."),
+        "팁: 거래당 리스크는 일일 손실한도보다 작게 두세요(예: 0.5% ↔ 1.5% = 하루 손절 3번 여유). 소액 계좌는 절대금액이 작아 대부분 1~2주로 잡힙니다. 종목당 비중은 100 ÷ 동시 보유 목표수 정도로 — 예: 5종목 목표면 20%."),
       gStatus,
     );
     const loadRisk = async () => {
@@ -95,12 +99,14 @@ export default {
       if (document.activeElement !== gTarget) gTarget.value = r.daily_target_pct;
       if (document.activeElement !== gLoss) gLoss.value = r.daily_loss_limit_pct;
       if (document.activeElement !== gRisk) gRisk.value = r.risk_per_trade_pct;
+      if (document.activeElement !== gWeight) gWeight.value = r.max_position_weight_pct ?? 0;
       if (document.activeElement !== gScan) gScan.value = r.scan_interval_sec ?? 60;
       if (Array.isArray(r.scan_interval_range)) {
         gScan.min = r.scan_interval_range[0];
         gScan.max = r.scan_interval_range[1];
       }
       gAuto.checked = !!r.auto_approve;
+      gConfirm.checked = !!r.confirm_on_close;
       gStatus.innerHTML = "";
       const cls = r.pct >= 0 ? "text-danger" : "text-primary";
       gStatus.append(el("div", {}, [
@@ -165,6 +171,13 @@ export default {
         [fld("감시 주기(초)", gScan), el("div", {}, scanSave)]),
       el("div", { class: "small text-secondary mb-2" },
         "신호 스캔 간격(10~300초). 짧을수록 진입이 빨라지지만 감시 종목수 × 호출이 늘어 API 한도에 가까워집니다. 저장 즉시 적용(재시작 불필요). 한도 초과(429)가 나면 서버가 자동으로 호출 속도를 절반으로 낮추고, 안정되면 단계적으로 회복합니다."),
+      el("div", { class: "form-check form-switch" }, [
+        gConfirm,
+        el("label", { class: "form-check-label small fw-semibold", for: "gConfirmChk" },
+          "🔒 돌파 확인 — 봉이 마감된 뒤에만 발사"),
+      ]),
+      el("div", { class: "small text-secondary mb-2" },
+        "키움 분봉은 '형성 중인 현재 봉'을 현재가로 함께 내려줍니다. 끄면 지금 이 순간 가격으로 판단해 더 빨리 진입하지만, 찍고 되밀린 가짜 돌파에도 반응합니다. 신호는 (종목·규칙)당 하루 한 번만 발사되므로 가짜 돌파 한 번이 그날의 기회를 소진합니다. 감시 주기를 짧게 쓸수록 켜 두는 편이 안전합니다. (백테스트는 항상 마감봉 기준이라 켠 쪽이 백테스트와 같은 조건입니다.)"),
       scanMsg,
       usageBox,
     ]);
@@ -219,11 +232,14 @@ export default {
       scanSave.disabled = true;
       scanMsg.textContent = "";
       try {
-        await postJSON("/api/trading/risk", { scan_interval_sec: parseInt(gScan.value, 10) });
+        await postJSON("/api/trading/risk", {
+          scan_interval_sec: parseInt(gScan.value, 10),
+          confirm_on_close: gConfirm.checked,
+        });
         _memo["risk"] = undefined;
         await loadRisk();
         scanMsg.className = "small mt-1 text-success";
-        scanMsg.textContent = `저장됨 — ${gScan.value}초 주기로 다음 스캔부터 적용`;
+        scanMsg.textContent = `저장됨 — ${gScan.value}초 주기 · 돌파 확인 ${gConfirm.checked ? "켜짐" : "꺼짐"} (다음 스캔부터 적용)`;
       } catch (e) {
         scanMsg.className = "small mt-1 text-danger";
         scanMsg.textContent = "저장 실패: " + e.message;
@@ -446,6 +462,26 @@ export default {
       }
     };
 
+    // --- 다음 스캔 카운트다운 ---
+    // 상태 API 는 10초마다 오므로 서버가 준 next_scan_sec 을 기준점으로 삼고
+    // 브라우저가 1초씩 깎는다(주기를 짧게 써도 매끄럽게 보이도록).
+    const cdText = el("span", {});
+    const cdBar = el("div", { class: "progress-bar", style: "width:0%" });
+    const cdBox = el("div", { class: "small mt-1" }, [
+      cdText,
+      el("div", { class: "progress mt-1", style: "height:4px" }, cdBar),
+    ]);
+    let scanState = null;      // { interval, next, at } — at = 기준점을 받은 시각
+    const tickCountdown = () => {
+      if (!scanState) { cdBox.classList.add("d-none"); return; }
+      cdBox.classList.remove("d-none");
+      const iv = scanState.interval || 60;
+      const left = Math.max(0, scanState.next - (Date.now() - scanState.at) / 1000);
+      cdText.textContent = left >= 1 ? `다음 스캔까지 ${Math.ceil(left)}초`
+                                     : "스캔 실행 중…";
+      cdBar.style.width = `${Math.max(0, Math.min(100, (1 - left / iv) * 100))}%`;
+    };
+
     const loadStatus = async () => {
       let s;
       try {
@@ -473,6 +509,11 @@ export default {
         : mk.last_scan_age_sec < 120 ? `${mk.last_scan_age_sec}초 전 스캔`
         : `${Math.floor(mk.last_scan_age_sec / 60)}분 전 스캔`;
       const stale = mk.scanning && mk.last_scan_age_sec != null && mk.last_scan_age_sec > 180;
+      // 카운트다운 기준점 갱신 — 감시 중이 아니면 숨긴다
+      scanState = (mk.scanning && !stale && mk.next_scan_sec != null)
+        ? { interval: mk.scan_interval_sec || 60, next: mk.next_scan_sec, at: Date.now() }
+        : null;
+      tickCountdown();
       status.body.appendChild(el("div", {
         class: `alert alert-${stale ? "danger" : (TONE[mk.phase] || "secondary")} py-2 px-3 mb-2`,
       }, [
@@ -482,6 +523,7 @@ export default {
         el("div", { class: "small" },
           (mk.scanning ? ageTxt + (stale ? " ⚠ 스캔이 멈춘 것 같습니다" : "")
                        : `정규장 ${mk.session || "09:00~15:30"}`)),
+        cdBox,
       ]));
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
       const clockBadge = s.server_time
@@ -721,7 +763,9 @@ export default {
           el("td", { class: "small text-secondary text-nowrap" }, agoStr(s.ts)),
           el("td", {}, `${s.name} (${s.symbol})`),
           curTd,
-          el("td", {}, s.rule),
+          el("td", { title: s.priority != null
+            ? `발주 우선순위 ${s.priority} — 같은 사이클의 신호는 이 점수가 높은 순으로 발주됩니다(규칙 기대값 × 손익비).` : "" },
+            s.priority != null ? `${s.rule} (${Math.round(s.priority)})` : s.rule),
           el("td", {}, sideBadge(s.side)),
           el("td", { class: "small" }, s.entry ? `${fmt(s.entry)} / ${fmt(s.stop)} / ${fmt(s.target)}` : "—"),
           el("td", { class: "small text-nowrap" }, statusEl),
@@ -746,6 +790,7 @@ export default {
 
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadRisk()]);
     ctx.addTimer(setInterval(refreshPrices, 2_000));   // 현재가 셀만 2초 갱신
+    ctx.addTimer(setInterval(tickCountdown, 1_000));   // 다음 스캔 카운트다운
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); }, 10_000));
     ctx.addTimer(setInterval(loadRisk, 30_000));
     ctx.addTimer(setInterval(loadPositions, 15_000));
