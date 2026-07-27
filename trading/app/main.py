@@ -557,6 +557,31 @@ async def api_event_study_run(_=Depends(require_auth)):
         _study_running["on"] = False
 
 
+@app.get("/api/research/ranking")
+async def api_ranking(_=Depends(require_auth)):
+    """랭킹 방식 비교 최신 결과(조회성 — 주문 없음)."""
+    from .research import ranking
+
+    return await asyncio.to_thread(ranking.latest)
+
+
+_rank_running = {"on": False}
+
+
+@app.post("/api/research/ranking/run")
+async def api_ranking_run(_=Depends(require_auth)):
+    """랭킹 방식 비교 실행. 전종목 × 전 구간 × 방식 6종이라 무겁다 — 별도 프로세스."""
+    from .backtest import offload
+
+    if _rank_running["on"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    _rank_running["on"] = True
+    try:
+        return await offload.run_job("rank")
+    finally:
+        _rank_running["on"] = False
+
+
 @app.get("/api/backtest/sweep/latest")
 async def api_sweep_latest(_=Depends(require_auth)):
     """주간 기법 스윕 최신 성적표(규칙별 격리 백테스트, 롱 방향)."""

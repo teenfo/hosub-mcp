@@ -33,9 +33,10 @@ export default {
     const posC = card("포지션 · 체결 내역", null, { wide: true, icon: "bi-list-check" });
     const verifyC = card("규칙 검증 (백테스트)", null, { wide: true, icon: "bi-clipboard-data" });
     const studyC = card("발굴 점수 검증 (이벤트 스터디)", null, { wide: true, icon: "bi-bar-chart-steps" });
+    const rankC = card("랭킹 방식 비교 (브래킷 근사)", null, { wide: true, icon: "bi-sort-down" });
     const dataC = card("데이터 확보 현황", null, { wide: true, icon: "bi-database" });
-    const CARDS = [["summary", summaryC], ["positions", posC],
-                   ["verify", verifyC], ["study", studyC], ["data", dataC]];
+    const CARDS = [["summary", summaryC], ["positions", posC], ["verify", verifyC],
+                   ["study", studyC], ["ranking", rankC], ["data", dataC]];
     CARDS.forEach(([id, c], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
@@ -462,7 +463,141 @@ export default {
     };
 
     // ==================================================================
-    // ⑤ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
+    // ⑤ 랭킹 방식 비교 — "어떤 순서로 줄을 세워야 실제 R 이 나오는가"
+    // 이벤트 스터디는 순위가 맞는지(IC)만 잰다. IC 가 좋아도 손절·목표·비용을
+    // 통과하면 R 이 안 나올 수 있다. 여기서는 방식별 실현 R 을 근사해 비교한다.
+    // ==================================================================
+    const METHOD_KO = {
+      score: ["발굴 점수 (현행)", "야간 발굴 3규칙 점수 0~3"],
+      atr: ["변동성 단독", "atr_pct — 최대상승 기준 최강 원시 피처"],
+      composite_is: ["잔차 IC 합성 (전 구간 학습)", "in-sample 상한 — 이보다 잘 나올 수 없다"],
+      composite_wf: ["잔차 IC 합성 (walk-forward)", "직전 학습창의 잔차 IC 로만 가중 — 진짜 성적"],
+      liquid_only: ["유동성 통과분 무작위", "'랭킹 폐기, 게이트만' 안"],
+      random: ["전종목 무작위 (대조군)", "이걸 못 이기면 랭킹의 존재 이유가 없다"],
+    };
+    const rkRun = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" },
+      "지금 실행");
+    const rkBody = el("div", {}, emptyRow("불러오는 중…"));
+    rankC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-sort-down"></i> 방식별로 하루 상위 N 종목을 뽑아 <b>손절·목표 브래킷</b>을 일봉 고가·저가로 근사한 실현 R. 진짜 백테스트가 아니다 — 분봉은 일부 종목뿐이고 발굴 유니버스는 전종목이라 근사가 유일한 길이다. <b>절대 R 값이 아니라 방식 간 격차</b>를 읽는 표다.' })),
+      el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, [rkRun]),
+      rkBody,
+    );
+
+    let rkData = null;
+    const renderRanking = () => {
+      const d = rkData;
+      rkBody.innerHTML = "";
+      if (!d || d.ok === false || !d.run_ts) {
+        rkBody.appendChild(emptyRow(
+          (d && d.error) || "아직 실행되지 않았습니다 — '지금 실행'을 누르세요 (방식 6종 × 손절폭, 수 분 소요)"));
+        return;
+      }
+      const rows = d.rows || [];
+      const stops = d.stops || [];
+      rkBody.appendChild(el("div", { class: "small text-secondary mb-2" },
+        `${(d.rows_used || 0).toLocaleString()}행 · ${d.days}거래일 · ${d.symbols}종목 · ` +
+        `하루 상위 ${d.top_n}종목 · 목표 ${d.target_r}R · 왕복 비용 ${d.cost_pct}% · ` +
+        `학습창 ${d.train_days}거래일 · 실행 ${String(d.run_ts).replace("T", " ").slice(0, 16)}`));
+      const at = (m, s) => rows.find((r) => r.method === m && r.stop_pct === s);
+      const tone = (v) => (v > 0 ? "text-danger" : v < 0 ? "text-primary" : "");
+      rkBody.appendChild(tableOf(
+        "<th>랭킹 방식</th>" +
+        stops.map((s) => `<th class='text-end'>손절 ${s}%</th>`).join("") +
+        "<th class='text-end'>대조군 대비</th>",
+        (d.methods || []).map((m) => {
+          const [label, note] = METHOD_KO[m] || [m, ""];
+          const cells = stops.map((s) => {
+            const r = at(m, s);
+            if (!r || !r.reliable) {
+              return el("td", { class: "text-end text-secondary", title: "표본 부족 — 수치를 믿지 않는다" }, "—");
+            }
+            const solid = Math.abs(r.t_stat) > 2;
+            return el("td", {
+              class: "text-end " + (solid ? "fw-semibold " : "") + tone(r.avg_r),
+              title: `${r.trades}건 / ${r.days}일 · 승률 ${r.win_rate}% · t=${r.t_stat} · 누적 ${r.total_r}R`,
+            }, r.avg_r.toFixed(3));
+          });
+          // 대조군 대비는 각 방식의 최고 손절폭 기준으로 하나만 보여준다
+          const best = rows.filter((r) => r.method === m && r.reliable)
+            .sort((a, b) => b.avg_r - a.avg_r)[0];
+          const vs = best && best.vs_random;
+          return el("tr", { class: m === "random" ? "table-light" : "" }, [
+            el("td", {}, [el("div", {}, label),
+                          el("div", { class: "text-secondary", style: "font-size:.72rem" }, note)]),
+            ...cells,
+            el("td", { class: "text-end " + tone(vs) },
+               vs == null ? "—" : (vs > 0 ? "+" : "") + vs.toFixed(3) + "R"),
+          ]);
+        })));
+      // --- 판정 — 실행 전에 못박은 규칙을 그대로 적용한다 ---
+      const bestOf = (m) => rows.filter((r) => r.method === m && r.reliable)
+        .sort((a, b) => b.avg_r - a.avg_r)[0];
+      const wf = bestOf("composite_wf");
+      const isw = bestOf("composite_is");
+      const sc = bestOf("score");
+      const lq = bestOf("liquid_only");
+      const beats = (r) => r && r.vs_random != null && r.vs_random > 0;
+      const lines = [];
+      const anyBeats = (d.methods || []).filter((m) => m !== "random" && beats(bestOf(m)));
+      if (!anyBeats.length) {
+        lines.push(["danger", "어느 방식도 무작위 대조군을 못 이겼다 — 발굴 랭킹을 폐기하고 유동성·체결가능성 게이트만 남기는 것이 정직한 결론이다(판정 규칙 3)."]);
+      } else {
+        lines.push(["secondary", `대조군을 이긴 방식: ${anyBeats.map((m) => (METHOD_KO[m] || [m])[0]).join(", ")}`]);
+      }
+      if (wf && sc) {
+        lines.push(wf.avg_r > sc.avg_r
+          ? ["success", `walk-forward 합성 ${wf.avg_r.toFixed(3)}R > 현행 점수 ${sc.avg_r.toFixed(3)}R — 랭킹 교체 근거가 된다(판정 규칙 2).`]
+          : ["secondary", `walk-forward 합성 ${wf.avg_r.toFixed(3)}R ≤ 현행 점수 ${sc.avg_r.toFixed(3)}R — 랭킹을 바꿀 근거가 없다.`]);
+      }
+      if (wf && isw) {
+        const gap = isw.avg_r - wf.avg_r;
+        lines.push([gap > Math.abs(wf.avg_r) ? "warning" : "secondary",
+          `과적합 크기 = in-sample ${isw.avg_r.toFixed(3)}R − walk-forward ${wf.avg_r.toFixed(3)}R = ${gap.toFixed(3)}R. ` +
+          "격차가 크면 위 교체 결론을 채택하지 않는다(판정 규칙 4)."]);
+      }
+      if (lq && beats(lq) && (!wf || lq.avg_r >= wf.avg_r)) {
+        lines.push(["warning", "유동성 통과분 무작위가 어떤 랭킹보다 낫다 — 게이트가 값을 내고 순서는 안 낸다는 뜻이다."]);
+      }
+      if (d.best) {
+        const [bl] = METHOD_KO[d.best.method] || [d.best.method];
+        lines.push(["secondary",
+          `최고 조합: ${bl} × 손절 ${d.best.stop_pct}% → ${d.best.avg_r}R (${d.best.trades}건, t=${d.best.t_stat}). ` +
+          `가중치 학습 목적어는 ${d.learn_target} 였다 — 이 조합이 목적어 확정의 근거다(판정 규칙 5).`]);
+      }
+      rkBody.appendChild(el("div", { class: "small mt-3" }, [
+        el("div", { class: "fw-semibold mb-1" }, "판정 (실행 전에 못박은 규칙)"),
+        ...lines.map(([t, txt]) => el("div", { class: "mb-1" }, [
+          el("span", { class: `badge me-2 text-bg-${t}` }, "·"),
+          el("span", { class: t === "secondary" ? "text-secondary" : "" }, txt),
+        ])),
+      ]));
+      rkBody.appendChild(el("ul", { class: "small text-secondary mt-3 mb-0 ps-3" },
+        (d.caveats || []).map((c) => el("li", {}, c))));
+    };
+    const loadRanking = async () => {
+      try { rkData = await fetchJSON("/api/trading/research/ranking"); }
+      catch (e) { return; }
+      if (!changed("ranking", rkData)) return;
+      renderRanking();
+    };
+    rkRun.onclick = async () => {
+      rkRun.disabled = true;
+      rkBody.innerHTML = "";
+      rkBody.appendChild(emptyRow("실행 중… 방식 6종 × 손절폭 재현이라 수 분 걸립니다 (별도 프로세스 — 매매는 계속 돕니다)"));
+      try {
+        rkData = await postJSON("/api/trading/research/ranking/run");
+        changed.invalidate("ranking");
+        renderRanking();
+      } catch (e) {
+        rkBody.innerHTML = "";
+        rkBody.appendChild(el("div", { class: "text-danger small" }, "실패: " + e.message));
+      } finally { rkRun.disabled = false; }
+    };
+
+    // ==================================================================
+    // ⑥ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
     // ==================================================================
     const covHead = el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" });
     const covBody = el("div", {}, emptyRow("불러오는 중…"));
@@ -517,8 +652,9 @@ export default {
       runBacktest();
     }
 
-    await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport(), loadStudy()]);
+    await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport(),
+                       loadStudy(), loadRanking()]);
     ctx.addTimer(setInterval(() => { loadPerformance(); loadCoverage(); }, 30_000));
-    ctx.addTimer(setInterval(() => { loadBacktestReport(); loadStudy(); }, 300_000));
+    ctx.addTimer(setInterval(() => { loadBacktestReport(); loadStudy(); loadRanking(); }, 300_000));
   },
 };
