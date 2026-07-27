@@ -247,6 +247,112 @@ def test_model_ops_require_model_param(client):
     assert client.delete("/api/llm/models/delete?model=").status_code == 400
 
 
+# --- 역할 운영 · A/B 비교 ---
+def test_role_ops_need_login(client):
+    assert client.get("/api/llm/roles").status_code == 401
+    assert client.post("/api/llm/roles",
+                       json={"role": "x", "fields": {"model": "m"}}).status_code == 401
+    assert client.delete("/api/llm/roles?role=x").status_code == 401
+    assert client.post("/api/llm/compare",
+                       json={"prompt": "x", "models": ["a", "b"]}).status_code == 401
+
+
+def test_role_override_is_audited_as_medium(client, monkeypatch):
+    from src import gateway
+
+    calls = []
+    monkeypatch.setattr(gateway, "set_role_override",
+                        lambda role, fields, note=None:
+                        calls.append((role, fields)) or
+                        {"status": "ok", "role": {"name": role, "origin": "yaml"}})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.post("/api/llm/roles",
+                    json={"role": "summarize", "fields": {"model": "qwen3:8b"}})
+    assert r.status_code == 200
+    assert calls == [("summarize", {"model": "qwen3:8b"})]
+    row = next(x for x in client.get("/api/audit?limit=5").json()["audit"]
+               if x["tool"] == "llm_set_role")
+    assert row["risk"] == "medium"
+
+
+def test_new_db_role_is_audited_as_high(client, monkeypatch):
+    """새 역할은 계약 추가라 기존 역할 수정보다 등급이 높다."""
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "set_role_override",
+                        lambda role, fields, note=None:
+                        {"status": "ok", "role": {"name": role, "origin": "db"}})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    client.post("/api/llm/roles", json={"role": "newbie", "fields": {"model": "m"}})
+    row = next(x for x in client.get("/api/audit?limit=5").json()["audit"]
+               if x["tool"] == "llm_set_role")
+    assert row["risk"] == "high"
+
+
+def test_role_save_requires_fields(client):
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    assert client.post("/api/llm/roles", json={"role": "x"}).status_code == 400
+    assert client.post("/api/llm/roles", json={"fields": {"model": "m"}}).status_code == 400
+    assert client.delete("/api/llm/roles?role=").status_code == 400
+
+
+def test_role_delete_is_audited_as_high(client, monkeypatch):
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "revert_role",
+                        lambda role: {"status": "ok", "removed": True})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    client.delete("/api/llm/roles?role=newbie")
+    row = next(x for x in client.get("/api/audit?limit=5").json()["audit"]
+               if x["tool"] == "llm_revert_role")
+    assert row["risk"] == "high"
+
+
+def test_compare_proxied_and_requires_two_models(client, monkeypatch):
+    from src import gateway
+
+    seen = {}
+
+    def fake(prompt, models, system=None, options=None):
+        seen.update(prompt=prompt, models=models, system=system)
+        return {"status": "ok", "run": {"id": "r1"}, "done": False}
+
+    monkeypatch.setattr(gateway, "compare_models", fake)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    assert client.post("/api/llm/compare",
+                       json={"prompt": "q", "models": ["a"]}).status_code == 400
+    r = client.post("/api/llm/compare",
+                    json={"prompt": "q", "models": ["a", "b"], "system": "s"})
+    assert r.status_code == 200 and r.json()["run"]["id"] == "r1"
+    assert seen == {"prompt": "q", "models": ["a", "b"], "system": "s"}
+
+
+def test_llm_generate_passes_system_through(client, monkeypatch):
+    """지금까지 대시보드가 system 을 버리고 있었다 — 역할 기본값밖에 못 썼다."""
+    from src import gateway
+
+    seen = {}
+
+    def fake(role, prompt, system=None, **kw):
+        seen.update(role=role, system=system)
+        return {"status": "ok", "response": "네"}
+
+    monkeypatch.setattr(gateway, "generate", fake)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+
+    client.post("/api/llm/generate", json={"role": "general", "prompt": "x"})
+    assert seen["system"] is None                 # 키 생략 = 역할 기본값
+
+    client.post("/api/llm/generate",
+                json={"role": "general", "prompt": "x", "system": "너는 코치다"})
+    assert seen["system"] == "너는 코치다"
+
+    # 빈 문자열은 "시스템 프롬프트 없음" — None 과 다른 의미다
+    client.post("/api/llm/generate",
+                json={"role": "general", "prompt": "x", "system": ""})
+    assert seen["system"] == ""
+
+
 def test_catalog_search_passes_query(client, monkeypatch):
     from src import gateway
 
