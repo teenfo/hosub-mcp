@@ -12,6 +12,7 @@ hosub 는 맥의 Ollama 를 **직접 부르지 않는다.** 모든 추론은 게
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 import httpx
 
@@ -100,12 +101,13 @@ def generate(role: str, prompt: str, *, system: str | None = None,
 
 def get_job(job_id: str, *, client_factory=httpx.Client) -> dict:
     """잡 조회. pending 이던 생성 요청의 결과를 나중에 수령한다."""
-    return _call("GET", f"/v1/jobs/{job_id}", client_factory=client_factory)
+    return _call("GET", f"/v1/jobs/{quote(job_id, safe='')}",
+                 client_factory=client_factory)
 
 
 def list_model_requests(status: str | None = None, *, client_factory=httpx.Client) -> dict:
     """모델 설치 요청 목록. pending 이 있으면 사용자의 승인이 필요하다."""
-    path = "/v1/models/requests" + (f"?status={status}" if status else "")
+    path = "/v1/models/requests" + (f"?status={quote(status, safe='')}" if status else "")
     return _call("GET", path, client_factory=client_factory)
 
 
@@ -140,7 +142,7 @@ def set_role_override(role: str, fields: dict, *, note: str | None = None,
 
 def revert_role(role: str, *, client_factory=httpx.Client) -> dict:
     """오버라이드를 지워 roles.yaml 기본값으로 되돌린다."""
-    return _call("DELETE", f"/v1/admin/roles?role={role}",
+    return _call("DELETE", f"/v1/admin/roles?role={quote(role, safe='')}",
                  client_factory=client_factory)
 
 
@@ -152,7 +154,8 @@ def list_installed_models(*, client_factory=httpx.Client) -> dict:
 
 def delete_model(model: str, *, client_factory=httpx.Client) -> dict:
     """맥에서 모델을 지운다. 쓰는 역할·대기 잡이 있으면 409 로 거부된다."""
-    return _call("DELETE", f"/v1/admin/models?model={model}",
+    # 모델 이름에는 ':'·'/' 가 들어간다 — 쿼리스트링에 그대로 넣지 않는다
+    return _call("DELETE", f"/v1/admin/models?model={quote(model, safe='')}",
                  client_factory=client_factory, timeout=60)
 
 
@@ -165,5 +168,8 @@ def install_model(model: str, *, client_factory=httpx.Client) -> dict:
 def search_catalog(query: str = "", kind: str | None = None, *,
                    client_factory=httpx.Client) -> dict:
     """내장 카탈로그 검색. 목록에 없으면 이름을 직접 입력해 설치한다."""
-    path = f"/v1/admin/catalog?q={query}" + (f"&kind={kind}" if kind else "")
+    # 검색어는 사용자 자유 입력이다. 인코딩하지 않으면 'a&b' 가 잘린다.
+    path = f"/v1/admin/catalog?q={quote(query or '', safe='')}"
+    if kind:
+        path += f"&kind={quote(kind, safe='')}"
     return _call("GET", path, client_factory=client_factory)

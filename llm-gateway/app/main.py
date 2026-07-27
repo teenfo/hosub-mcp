@@ -179,6 +179,14 @@ def build_app(
         """DB → 유효 역할 맵. 쓰기 직후 항상 이 한 경로로만 반영한다."""
         return roles.apply_overrides(store.list_role_overrides())
 
+    def _sync_catalog_sizes() -> None:
+        """카탈로그는 git pull 로 바뀐다(재빌드 없음) — 크기 추정에 즉시 반영한다.
+
+        기동 시 한 번만 읽으면 새로 추가한 모델이 크기 게이트에서 20GB 로 가정돼
+        멀쩡한 설치가 거부된다. Catalog 는 mtime 캐시라 매번 불러도 싸다.
+        """
+        roles.set_catalog_sizes(catalog.sizes())
+
     # --- 엔드포인트 ---
     async def healthz(request: Request):
         return JSONResponse({"ok": True})
@@ -613,8 +621,8 @@ def build_app(
         out: list[dict] = []
         using = roles.roles_using(model, loose=True)
         if using:
-            embeds = [n for n in using if (roles.role(n) or None)
-                      and roles.role(n).kind == "embed"]
+            embeds = [n for n in using
+                      if (r := roles.role(n)) is not None and r.kind == "embed"]
             out.append({
                 "kind": "roles", "detail": using,
                 "message": f"이 모델을 쓰는 역할이 있습니다: {', '.join(using)}. "
@@ -722,6 +730,7 @@ def build_app(
         _svc, err = _require_admin(request)
         if err:
             return err
+        _sync_catalog_sizes()
         found = catalog.search(request.query_params.get("q") or "",
                                kind=request.query_params.get("kind"))
         installed = scheduler.available_models or []
@@ -749,6 +758,7 @@ def build_app(
                 {"error": "invalid_model", "detail": str(exc)}, status_code=400
             )
 
+        _sync_catalog_sizes()
         # 크기 게이트: _pick 이 사후에 잡을 몰살하는 대신 **설치 전에** 거부한다.
         # 크기를 모르는 모델은 20GB 로 가정되므로 이 문이 없으면 임의 설치가
         # 곧바로 사고가 된다.
