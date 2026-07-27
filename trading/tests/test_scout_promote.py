@@ -1,0 +1,202 @@
+"""승격·강등 판정 — 이 단계에서 1.5단계 실측이 실제로 적용된다.
+
+가장 중요한 회귀 감지는 **점수로 매매 tier 를 열지 않는가** 다. 원안은
+promote_trade: 0.65 점수 임계였는데, 점수 순 상위 N 이 매수가능 무작위보다
+0.22R 나빴다는 것이 실측됐다(191거래일 / 3,907종목). 이 파일이 그 결론을
+코드로 붙잡아 둔다.
+"""
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from app import settings
+from app.scout import promote
+from app.scout.promote import COLLECT, NONE, TRADE, Current
+from app.scout.scoring import Candidate
+
+NOW = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)
+LONG_AGO = NOW - timedelta(hours=2)
+
+
+def _c(code="000001", score=0.9, price=10_000, groups=1, **kw):
+    return Candidate(code=code, name=kw.pop("name", f"종목{code}"), score=score,
+                     price=price,
+                     sources=kw.pop("sources", ["volume"]),
+                     by_group=kw.pop("by_group", {"intraday": score}) if groups == 1
+                     else {"intraday": score / 2, "news": score / 2})
+
+
+def _cur(tier=None, since=None, protected=(), names=None):
+    return Current(tier=dict(tier or {}), since=dict(since or {}),
+                   protected=frozenset(protected), names=dict(names or {}))
+
+
+@pytest.fixture(autouse=True)
+def _cap(monkeypatch):
+    """체결가능성 한도를 고정 — 자산 동기화 상태에 좌우되지 않게."""
+    monkeypatch.setattr(settings, "tradable_price_cap", lambda default: 30_000.0)
+
+
+def _plan(cands, cur, now=NOW, **over):
+    return promote.plan(cands, cur, now, promote.DEFAULTS | over)
+
+
+def _by(rows, action):
+    return [r for r in rows if r["action"] == action]
+
+
+# --- ① 매매 승격은 점수가 아니라 게이트로 한다 ---
+
+def test_high_score_alone_does_not_open_trading():
+    """점수만으로 매매 tier 에 올리면 실측을 무시하는 것이다.
+
+    새 종목은 아무리 점수가 높아도 먼저 수집전용으로만 들어간다.
+    """
+    rows = _plan([_c(score=3.0)], _cur())
+    assert [r["action"] for r in rows] == ["promote_collect"]
+    assert rows[0]["to_tier"] == COLLECT
+
+
+def test_unaffordable_symbol_never_reaches_trade_tier():
+    """1주도 못 사는 종목을 매매 대상에 올려 봐야 '잔고 부족' 만 쌓인다.
+
+    현행 야간 발굴 편입 경로에는 이 가드가 아예 없다 — replace_auto 의
+    INSERT 에 collect_only 컬럼이 없어 DEFAULT 0(매매 tier)이 적용된다.
+    """
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    rows = _plan([_c(score=3.0, price=412_000)], cur)
+    assert _by(rows, "promote_trade") == []
+
+
+def test_affordable_symbol_promotes_after_dwell():
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    rows = _plan([_c(score=0.4, price=12_000)], cur)
+    assert [r["action"] for r in rows] == ["promote_trade"]
+    assert rows[0]["from_tier"] == COLLECT and rows[0]["to_tier"] == TRADE
+
+
+def test_unknown_price_is_treated_as_untradable():
+    """가격을 모르면 보수적으로 — 매매로 올리지 않는다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    assert _by(_plan([_c(price=0.0)], cur), "promote_trade") == []
+
+
+def test_probation_blocks_immediate_trade_promotion():
+    """검증 안 된 소스가 60초 만에 실거래로 이어지는 것을 막는다.
+
+    부수적으로 '감시했지만 매매하지 않은' 대조군 표본이 만들어진다.
+    """
+    cur = _cur(tier={"000001": COLLECT},
+               since={"000001": NOW - timedelta(minutes=1)})
+    assert _by(_plan([_c()], cur), "promote_trade") == []
+
+
+# --- ② 히스테리시스 — 경계에서 진동하지 않는다 ---
+
+def test_promote_threshold_is_above_demote_threshold():
+    assert promote.DEFAULTS["promote_collect"] > promote.DEFAULTS["demote_below"]
+
+
+def test_score_between_thresholds_holds_steady():
+    """승격선 아래·강등선 위 = 아무 일도 없어야 한다. 이게 진동 방지의 실체다."""
+    mid = (promote.DEFAULTS["promote_collect"] + promote.DEFAULTS["demote_below"]) / 2
+    assert _plan([_c(score=mid)], _cur()) == []          # 새 종목은 안 올라오고
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    assert _by(_plan([_c(score=mid, price=0.0)], cur), "drop") == []   # 있던 건 안 빠진다
+
+
+def test_vanished_signal_drops_the_symbol():
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO},
+               names={"000001": "종목000001"})
+    rows = _plan([], cur)
+    assert [r["action"] for r in rows] == ["drop"]
+    assert rows[0]["name"] == "종목000001"       # 후보에서 사라져도 이름은 남는다
+
+
+def test_min_dwell_prevents_immediate_drop():
+    """60초마다 들락날락하면 WS 재구독이 폭주한다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": NOW - timedelta(minutes=1)})
+    assert _plan([], cur) == []
+
+
+# --- ③ 강등에서 제외되는 것 ---
+
+def test_held_and_manual_symbols_are_never_dropped():
+    """보유 종목이 감시목록에서 빠지면 청산 감시가 최대 15분 묵은 가격으로 돈다.
+
+    실거래 손실로 이어졌던 결함이다(watchlist._held 참조).
+    """
+    cur = _cur(tier={"000001": TRADE, "000002": COLLECT},
+               since={"000001": LONG_AGO, "000002": LONG_AGO},
+               protected={"000001", "000002"})
+    assert _plan([], cur) == []
+
+
+def test_protected_symbols_do_not_count_against_overflow_drops():
+    cur = _cur(tier={f"00000{i}": COLLECT for i in range(1, 5)},
+               since={f"00000{i}": LONG_AGO for i in range(1, 5)},
+               protected={"000001", "000002"})
+    cands = [_c(code=f"00000{i}", score=0.9) for i in range(1, 5)]
+    rows = _plan(cands, cur, max_total=3)
+    assert {r["code"] for r in _by(rows, "drop")} <= {"000003", "000004"}
+
+
+# --- ④ 상한 ---
+
+def test_total_cap_blocks_new_entries():
+    cur = _cur(tier={"000009": COLLECT}, since={"000009": LONG_AGO})
+    rows = _plan([_c(code="000009", score=0.9), _c(code="000001", score=3.0)],
+                 cur, max_total=1)
+    assert _by(rows, "promote_collect") == []
+
+
+def test_overflow_drops_lowest_score_first():
+    """상한을 런타임에 낮추면 이미 초과 상태일 수 있다 — 점수 하위부터 뺀다.
+
+    점수의 유일한 매매 관련 용도가 이것이다: 누구를 올릴지가 아니라
+    자리가 모자랄 때 누구를 뺄지.
+    """
+    codes = ["000001", "000002", "000003"]
+    cur = _cur(tier={c: COLLECT for c in codes},
+               since={c: LONG_AGO for c in codes})
+    cands = [_c(code="000001", score=2.0), _c(code="000002", score=0.9),
+             _c(code="000003", score=0.5)]
+    rows = _plan(cands, cur, max_total=2)
+    assert [r["code"] for r in _by(rows, "drop")] == ["000003"]
+
+
+def test_trade_cap_demotes_to_collect_not_out():
+    """매매 상한 초과분은 감시에서 빼는 게 아니라 수집전용으로 내린다."""
+    codes = ["000001", "000002"]
+    cur = _cur(tier={c: TRADE for c in codes}, since={c: LONG_AGO for c in codes})
+    cands = [_c(code="000001", score=2.0), _c(code="000002", score=0.4)]
+    rows = _plan(cands, cur, max_trade=1)
+    demoted = _by(rows, "demote")
+    assert [r["code"] for r in demoted] == ["000002"]
+    assert demoted[0]["to_tier"] == COLLECT
+
+
+def test_trade_cap_blocks_new_trade_promotions():
+    cur = _cur(tier={"000001": COLLECT, "000009": TRADE},
+               since={"000001": LONG_AGO, "000009": LONG_AGO})
+    rows = _plan([_c(code="000001"), _c(code="000009")], cur, max_trade=1)
+    assert _by(rows, "promote_trade") == []
+
+
+# --- ⑤ 결정에 근거가 실린다 ---
+
+def test_decisions_carry_sources_and_reason():
+    """사후 귀속의 입력 — 어느 소스가 올렸는지가 남아야 측정이 된다."""
+    c = _c(sources=["volume", "news"], score=0.8, groups=2)
+    rows = _plan([c], _cur())
+    assert rows[0]["sources"] == ["volume", "news"]
+    assert rows[0]["reason"]
+    assert rows[0]["score"] == 0.8
+
+
+def test_plan_writes_nothing():
+    """순수 함수여야 shadow 가 안전하다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    before = dict(cur.tier)
+    _plan([_c(code="000002", score=3.0)], cur)
+    assert cur.tier == before
