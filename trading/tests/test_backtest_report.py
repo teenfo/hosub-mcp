@@ -53,3 +53,39 @@ def test_prune_minutes_drops_old_days(tmp_path, monkeypatch):
     assert deleted > 0
     remaining = store.minute_symbols(min_days=1)
     assert dict(remaining)["005930"] <= 4        # 07-07~07-10 정도만 남음
+
+
+# --- 병렬 실행 — 순차로는 오프로드 한도를 넘긴다 ---
+# 실측 2026-07-27: 196종목 × 26.5초 = 87분. 심층 백필로 종목당 봉이 900 → 4,500,
+# 누적 종목이 83 → 196 이 된 결과다. max_bars 를 깎으면 애써 확보한 과거를 버린다.
+
+def test_workers_leaves_headroom_for_trading(monkeypatch):
+    """매매 프로세스와 WS 수신에 코어를 남긴다."""
+    monkeypatch.setattr(report.os, "cpu_count", lambda: 8)
+    assert report._workers(0) == 6
+    monkeypatch.setattr(report.os, "cpu_count", lambda: 2)
+    assert report._workers(0) == 1
+    monkeypatch.setattr(report.os, "cpu_count", lambda: 64)
+    assert report._workers(0) == 6          # 상한
+    assert report._workers(3) == 3          # 명시값 우선
+
+
+def test_single_worker_runs_sequentially(monkeypatch):
+    """워커 1개면 프로세스를 띄우지 않는다 — 테스트·소규모 환경."""
+    seen = []
+    monkeypatch.setattr(report, "run_symbol",
+                        lambda a: seen.append(a) or {"symbol": a[0], "trades": 0})
+    out = report._run_universe(["000001", "000002"], 500, want_workers=1)
+    assert [r["symbol"] for r in out] == ["000001", "000002"]
+    assert seen == [("000001", 500), ("000002", 500)]
+
+
+def test_empty_universe_is_safe():
+    assert report._run_universe([], 500, want_workers=1) == []
+
+
+def test_run_symbol_skips_empty_bars(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(report.store, "load_bars", lambda *a, **k: pd.DataFrame())
+    assert report.run_symbol(("000001", 500)) is None

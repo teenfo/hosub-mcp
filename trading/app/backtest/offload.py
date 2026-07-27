@@ -20,7 +20,10 @@ log = logging.getLogger(__name__)
 
 # app 패키지의 부모 = trading/ (자식 프로세스의 sys.path 루트)
 PKG_ROOT = str(Path(__file__).resolve().parents[2])
-DEFAULT_TIMEOUT = 1800.0     # 30분 — 넘으면 자식을 죽이고 다음 주기에 재시도
+# 60분. 리포트는 코어를 나눠 쓰지만(report._run_universe) 봉은 keep_days 만큼
+# 계속 쌓이므로 여유를 둔다. 30분이던 시절 실측 87분이 걸려 매번 죽었다 —
+# 그리고 죽는 데 30분을 쓰고도 결과가 0이었다.
+DEFAULT_TIMEOUT = 3600.0     # 넘으면 자식을 죽이고 다음 주기에 재시도
 
 
 async def run_job(job: str, timeout: float = DEFAULT_TIMEOUT) -> dict:

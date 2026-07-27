@@ -65,7 +65,9 @@ class NewsSource:
         return settings.CONFIG.get("scout", {}).get("news", {})
 
     def enabled(self) -> bool:
-        return bool(self._cfg().get("enabled", True)) and bool(settings.INTERNAL_TOKEN)
+        # **trading 자신의 INTERNAL_TOKEN 이 아니다** — 서비스마다 토큰이 따로라
+        # 자기 것을 보내면 401 이 온다(실측 2026-07-27, 이 어댑터 첫 배포).
+        return bool(self._cfg().get("enabled", True)) and bool(settings.TNM_TOKEN)
 
     def interval_sec(self) -> int:
         return int(self._cfg().get("interval_sec", 900))
@@ -74,14 +76,14 @@ class NewsSource:
         import httpx
 
         cfg = self._cfg()
-        url = cfg.get("url", "http://127.0.0.1:8602")
+        url = cfg.get("url") or settings.TNM_URL
         min_score = int(cfg.get("min_score", 60))
         limit = int(cfg.get("limit", 50))
         async with httpx.AsyncClient(timeout=10.0) as c:
             res = await c.get(
                 f"{url}/api/items",
                 params={"min_score": min_score, "limit": limit, "status": "done"},
-                headers={"X-Internal-Token": settings.INTERNAL_TOKEN},
+                headers={"X-Internal-Token": settings.TNM_TOKEN},
             )
             res.raise_for_status()
             items = res.json().get("items") or []

@@ -11,6 +11,8 @@
 import asyncio
 import json
 import logging
+import multiprocessing as mp
+import os
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -62,6 +64,47 @@ def aggregate(rows: list[dict]) -> dict:
     }
 
 
+def run_symbol(args: tuple[str, int]) -> dict | None:
+    """한 종목 백테스트 → stats. **워커 프로세스 진입점이라 모듈 최상위여야 한다.**"""
+    symbol, max_bars = args
+    df = store.load_bars(symbol, "1m", limit=max_bars)
+    if df.empty:
+        return None
+    sides = ("long",) if settings.RISK.get("long_only") else None
+    st = runner.run(symbol, df, sides=sides).stats()
+    # 실제 평가한 일수 — universe 의 전체 축적일수와 다를 수 있다
+    return {"symbol": symbol, "days": int(df.index.normalize().nunique()), **st}
+
+
+def _workers(want: int) -> int:
+    """기본은 코어 수 − 2. 매매 프로세스와 WS 수신에 여유를 남긴다."""
+    if want > 0:
+        return want
+    return max(1, min(6, (os.cpu_count() or 2) - 2))
+
+
+def _run_universe(symbols: list[str], max_bars: int, want_workers: int) -> list[dict]:
+    """종목별 백테스트를 코어에 나눠 돌린다.
+
+    종목 간에는 아무 의존이 없어 그냥 나뉜다. 순차로 돌리면 196종목 × 26.5초 =
+    **87분**이라 30분 오프로드 한도를 넘긴다(실측 2026-07-27). 심층 백필로
+    종목당 봉이 900 → 4,500 으로 늘고 누적 종목이 83 → 196 이 된 결과다.
+    max_bars 를 깎아 줄일 수도 있지만 그러면 애써 확보한 과거를 버리는 셈이다.
+
+    이 함수는 이미 자식 프로세스 안에서 돈다(offload). 거기서 또 프로세스를
+    띄우는 것이라 부모 이벤트 루프와는 무관하다.
+    """
+    workers = _workers(want_workers)
+    args = [(s, max_bars) for s in symbols]
+    if workers <= 1 or len(args) <= 1:
+        return [r for r in map(run_symbol, args) if r]
+    ctx = mp.get_context("spawn")     # fork 는 부모의 열린 SQLite 핸들을 물려받는다
+    with ctx.Pool(workers) as pool:
+        out = pool.map(run_symbol, args, chunksize=4)
+    log.info("백테스트 리포트: %d종목 / 워커 %d", len(symbols), workers)
+    return [r for r in out if r]
+
+
 class BacktestReporter:
     def __init__(self) -> None:
         self.running = False
@@ -82,16 +125,8 @@ class BacktestReporter:
             # 종목당 봉이 크게 늘었고 keep_days 만큼 계속 쌓이므로, 상한이 없으면
             # 리포트 비용이 무한정 커진다. 최근 구간이 현재 시장에 더 가깝다.
             max_bars = int(cfg.get("max_bars", 8000))
-            rows: list[dict] = []
-            for symbol, _days in universe:
-                df = store.load_bars(symbol, "1m", limit=max_bars)
-                if df.empty:
-                    continue
-                sides = ("long",) if settings.RISK.get("long_only") else None
-                st = runner.run(symbol, df, sides=sides).stats()
-                # 실제 평가한 일수 — universe 의 전체 축적일수와 다를 수 있다
-                days = int(df.index.normalize().nunique())
-                rows.append({"symbol": symbol, "days": days, **st})
+            rows = _run_universe([s for s, _ in universe], max_bars,
+                                 int(cfg.get("workers", 0)))
             with _conn() as conn:
                 conn.executemany(
                     "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?)",

@@ -105,6 +105,13 @@ SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-secret")
 # hosub-mcp 대시보드 프록시용 공유 시크릿 (HOSUB_TRADING_TOKEN 과 동일 값 설정)
 INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 
+# TNM(뉴스·공시) 호출용 — **trading 자신의 INTERNAL_TOKEN 과 다른 값이다.**
+# 서비스마다 토큰이 따로라 자기 것을 그대로 보내면 401 이 온다(실측 2026-07-27:
+# 발굴 엔진 news 어댑터 첫 배포에서 그랬다). TNM 쪽 INTERNAL_TOKEN 을 넣는다.
+# TNM 이 trading 을 부를 때 쓰는 TRADING_TOKEN 의 반대 방향이다.
+TNM_URL = os.environ.get("TNM_URL", "http://127.0.0.1:8602")
+TNM_TOKEN = os.environ.get("TNM_TOKEN", "")
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
