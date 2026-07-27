@@ -70,7 +70,7 @@ _TRADING_GET_RE = re.compile(
     r"|prices|rules|performance|risk|journal|journal/history"
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
-    r"|research/event-study|research/ranking|scout)$"
+    r"|research/event-study|research/ranking|scout|regime/history)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"

@@ -106,3 +106,30 @@ def load_bars(symbol: str, tf: str = "1m", limit: int = 2000) -> pd.DataFrame:
         return df
     df["ts"] = pd.to_datetime(df["ts"])
     return df.set_index("ts").sort_index()
+
+
+def market_returns(since: str = "") -> dict[str, float]:
+    """날짜별 시장 수익률(%) — 전 종목 일간 등락률의 **횡단면 평균**.
+
+    지수를 따로 받지 않는 이유는 우리가 매매하는 모집단이 지수가 아니기
+    때문이다. 국면 판정이 맞았는지는 '코스피가 올랐나' 가 아니라 '우리가 보는
+    종목들이 올랐나' 로 재는 것이 정직하다(research/eventstudy.market_daily 와
+    같은 정의).
+
+    since: 'YYYY-MM-DD' 이후만. 전 구간 스캔을 피하려고 호출자가 좁힌다.
+    """
+    sql = (
+        "SELECT d, AVG(ret) AS m FROM ("
+        "  SELECT date(ts) AS d,"
+        "         (close / LAG(close) OVER (PARTITION BY symbol ORDER BY ts) - 1)"
+        "         * 100 AS ret"
+        "    FROM bars WHERE tf='1d'"
+        ") WHERE ret IS NOT NULL"
+    )
+    params: tuple = ()
+    if since:
+        sql += " AND d >= ?"
+        params = (since,)
+    sql += " GROUP BY d"
+    with _conn() as conn:
+        return {r[0]: float(r[1]) for r in conn.execute(sql, params)}

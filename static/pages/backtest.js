@@ -34,9 +34,12 @@ export default {
     const verifyC = card("규칙 검증 (백테스트)", null, { wide: true, icon: "bi-clipboard-data" });
     const studyC = card("발굴 점수 검증 (이벤트 스터디)", null, { wide: true, icon: "bi-bar-chart-steps" });
     const rankC = card("랭킹 방식 비교 (브래킷 근사)", null, { wide: true, icon: "bi-sort-down" });
+    const regimeC = card("국면 판정 검증 (야간 리포트 vs 대조군)", null,
+                         { wide: true, icon: "bi-cloud-moon" });
     const dataC = card("데이터 확보 현황", null, { wide: true, icon: "bi-database" });
     const CARDS = [["summary", summaryC], ["positions", posC], ["verify", verifyC],
-                   ["study", studyC], ["ranking", rankC], ["data", dataC]];
+                   ["study", studyC], ["ranking", rankC], ["regime", regimeC],
+                   ["data", dataC]];
     CARDS.forEach(([id, c], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
@@ -609,7 +612,103 @@ export default {
     };
 
     // ==================================================================
-    // ⑥ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
+    // ⑥ 국면 판정 검증 — 야간 리포트가 결정론 대조군을 이기는가
+    // 야간 리포트는 실제로 매매에 관여한다(인버스 ETF 매수 차단). 그런데
+    // 예측을 남기지 않아 적중률을 잰 적이 없다. 오늘부터 쌓는다.
+    // ==================================================================
+    const SIGNAL_KO = {
+      night_bias: ["야간 리포트", "외부 미국장 분석 — 검증 대상"],
+      base_regime: ["전일 breadth", "60일선 상회 비율 — 결정론 대조군"],
+      gap_bias: ["시가갭 중앙값", "감시목록 갭 — 결정론 대조군"],
+      effective: ["합성 (실제 적용)", "위 셋을 합친 값 = 매매에 쓰인 국면"],
+    };
+    const REGIME_TONE = { 강세: "text-danger", 약세: "text-primary", 중립: "text-secondary" };
+    const rgBody = el("div", {}, emptyRow("불러오는 중…"));
+    regimeC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-cloud-moon"></i> 야간 리포트는 <b>실제로 매매에 관여한다</b> — 인버스 ETF 매수를 막는 기준선이다. 그런데 예측이 파일 1개에 덮어쓰기로만 남아 적중률을 잰 적이 없다. 이제 <b>결정론 대조군 2개와 같은 레코드</b>로 쌓는다. "맞았다"는 대조군을 이겨야 의미가 있다 — 상승일이 많으면 늘 강세라고만 해도 맞는다.' })),
+      rgBody,
+    );
+
+    const renderRegime = (d) => {
+      rgBody.innerHTML = "";
+      const daily = d.daily || [];
+      const sc = d.score || {};
+      if (!daily.length) {
+        rgBody.appendChild(emptyRow(
+          "아직 이력이 없습니다 — 장중 엔진이 국면을 평가하면 오늘부터 쌓이기 시작합니다."));
+        return;
+      }
+      const scored = Object.values(sc).filter((v) => v.calls > 0);
+      rgBody.appendChild(el("div", { class: "small text-secondary mb-2" },
+        `${daily[0].date} ~ ${daily[daily.length - 1].date} · ${daily.length}거래일 · ` +
+        `판정 가능 기준 ${d.min_days}일` +
+        (scored.some((v) => v.reliable) ? "" : " — 아직 표본이 모자랍니다")));
+      // 신호별 적중률
+      rgBody.appendChild(tableOf(
+        "<th>신호</th><th class='text-end'>방향 건 날</th><th class='text-end'>중립</th>" +
+        "<th class='text-end'>적중률</th><th>판정</th>",
+        (d.signals || []).map((k) => {
+          const v = sc[k] || {};
+          const [label, note] = SIGNAL_KO[k] || [k, ""];
+          const night = sc.night_bias || {};
+          // 야간 리포트가 이 대조군을 이겼는가 — 판정의 실체
+          const beats = k !== "night_bias" && v.hit_rate != null
+            && night.hit_rate != null && night.hit_rate > v.hit_rate;
+          return el("tr", { class: v.reliable ? "" : "opacity-50" }, [
+            el("td", {}, [el("div", {}, label),
+                          el("div", { class: "text-secondary", style: "font-size:.72rem" }, note)]),
+            el("td", { class: "text-end" }, v.calls ?? 0),
+            el("td", { class: "text-end text-secondary" }, v.neutral ?? 0),
+            el("td", { class: "text-end fw-semibold" },
+               v.hit_rate == null ? "—" : `${v.hit_rate}%`),
+            el("td", {}, !v.reliable ? el("span", { class: "text-secondary small" }, "표본 부족")
+              : k === "night_bias" ? badge("검증 대상", "primary")
+              : beats ? badge("야간이 앞섬", "success") : badge("대조군이 앞섬", "warning")),
+          ]);
+        })));
+      // 판정 — 미리 못박는다
+      const n = sc.night_bias || {};
+      const controls = ["base_regime", "gap_bias"].map((k) => sc[k] || {});
+      const ready = n.reliable && controls.some((c) => c.reliable);
+      rgBody.appendChild(el("div", { class: "small mt-2" }, [
+        el("span", { class: "badge me-2 " + (ready ? "text-bg-info" : "text-bg-secondary") },
+           ready ? "판정 가능" : `표본 축적 중 (${n.calls ?? 0}/${d.min_days})`),
+        el("span", { class: "text-secondary" }, ready
+          ? (controls.every((c) => c.hit_rate == null || n.hit_rate > c.hit_rate)
+             ? "야간 리포트가 결정론 대조군을 모두 앞섭니다 — 기준선으로 계속 쓸 근거가 됩니다."
+             : "야간 리포트가 결정론 대조군을 이기지 못합니다 — regime_gate.use_night_bias 를 끄는 것이 정직한 결론입니다.")
+          : "방향을 건 날이 기준에 못 미칩니다. 중립은 적중 계산에서 뺍니다 — 방향을 안 건 것을 맞았다고 세면 '항상 중립'이 만점이 됩니다."),
+      ]));
+      // 일자별
+      rgBody.appendChild(el("div", { class: "fw-semibold small mt-3 mb-1" }, "일자별 판정"));
+      rgBody.appendChild(tableOf(
+        "<th>날짜</th><th>야간</th><th>전일 breadth</th><th>시가갭</th>" +
+        "<th>합성</th><th class='text-end'>실현 시장</th><th></th>",
+        daily.slice(-30).reverse().map((r) => {
+          const cell = (v) => el("td", { class: REGIME_TONE[v] || "" }, v || "—");
+          const m = r.market_pct;
+          const nightSign = { 강세: 1, 약세: -1 }[r.night_bias] || 0;
+          const ok = m == null || !nightSign ? null : (nightSign > 0) === (m > 0);
+          return el("tr", {}, [
+            el("td", { class: "text-nowrap" }, r.date),
+            cell(r.night_bias), cell(r.base_regime), cell(r.gap_bias), cell(r.effective),
+            el("td", { class: "text-end " + (m > 0 ? "text-danger" : m < 0 ? "text-primary" : "") },
+               m == null ? "—" : `${m}%`),
+            el("td", {}, ok == null ? el("span", { class: "text-secondary" }, "—")
+              : badge(ok ? "야간 적중" : "야간 빗나감", ok ? "success" : "secondary")),
+          ]);
+        })));
+    };
+    const loadRegime = async () => {
+      let d;
+      try { d = await fetchJSON("/api/trading/regime/history"); } catch (e) { return; }
+      if (!changed("regime", d)) return;
+      renderRegime(d);
+    };
+
+    // ==================================================================
+    // ⑦ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
     // ==================================================================
     const covHead = el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" });
     const covBody = el("div", {}, emptyRow("불러오는 중…"));
@@ -665,8 +764,10 @@ export default {
     }
 
     await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport(),
-                       loadStudy(), loadRanking()]);
+                       loadStudy(), loadRanking(), loadRegime()]);
     ctx.addTimer(setInterval(() => { loadPerformance(); loadCoverage(); }, 30_000));
-    ctx.addTimer(setInterval(() => { loadBacktestReport(); loadStudy(); loadRanking(); }, 300_000));
+    ctx.addTimer(setInterval(() => {
+      loadBacktestReport(); loadStudy(); loadRanking(); loadRegime();
+    }, 300_000));
   },
 };

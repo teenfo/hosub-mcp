@@ -536,6 +536,32 @@ async def api_backtest_report_run(_=Depends(require_auth)):
     return await reporter.run_offloaded()   # 별도 프로세스 — 루프를 막지 않는다
 
 
+@app.get("/api/regime/history")
+async def api_regime_history(_=Depends(require_auth)):
+    """국면 판정 이력 + 신호별 적중률(조회성 — 주문 없음).
+
+    야간 리포트가 결정론 대조군(전일 breadth · 시가갭)을 이기는지 본다.
+    못 이기면 `regime_gate.use_night_bias` 를 끄는 것이 정직한 결론이다.
+    """
+    from .data import regime_log
+
+    def _build() -> dict:
+        rows = regime_log.daily()
+        since = rows[0]["date"] if rows else ""
+        market = store.market_returns(since) if rows else {}
+        return {
+            "daily": [r | {"market_pct": (round(market[r["date"]], 3)
+                                          if r["date"] in market else None)}
+                      for r in rows],
+            "recent": regime_log.entries(200),
+            "score": regime_log.score(rows, market),
+            "signals": list(regime_log.SIGNALS),
+            "min_days": regime_log.MIN_DAYS,
+        }
+
+    return await asyncio.to_thread(_build)     # 일봉 집계 — 루프를 막지 않는다
+
+
 @app.get("/api/scout")
 async def api_scout(_=Depends(require_auth)):
     """발굴 엔진 상태 + 후보 큐 + 최근 결정(조회성 — 주문 없음).
