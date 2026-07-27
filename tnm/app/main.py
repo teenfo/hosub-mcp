@@ -17,11 +17,15 @@ from . import db, metrics, ollama, settings
 from .collect import CollectRunner
 from .notify.loop import Notifier
 from .pipeline.workers import ClassifyWorker, DedupWorker, EmbedWorker
+from . import logsafe
 from .promote import promoter
 from .watch import WatchSync
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(name)s %(levelname)s %(message)s")
+# httpx 가 요청 URL 전체를 INFO 로 찍는데 DART 는 API 키를 쿼리로 받는다 —
+# 가리지 않으면 journald 에 키가 그대로 남는다(실측 2026-07-27).
+logsafe.install()
 log = logging.getLogger("tnm")
 
 watchsync = WatchSync()
