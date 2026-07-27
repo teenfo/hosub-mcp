@@ -166,6 +166,7 @@ class SignalEngine:
             eq = data.get("deposit_est") or data.get("total_eval") or 0
             if eq > 0:
                 self.equity = self.state.equity = float(eq)
+                settings.set_equity(eq)   # 감시목록 편입 tier 판정에 쓰인다
                 self.equity_synced = True
                 self._equity_synced_at = now
 

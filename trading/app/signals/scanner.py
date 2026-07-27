@@ -86,7 +86,19 @@ def filter_presurge(items: list[dict], cfg: dict) -> list[dict]:
     return picked[:top_n]
 
 
-def filter_candidates(items: list[dict], cfg: dict) -> list[dict]:
+def trade_tier_cap(cfg: dict) -> float:
+    """매매 tier 로 넣을 최고 주가. 자산이 동기화돼 있으면 '한 종목 최대 투입액'
+    (자산 × 종목당 비중 상한)을 쓰고, 아니면 config 고정값으로 폴백한다.
+    1주도 살 수 없는 종목을 매매 대상에 올려 봐야 '잔고 부족'만 쌓인다."""
+    return settings.tradable_price_cap(cfg.get("trade_max_price", 30_000))
+
+
+def filter_candidates(items: list[dict], cfg: dict,
+                      keep: frozenset = frozenset()) -> list[dict]:
+    """거래대금 상위에서 등락률·유동성·가격 필터 교차. collect_only tier 부여.
+
+    keep: 기존 active 소스 코드 — 이미 감시 중이어도 후보 유지(교체 시 탈락 방지).
+    """
     min_chg = cfg.get("min_change_pct", 3.0)
     min_val = cfg.get("min_trade_value", 10_000)   # trde_prica 와 같은 단위(통상 백만원)
     min_price = cfg.get("min_price", 1_000)
@@ -96,10 +108,15 @@ def filter_candidates(items: list[dict], cfg: dict) -> list[dict]:
         if it["change_pct"] >= min_chg
         and it["trade_value"] >= min_val
         and it["price"] >= min_price
-        and it["code"] not in settings.WATCHLIST
+        and not _is_excluded(it["name"])
+        and (it["code"] not in settings.WATCHLIST or it["code"] in keep)
     ]
     picked.sort(key=lambda x: x["change_pct"], reverse=True)
-    return picked[:top_n]
+    picked = picked[:top_n]
+    cap = trade_tier_cap(cfg)
+    for p in picked:
+        p["collect_only"] = p["price"] > cap    # 1주도 못 사는 가격이면 수집전용
+    return picked
 
 
 # ETF·ETN·리츠·스팩 등 비보통주 제외(급등 자동편입 시 잡ETF 유입 방지)
@@ -125,7 +142,7 @@ def filter_gainers(items: list[dict], cfg: dict,
     keep: 기존 gainer 소스 코드 — 이미 감시 중이어도 유지(교체 시 탈락 방지)."""
     min_price = cfg.get("min_price", 1_000)
     min_tv = cfg.get("min_trade_value_krw", 100_000_000)   # 거래대금 근사 하한(원)
-    tmax = cfg.get("trade_max_price", 30_000)
+    tmax = trade_tier_cap(cfg)
     top_n = cfg.get("top_n", 15)
     picked = [
         it for it in items
@@ -151,11 +168,20 @@ class Scanner:
         self.last_scan: str = ""
 
     async def scan_once(self) -> list[dict]:
+        from ..data import watchlist
         from ..kiwoom.client import client  # 지연 임포트 (테스트 오프라인)
 
         cfg = settings.CONFIG.get("scanner", {})
         raw = await client.trade_value_rank(cfg.get("market", "000"))
-        self.results = filter_candidates(parse_rank(raw), cfg)
+        # 기존 active 소스는 이미 감시 중이어도 후보 유지(교체 시 탈락 방지)
+        keep = frozenset(e["code"] for e in watchlist.entries()
+                         if e.get("source") == "active")
+        self.results = filter_candidates(parse_rank(raw), cfg, keep=keep)
+        if cfg.get("auto_watch", False):
+            # 거래대금 상위는 '시장이 실제로 돈을 넣는' 종목이라 유동성이 안전하다.
+            # 이 필터 결과가 종전에는 화면 표시로만 쓰이고 감시목록에 닿지 않았다.
+            watchlist.replace_active(self.results)
+            await watchlist.notify()
         try:
             surge_raw = await client.volume_surge_rank(cfg.get("market", "000"))
             self.presurge = filter_presurge(parse_surge(surge_raw), cfg)
@@ -169,18 +195,35 @@ class Scanner:
         return self.results
 
     async def scan_gainers(self) -> list[dict]:
-        """KOSPI 등락률 상위(ka10027) 조회 → 필터 → (옵션) 감시목록 자동편입."""
+        """등락률 상위(ka10027) 조회 → 필터 → (옵션) 감시목록 자동편입.
+
+        시장을 여러 개 지정할 수 있다(markets). 코스피만 보면 변동성 큰 코스닥
+        급등주가 구조적으로 들어오지 않는다 — 실측 2026-07-24 변동폭 상위 20 중
+        감시 중이던 종목은 2개뿐이었다.
+        """
         from ..data import watchlist
         from ..kiwoom.client import client
 
         cfg = settings.CONFIG.get("gainers", {})
         if not cfg.get("enabled", True):
             return []
-        raw = await client.change_rate_rank(cfg.get("market", "001"))
+        markets = cfg.get("markets") or [cfg.get("market", "001")]
+        items: list[dict] = []
+        seen: set[str] = set()
+        for mk in markets:
+            try:
+                raw = await client.change_rate_rank(str(mk))
+            except Exception as e:  # noqa: BLE001 - 한 시장 실패가 나머지를 막지 않는다
+                log.warning("급등률 조회 실패(시장 %s): %s", mk, e)
+                continue
+            for it in parse_rank(raw):
+                if it["code"] and it["code"] not in seen:
+                    seen.add(it["code"])
+                    items.append(it)
         # 기존 gainer 소스 코드는 이미 감시 중이어도 후보 유지(교체 시 탈락 방지)
         keep = frozenset(e["code"] for e in watchlist.entries()
                          if e.get("source") == "gainer")
-        self.gainers = filter_gainers(parse_rank(raw), cfg, keep=keep)
+        self.gainers = filter_gainers(items, cfg, keep=keep)
         if cfg.get("auto_watch", True):
             # 성공한 스캔은 빈 결과라도 반영 — 더 이상 급등이 아닌 종목을 정리
             watchlist.replace_gainers(self.gainers)

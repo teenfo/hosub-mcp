@@ -133,6 +133,34 @@ def _load_risk_overrides() -> None:
             pass
 
 
+# 런타임 자산 — 엔진이 잔고 동기화 때 갱신한다(설정이 아니라 관측값).
+# 감시목록 편입 시 '1주라도 살 수 있는 종목인가'를 판단하는 데 쓴다.
+EQUITY: float = 0.0
+
+
+def set_equity(value: float) -> None:
+    global EQUITY
+    EQUITY = max(0.0, float(value or 0))
+
+
+def tradable_price_cap(fallback: float = 0.0) -> float:
+    """매매 tier 로 넣을 수 있는 최고 주가.
+
+    한 종목에 넣을 수 있는 최대 금액(자산 × 종목당 비중 상한)이 곧 '1주 가격의
+    상한'이다. 고정값으로 두면 계좌가 커져도 후보가 늘지 않고, 반대로 계좌가
+    작을 때는 살 수도 없는 종목이 매매 대상으로 들어온다.
+    자산 미동기화(0) 면 fallback(=config 고정값)을 돌려준다.
+    """
+    if EQUITY <= 0:
+        return fallback
+    try:
+        w = float(RISK.get("max_position_weight_pct", 0) or 0)
+    except (TypeError, ValueError):
+        w = 0.0
+    cap = EQUITY * w / 100 if 0 < w <= 100 else EQUITY
+    return max(cap, 0.0) or fallback
+
+
 SCAN_INTERVAL_MIN_SEC = 10       # 키움 레이트리밋 보호 하한
 SCAN_INTERVAL_MAX_SEC = 300
 
