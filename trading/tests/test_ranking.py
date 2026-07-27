@@ -243,6 +243,41 @@ def test_random_control_uses_whole_universe(monkeypatch):
     assert out["avg_r"] > -1.14
 
 
+def test_score_gate_narrows_the_pool(monkeypatch):
+    """점수 게이트 통과분만 뽑는지 — 순서가 아니라 '풀을 좁히는 것' 의 값을 잰다.
+
+    1.5단계는 그 풀 안에서 점수 순으로 줄 세우기만 쟀고 게이트 자체는 대조군이
+    없었다. 이 방식이 그 빈칸을 채운다.
+    """
+    monkeypatch.setattr(ranking, "MIN_EVAL_DAYS", 5)
+    rows = []
+    for day in _dates(12):
+        for k in range(20):
+            passes = k < 6                    # 앞 6종목만 게이트 통과
+            rows.append({
+                "date": day, "symbol": f"S{k:03d}", "liquid": 1,
+                "score": 3.0 if passes else 0.0, "atr_pct": float(k),
+                # 게이트 통과분만 이긴다 — 새면 avg_r 이 떨어져 드러난다
+                "fwd_up_1": 20.0 if passes else 1.0,
+                "fwd_dn_1": -0.1 if passes else -5.0,
+                "fwd_1": 15.0 if passes else -4.0,
+            })
+    df = pd.DataFrame(rows)
+    ctx = ranking.prepare(df, min_score=2)
+    gate = ranking.evaluate(df, "score_gate_only", 2.0, 1.5, 0.28, top_n=3, ctx=ctx)
+    liq = ranking.evaluate(df, "liquid_only", 2.0, 1.5, 0.28, top_n=3, ctx=ctx)
+    assert gate["avg_r"] == pytest.approx(1.36)     # 전부 목표 도달
+    assert gate["win_rate"] == 100.0
+    assert liq["avg_r"] < gate["avg_r"]             # 게이트 밖이 섞이면 나빠진다
+
+
+def test_min_score_comes_from_config_by_default():
+    from app import settings
+
+    ctx = ranking.prepare(_panel(n_days=6))
+    assert ctx["min_score"] == float(settings.CONFIG["discovery"]["min_score"])
+
+
 def test_days_short_of_top_n_are_skipped(monkeypatch):
     """상위 N 을 채울 종목이 없는 날은 건너뛴다."""
     monkeypatch.setattr(ranking, "MIN_EVAL_DAYS", 1)

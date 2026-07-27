@@ -472,6 +472,7 @@ export default {
       atr: ["변동성 단독", "atr_pct — 최대상승 기준 최강 원시 피처"],
       composite_is: ["잔차 IC 합성 (전 구간 학습)", "in-sample 상한 — 이보다 잘 나올 수 없다"],
       composite_wf: ["잔차 IC 합성 (walk-forward)", "직전 학습창의 잔차 IC 로만 가중 — 진짜 성적"],
+      score_gate_only: ["점수 게이트 통과분 무작위", "유동성 + 발굴 점수 이상 중 무작위 — 게이트 자체의 값"],
       liquid_only: ["유동성 통과분 무작위", "'랭킹 폐기, 게이트만' 안"],
       random: ["전종목 무작위 (대조군)", "이걸 못 이기면 랭킹의 존재 이유가 없다"],
     };
@@ -559,6 +560,17 @@ export default {
       }
       if (lq && beats(lq) && (!wf || lq.avg_r >= wf.avg_r)) {
         lines.push(["warning", "유동성 통과분 무작위가 어떤 랭킹보다 낫다 — 게이트가 값을 내고 순서는 안 낸다는 뜻이다."]);
+      }
+      // 점수 게이트 자체의 값 — 순서가 아니라 '풀을 좁히는 것'에 값이 있는가
+      const gate = bestOf("score_gate_only");
+      if (gate && lq) {
+        const gap = gate.avg_r - lq.avg_r;
+        lines.push([gap > 0 ? "success" : "secondary",
+          `발굴 점수 ${d.min_score ?? 2}점 게이트: 통과분 무작위 ${gate.avg_r.toFixed(3)}R vs ` +
+          `유동성만 ${lq.avg_r.toFixed(3)}R = ${gap > 0 ? "+" : ""}${gap.toFixed(3)}R. ` +
+          (gap > 0
+            ? "점수는 줄 세우기에는 못 써도 풀을 좁히는 데에는 값이 있다 — 게이트로 남긴다."
+            : "점수 게이트가 풀을 좁혀도 나아지지 않는다 — 게이트도 버린다.")]);
       }
       if (d.best) {
         const [bl] = METHOD_KO[d.best.method] || [d.best.method];
