@@ -8,7 +8,7 @@ import json
 import logging
 import sys
 
-JOBS = ("report", "sweep", "study", "rank")
+JOBS = ("report", "sweep", "study", "rank", "news")
 
 
 def main(argv: list[str]) -> int:
@@ -29,6 +29,10 @@ def main(argv: list[str]) -> int:
         from ..research import ranking
 
         result = ranking.run_once()
+    elif job == "news":
+        from ..research import newsimpact
+
+        result = newsimpact.run_once()
     else:
         from .sweep import run_sweep
 

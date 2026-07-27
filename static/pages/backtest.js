@@ -36,10 +36,12 @@ export default {
     const rankC = card("랭킹 방식 비교 (브래킷 근사)", null, { wide: true, icon: "bi-sort-down" });
     const regimeC = card("국면 판정 검증 (야간 리포트 vs 대조군)", null,
                          { wide: true, icon: "bi-cloud-moon" });
+    const newsC = card("뉴스 영향 검증 (LLM 판정 vs 실제 수익률)", null,
+                       { wide: true, icon: "bi-newspaper" });
     const dataC = card("데이터 확보 현황", null, { wide: true, icon: "bi-database" });
     const CARDS = [["summary", summaryC], ["positions", posC], ["verify", verifyC],
                    ["study", studyC], ["ranking", rankC], ["regime", regimeC],
-                   ["data", dataC]];
+                   ["news", newsC], ["data", dataC]];
     CARDS.forEach(([id, c], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
@@ -708,7 +710,117 @@ export default {
     };
 
     // ==================================================================
-    // ⑦ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
+    // ⑦ 뉴스 영향 검증 — LLM 이 매기는 두 필드가 수익률과 상관이 있는가
+    // impact_horizon 은 매번 만들면서 어떤 판정에도 안 쓰인다.
+    // impact_direction 은 반대로 발굴 엔진이 악재를 거르는 데 쓴다.
+    // ==================================================================
+    const niRun = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" },
+      "지금 실행");
+    const niBody = el("div", {}, emptyRow("불러오는 중…"));
+    newsC.body.append(
+      el("div", { class: "small text-secondary mb-2" },
+        el("span", { html: '<i class="bi bi-newspaper"></i> TNM 이 뉴스마다 매기는 <b>영향 지속기간</b>과 <b>방향</b>을 실제 수익률과 맞춰 본다. 지속기간은 지금 <b>어떤 판정에도 쓰이지 않고</b>(화면 뱃지 전용), 방향은 반대로 <b>발굴 엔진이 악재를 거르는 기준</b>이다 — 근거 없으면 그 필터가 잡음이라는 뜻이다. 진입은 뉴스 다음 날 시가 기준(장중 뉴스를 그 자리에서 잡았다고 치면 실현 불가능한 수익을 세게 된다).' })),
+      el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, [niRun]),
+      niBody,
+    );
+
+    const renderNews = () => {
+      const d = niData;
+      niBody.innerHTML = "";
+      if (!d || d.ok === false || !d.run_ts) {
+        niBody.appendChild(emptyRow(
+          (d && d.error) || "아직 실행되지 않았습니다 — '지금 실행'을 누르세요"));
+        return;
+      }
+      niBody.appendChild(el("div", { class: "small text-secondary mb-2" },
+        `${d.date_from} ~ ${d.date_to} · 분석 ${(d.analyses || 0).toLocaleString()}건 중 ` +
+        `일봉 매칭 ${(d.matched || 0).toLocaleString()}건 · ${d.symbols}종목 · ` +
+        `실행 ${String(d.run_ts).replace("T", " ").slice(0, 16)}`));
+      const tone = (v) => (v > 0 ? "text-danger" : v < 0 ? "text-primary" : "");
+      const table = (rows, ko, label) => tableOf(
+        `<th>${label}</th><th class='text-end'>표본</th>` +
+        (d.targets || []).map((t) => `<th class='text-end'>${t.replace("fwd_", "")}일 초과</th>`).join("") +
+        "<th class='text-end'>t값(1일)</th>",
+        rows.map((b) => el("tr", { class: b.reliable ? "" : "opacity-50" }, [
+          el("td", {}, (ko && ko[b.key]) || b.key || "—"),
+          el("td", { class: "text-end" }, b.n.toLocaleString()),
+          ...(d.targets || []).map((t) => el("td", {
+            class: "text-end " + tone(b["exc_" + t]),
+          }, b["exc_" + t] == null ? "—" : `${b["exc_" + t]}%`)),
+          el("td", { class: "text-end " + (Math.abs(b.t_fwd_1 || 0) > 2 ? "fw-semibold" : "text-secondary") },
+             b.reliable ? b.t_fwd_1 : "표본부족"),
+        ])));
+      // 지속기간 — 크기가 아니라 곡선의 모양
+      niBody.appendChild(el("div", { class: "fw-semibold small mb-1" }, "영향 지속기간별"));
+      niBody.appendChild(el("div", { class: "small text-secondary mb-1" },
+        "즉시(immediate)라면 1일에 몰리고 3·5일엔 안 늘어야 하고, 장기(long)라면 계속 쌓여야 한다. " +
+        "세 줄의 모양이 서로 구분되지 않으면 이 필드는 정보를 담고 있지 않다."));
+      niBody.appendChild(table(d.by_horizon || [], d.horizon_ko, "지속기간"));
+      // 방향 — 발굴 엔진 필터의 근거
+      niBody.appendChild(el("div", { class: "fw-semibold small mt-3 mb-1" }, "영향 방향별"));
+      niBody.appendChild(el("div", { class: "small text-secondary mb-1" },
+        "발굴 엔진의 news 어댑터가 <b>악재를 후보에서 제외</b>한다. 호재와 악재의 초과수익이 갈리지 않으면 그 필터에 근거가 없다.",
+      ));
+      niBody.appendChild(table(d.by_direction || [], d.direction_ko, "방향"));
+      // 판정
+      const hz = (d.by_horizon || []).filter((b) => b.reliable);
+      const dir = Object.fromEntries((d.by_direction || []).map((b) => [b.key, b]));
+      const pos = dir.positive, neg = dir.negative;
+      const lines = [];
+      if (hz.length >= 2) {
+        const shapes = hz.map((b) => (b.exc_fwd_5 ?? 0) - (b.exc_fwd_1 ?? 0));
+        const spread = Math.max(...shapes) - Math.min(...shapes);
+        lines.push([spread > 1 ? "success" : "warning",
+          `지속기간별 1일→5일 증가폭 차이 ${spread.toFixed(2)}%p — ` +
+          (spread > 1 ? "곡선 모양이 실제로 갈린다. 필드가 정보를 담고 있다."
+                      : "곡선이 구분되지 않는다. LLM 스키마에서 빼는 편이 낫다(프롬프트가 짧아지고 재시도가 준다).")]);
+      }
+      if (pos && neg && pos.reliable && neg.reliable) {
+        const gap = (pos.exc_fwd_1 ?? 0) - (neg.exc_fwd_1 ?? 0);
+        lines.push([gap > 0 ? "success" : "danger",
+          `호재 ${pos.exc_fwd_1}% vs 악재 ${neg.exc_fwd_1}% (차이 ${gap.toFixed(2)}%p) — ` +
+          (gap > 0 ? "발굴 엔진의 악재 제외 필터에 근거가 있다."
+                   : "호재가 악재보다 낫지 않다. 발굴 엔진의 악재 필터를 재검토해야 한다.")]);
+      }
+      if (lines.length) {
+        niBody.appendChild(el("div", { class: "small mt-3" }, [
+          el("div", { class: "fw-semibold mb-1" }, "판정"),
+          ...lines.map(([t, txt]) => el("div", { class: "mb-1" }, [
+            el("span", { class: `badge me-2 text-bg-${t}` }, "·"),
+            el("span", {}, txt),
+          ])),
+        ]));
+      }
+      if ((d.by_category || []).length) {
+        niBody.appendChild(el("div", { class: "fw-semibold small mt-3 mb-1" }, "카테고리별 (표본 상위)"));
+        niBody.appendChild(table(d.by_category, null, "카테고리"));
+      }
+      niBody.appendChild(el("ul", { class: "small text-secondary mt-3 mb-0 ps-3" },
+        (d.caveats || []).map((c) => el("li", {}, c))));
+    };
+    let niData = null;
+    const loadNews = async () => {
+      try { niData = await fetchJSON("/api/trading/research/news-impact"); }
+      catch (e) { return; }
+      if (!changed("newsimpact", niData)) return;
+      renderNews();
+    };
+    niRun.onclick = async () => {
+      niRun.disabled = true;
+      niBody.innerHTML = "";
+      niBody.appendChild(emptyRow("실행 중… 분석 전량을 받아 일봉과 맞춥니다 (별도 프로세스 — 매매는 계속 돕니다)"));
+      try {
+        niData = await postJSON("/api/trading/research/news-impact/run");
+        changed.invalidate("newsimpact");
+        renderNews();
+      } catch (e) {
+        niBody.innerHTML = "";
+        niBody.appendChild(el("div", { class: "text-danger small" }, "실패: " + e.message));
+      } finally { niRun.disabled = false; }
+    };
+
+    // ==================================================================
+    // ⑧ 데이터 확보 현황 — 위 검증을 믿을 만한지의 전제
     // ==================================================================
     const covHead = el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" });
     const covBody = el("div", {}, emptyRow("불러오는 중…"));
@@ -764,10 +876,11 @@ export default {
     }
 
     await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport(),
-                       loadStudy(), loadRanking(), loadRegime()]);
+                       loadStudy(), loadRanking(), loadRegime(), loadNews()]);
     ctx.addTimer(setInterval(() => { loadPerformance(); loadCoverage(); }, 30_000));
     ctx.addTimer(setInterval(() => {
-      loadBacktestReport(); loadStudy(); loadRanking(); loadRegime();
+      loadBacktestReport(); loadStudy(); loadRanking();
+      loadRegime(); loadNews();
     }, 300_000));
   },
 };

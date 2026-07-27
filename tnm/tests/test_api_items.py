@@ -18,9 +18,9 @@ AUTH = {"X-Internal-Token": "test-token"}
 def test_items_filters_passed_through(client, monkeypatch):
     captured = {}
 
-    async def fake_list(date, ticker, min_score, status, novelty, limit):
+    async def fake_list(date, ticker, min_score, status, novelty, limit, offset):
         captured.update(date=date, ticker=ticker, min_score=min_score,
-                        status=status, novelty=novelty, limit=limit)
+                        status=status, novelty=novelty, limit=limit, offset=offset)
         return [{"id": 1, "title": "t"}]
 
     monkeypatch.setattr(db, "list_items", fake_list)
@@ -28,7 +28,21 @@ def test_items_filters_passed_through(client, monkeypatch):
                    "&status=ok&limit=50", headers=AUTH)
     assert r.status_code == 200 and len(r.json()["items"]) == 1
     assert captured == {"date": "2026-07-26", "ticker": "005930", "min_score": 60,
-                        "status": "ok", "novelty": None, "limit": 50}
+                        "status": "ok", "novelty": None, "limit": 50, "offset": 0}
+
+
+def test_items_offset_is_passed_through(client, monkeypatch):
+    """소급 측정이 전량을 읽으려면 페이지를 넘겨야 한다 — limit 상한이 500이다."""
+    captured = {}
+
+    async def fake_list(date, ticker, min_score, status, novelty, limit, offset):
+        captured.update(limit=limit, offset=offset)
+        return []
+
+    monkeypatch.setattr(db, "list_items", fake_list)
+    assert client.get("/api/items?limit=500&offset=1000",
+                      headers=AUTH).status_code == 200
+    assert captured == {"limit": 500, "offset": 1000}
 
 
 def test_item_detail_404(client, monkeypatch):

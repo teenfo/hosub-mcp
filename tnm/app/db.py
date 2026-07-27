@@ -463,8 +463,14 @@ async def log_llm_call(raw_item_id: int, input_hash: str, model_name: str,
 
 async def list_items(date: str | None = None, ticker: str | None = None,
                      min_score: int | None = None, status: str | None = None,
-                     novelty: str | None = None, limit: int = 100) -> list[dict]:
-    """분석 목록 (최신순). 필터는 전부 선택."""
+                     novelty: str | None = None, limit: int = 100,
+                     offset: int = 0) -> list[dict]:
+    """분석 목록 (최신순). 필터는 전부 선택.
+
+    offset: 페이지 넘김. 화면은 안 쓰지만 **소급 측정이 전량을 읽으려면 필요**하다
+    (limit 상한이 500이라 수천 건을 한 번에 못 받는다). 정렬이
+    (published_at desc, id desc) 로 결정적이라 페이지 경계에서 누락·중복이 없다.
+    """
     where, args = [], []
     if date:
         where.append("(r.published_at at time zone 'Asia/Seoul')::date = %s::date")
@@ -478,6 +484,7 @@ async def list_items(date: str | None = None, ticker: str | None = None,
     if novelty:
         where.append("a.novelty = %s"); args.append(novelty)
     args.append(min(int(limit), 500))
+    args.append(max(0, int(offset)))
     sql = (
         "select a.id, a.status, a.category, a.impact_direction, a.impact_horizon,"
         " a.confidence, a.novelty, a.score, a.warn_hallucination, a.created_at,"
@@ -488,7 +495,7 @@ async def list_items(date: str | None = None, ticker: str | None = None,
         " join tnm_watchlist w on w.id = r.watchlist_id"
         " left join tnm_labels l on l.analysis_id = a.id"
         + (" where " + " and ".join(where) if where else "")
-        + " order by r.published_at desc, a.id desc limit %s")
+        + " order by r.published_at desc, a.id desc limit %s offset %s")
     keys = ("id", "status", "category", "impact_direction", "impact_horizon",
             "confidence", "novelty", "score", "warn_hallucination", "created_at",
             "source", "title", "url", "published_at", "ticker", "name",
