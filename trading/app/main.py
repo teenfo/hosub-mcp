@@ -543,9 +543,10 @@ async def api_scout(_=Depends(require_auth)):
     shadow 모드에서는 `decisions` 가 "엔진이라면 이렇게 했을 것" 이다. 화면이
     실제 감시목록과 나란히 놓고 보여 준다.
     """
+    from .scout import engine as scout_mod
     from .scout import store as scout_store
 
-    cur = scout.snapshot_current()
+    cur = scout_mod.snapshot_current()      # 모듈 함수다 — Engine 의 메서드가 아니다
     return {
         "status": scout.status(),
         "candidates": [
