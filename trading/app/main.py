@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+import pandas as pd
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
@@ -199,6 +200,8 @@ async def api_status(_=Depends(require_auth)):
         "loss_limit_hit": engine.state.loss_limit_hit,
         "server_time": datetime.now(KST).isoformat(timespec="seconds"),
         "clock_synced": synced,
+        # 매매 데스크에서 "지금 감시 중인가"를 한눈에 보기 위한 상태
+        "market": engine.market_status(),
     }
 
 
@@ -236,25 +239,42 @@ async def api_reject(order_id: str, _=Depends(require_auth)):
 
 
 @app.get("/api/bars/{symbol}")
-async def api_bars(symbol: str, tf: str = "1m", live: int = 0, _=Depends(require_auth)):
+async def api_bars(symbol: str, tf: str = "1m", live: int = 0,
+                   date: str | None = None, _=Depends(require_auth)):
     """봉 데이터. tf=1m(분봉, 기본) 또는 1d(일봉, 발굴 수집분).
-    live=1 이면 분봉을 키움 REST 로 즉시 조회해 최신분을 채운 뒤 반환(실시간)."""
+
+    분봉은 날짜 단위로 끊어서 본다(장중 차트 가독성):
+    - date 미지정 → 저장분 중 가장 최근 거래일(보통 오늘)
+    - date=YYYY-MM-DD → 그 날짜의 분봉만
+    live=1 이면 키움 REST 로 최신분을 채운 뒤 반환(실시간, 최근일 조회에만 의미).
+    """
     if tf not in ("1m", "1d"):
         tf = "1m"
-    if tf == "1m" and live and settings.KIWOOM_APP_KEY:
+    if tf == "1m" and live and settings.KIWOOM_APP_KEY and not date:
         from .data import collector
 
         try:
             await collector.backfill_minutes(symbol)  # REST 즉시 조회(실시간)
         except Exception:  # noqa: BLE001 - 조회 실패 시 저장분으로 폴백
             pass
-    df = store.load_bars(symbol, tf, limit=500)
+    df = store.load_bars(symbol, tf, limit=5000 if tf == "1m" else 500)
+    if tf == "1m" and not df.empty:
+        days = df.index.normalize()
+        want = None
+        if date:
+            try:
+                want = pd.Timestamp(date).normalize()
+            except (TypeError, ValueError):
+                want = None
+        if want is None:
+            want = days.max()                 # 최근 거래일(오늘)
+        df = df[days == want]
     bars = [] if df.empty else [
         {"time": int(ts.timestamp()), "open": r.open, "high": r.high,
          "low": r.low, "close": r.close, "volume": int(r.volume)}
         for ts, r in df.iterrows()
     ]
-    if tf == "1m":
+    if tf == "1m" and not date:
         # 형성 중인 현재 분봉을 덧붙인다 (실시간 WS 수신분)
         cur = aggregator.snapshot(symbol)
         if cur:
@@ -263,6 +283,16 @@ async def api_bars(symbol: str, tf: str = "1m", live: int = 0, _=Depends(require
             elif not bars or bars[-1]["time"] < cur["time"]:
                 bars.append(cur)
     return bars
+
+
+@app.get("/api/bars/{symbol}/dates")
+async def api_bar_dates(symbol: str, _=Depends(require_auth)):
+    """분봉 데이터가 있는 날짜 목록 (데이트 피커 표시용, 최신순)."""
+    df = store.load_bars(symbol, "1m", limit=50000)
+    if df.empty:
+        return {"dates": []}
+    days = sorted({str(d.date()) for d in df.index}, reverse=True)
+    return {"dates": days}
 
 
 @app.get("/api/signals")
