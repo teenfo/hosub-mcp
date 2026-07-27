@@ -99,6 +99,13 @@ class SignalEngine:
         score = _REGIME_ORDER[anchor] + _REGIME_ORDER[self.gap_bias]
         score = max(-1, min(1, score))
         self.regime = _ORDER_REGIME[score]
+        # 네 값을 한 레코드로 남긴다 — 야간 리포트가 결정론 대조군을 이기는지
+        # 40거래일 뒤에 물으려면 오늘부터 쌓여 있어야 한다. 값이 바뀔 때만 쓴다.
+        from ..data import regime_log
+
+        # self.base_regime 이 아니라 **실제로 합성에 쓰인 값**(base)을 남긴다.
+        # 둘은 보통 같지만, 갈라지는 순간 이력이 조용히 거짓이 된다.
+        regime_log.record(self.night_bias, base, self.gap_bias, self.regime)
         return self.regime
 
     def _inverse_blocked(self, symbol: str, side: str = "long") -> bool:

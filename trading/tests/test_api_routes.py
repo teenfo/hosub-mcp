@@ -67,7 +67,18 @@ def test_scout_mode_rejects_unknown(client):
 @pytest.mark.parametrize("path", [
     "/api/research/event-study", "/api/research/ranking",
     "/api/backtest/report/latest", "/api/backtest/sweep/latest",
+    "/api/regime/history",
 ])
 def test_research_routes_respond(client, path):
     """결과 파일이 없어도 예외가 아니라 사유를 돌려줘야 한다."""
     assert _get(client, path).status_code == 200
+
+
+def test_regime_history_shape(client, monkeypatch, tmp_path):
+    """이력이 아직 비어 있어도 화면이 기대하는 키가 다 있어야 한다."""
+    from app.data import regime_log
+
+    monkeypatch.setattr(regime_log, "DB_PATH", tmp_path / "r.db")
+    d = _get(client, "/api/regime/history").json()
+    assert {"daily", "recent", "score", "signals", "min_days"} <= set(d)
+    assert set(d["signals"]) == set(regime_log.SIGNALS)
