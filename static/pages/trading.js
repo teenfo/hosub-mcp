@@ -423,6 +423,29 @@ export default {
           (mk.scanning ? ageTxt + (stale ? " ⚠ 스캔이 멈춘 것 같습니다" : "")
                        : `정규장 ${mk.session || "09:00~15:30"}`)),
       ]));
+      // --- 키움 API 부하 (감시 주기를 더 줄일 여유가 있는지) ---
+      const u = s.api_usage || {};
+      if (u.max_rps) {
+        const pctUse = u.usage_pct ?? 0;
+        const heavy = pctUse >= 80 || (u.rate_limited_1h || 0) > 0;
+        const barTone = heavy ? "bg-danger" : pctUse >= 50 ? "bg-warning" : "bg-success";
+        status.body.appendChild(el("div", { class: "mb-2" }, [
+          el("div", { class: "d-flex justify-content-between small" }, [
+            el("span", { class: "text-secondary" }, "키움 API 부하"),
+            el("span", { class: heavy ? "fw-semibold text-danger" : "" },
+              `${u.rps_10s}/${u.max_rps} rps (${pctUse}%)`),
+          ]),
+          el("div", { class: "progress", style: "height:6px" },
+            el("div", { class: `progress-bar ${barTone}`,
+                        style: `width:${Math.min(100, pctUse)}%` })),
+          el("div", { class: "small text-secondary" },
+            `최근 1분 ${u.calls_1m}회 · 1시간 ${u.calls_1h}회` +
+            (u.throttle_wait_sec ? ` · 대기 ${u.throttle_wait_sec}s` : "") +
+            ((u.rate_limited_1h || 0) > 0
+              ? ` · ⚠ 한도초과 ${u.rate_limited_1h}회(1h) — 주기를 늘리세요`
+              : (u.errors_1h ? ` · 오류 ${u.errors_1h}회(1h)` : ""))),
+        ]));
+      }
       const envB = badge(s.env === "real" ? "실전" : "모의투자", s.env === "real" ? "danger" : "success");
       const clockBadge = s.server_time
         ? [" ", badge(s.clock_synced ? "동기화 ✓" : "미동기화 ⚠", s.clock_synced ? "success" : "danger")]
