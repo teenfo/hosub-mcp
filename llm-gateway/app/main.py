@@ -19,6 +19,7 @@ from starlette.routing import Route
 
 from .auth import RateLimiter, authenticate
 from .config import RoleConfig, ServiceConfig
+from .notify import SlackNotifier
 from .ollama import BackendError, InputTooLong, OllamaClient
 from .scheduler import LANES, Scheduler
 from .store import (
@@ -110,6 +111,7 @@ def build_app(
         auto_install=os.environ.get("AUTO_INSTALL_MODELS", "1") not in ("0", "false"),
         models_refresh=float(os.environ.get("MODELS_REFRESH_SECONDS", 30)),
         retention_days=int(os.environ.get("JOB_RETENTION_DAYS", 30)),
+        notifier=SlackNotifier(),
     )
     limiter = RateLimiter()
 

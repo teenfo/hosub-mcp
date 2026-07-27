@@ -56,6 +56,7 @@ class FakeOllama:
     def __init__(self, delay: float = 0.0, fail_times: int = 0,
                  retryable: bool = True, models: list[str] | None = None,
                  delays: dict[str, float] | None = None) -> None:
+        self.base_url = "http://mac.test:11434"   # 실제 클라이언트와 같은 속성
         self.delay = delay
         self.delays = delays or {}      # 모델별 지연(없으면 delay)
         self.fail_times = fail_times
