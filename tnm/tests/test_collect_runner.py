@@ -2,9 +2,13 @@
 import asyncio
 from datetime import datetime, timezone
 
-from app import db
+from app import db, settings
 from app.collect import CollectRunner, doc_to_row
 from app.collectors.base import RawDoc
+
+
+async def _noop(*a, **k):
+    return None
 
 
 def _doc(uid="u1", title="제목", body="본문  홍길동 기자"):
@@ -22,6 +26,8 @@ def test_doc_to_row_has_hash_and_norm():
 def test_run_once_inserts_and_advances_cursor(monkeypatch):
     runner = CollectRunner()
     monkeypatch.setattr(db, "ready", True)
+    # 이 테스트는 종목별 모드를 검증한다 (전종목 모드는 별도 테스트)
+    monkeypatch.setitem(settings.COLLECT, "dart", {"market_mode": False})
 
     class FakeCol:
         name = "dart"
@@ -55,6 +61,7 @@ def test_run_once_inserts_and_advances_cursor(monkeypatch):
     monkeypatch.setattr(db, "active_watch_for_collect", fake_active)
     monkeypatch.setattr(db, "insert_raw_items", fake_insert)
     monkeypatch.setattr(db, "set_cursor", fake_cursor)
+    monkeypatch.setattr(db, "mark_attempt", _noop)
 
     result = asyncio.run(runner.run_once("dart"))
     assert inserted == [(1, "dart", 1)]                  # 성공 종목만 적재

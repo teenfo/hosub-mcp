@@ -17,6 +17,7 @@ from . import db, metrics, ollama, settings
 from .collect import CollectRunner
 from .notify.loop import Notifier
 from .pipeline.workers import ClassifyWorker, DedupWorker, EmbedWorker
+from .promote import promoter
 from .watch import WatchSync
 
 logging.basicConfig(level=logging.INFO,
@@ -42,6 +43,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(deduper.loop()),
         asyncio.create_task(classifier.loop()),
         asyncio.create_task(notifier.loop()),
+        asyncio.create_task(promoter.loop()),
     ]
     yield
     for t in tasks:
@@ -80,6 +82,7 @@ async def api_status(_=Depends(require_auth)):
         "dedup": deduper.status(),
         "classify": classifier.status(),
         "notify": notifier.status(),
+        "promote": promoter.status(),
         "ollama": await ollama.reachable(),
         "shadow_mode": bool(settings.ALERTS.get("shadow_mode", True)),
         "dart_enabled": bool(settings.DART_API_KEY),
@@ -216,6 +219,14 @@ async def api_reclassify_failed(_=Depends(require_auth)):
 
 
 # ---------------- 수집 ----------------
+
+@app.post("/api/promote/run")
+async def api_promote_run(_=Depends(require_auth)):
+    """고점수 종목 감시목록 편입 수동 트리거(수집전용으로만 편입)."""
+    _require_db()
+    result = await promoter.run_once()
+    return {"ok": "skipped" not in result and not result.get("errors"), **result}
+
 
 @app.post("/api/collect/run")
 async def api_collect_run(_=Depends(require_auth)):

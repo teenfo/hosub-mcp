@@ -10,11 +10,24 @@ collect:
   dart:
     market_interval_min: 10    # 장중(09:00-16:00 평일)
     off_interval_min: 60       # 장외
-    initial_days: 30           # 최초 수집 범위 (M2 판정: 30일치 중복 0)
+    initial_days: 30           # 종목별 모드 최초 수집 범위 (M2 판정: 30일치 중복 0)
+    # 전종목 모드 — list.json 은 corp_code 없이 날짜 범위만 주면 전체 공시를 준다.
+    # 종목별 모드는 감시 65종목 = 65콜/사이클이고 종목이 늘면 그대로 늘어난다.
+    # 전종목 모드는 목록 몇 콜로 끝나고 종목 수와 무관하다. false 면 종전 방식.
+    market_mode: true
+    market_initial_days: 3     # 커서 없을 때 소급 범위(전종목이라 넓게 잡지 않는다)
   news:
-    interval_min: 30           # 구글 뉴스 RSS(기본) · 네이버 API(키 있을 때만)
+    interval_min: 30           # 루프 주기 — 실제 종목별 주기는 tier_interval_min
     fetch_body: true           # 기사 링크 본문 추출(trafilatura) — 실패 시 요약 폴백
     initial_days: 7            # 첫 수집(커서 없음) 시 최근 N일만 — 백로그 방지
+    # 계층별 수집 주기(분). 구글 RSS 는 종목명 검색이라 종목당 1콜이 강제돼
+    # 전종목이 불가능하다(3,900종목 ÷ 30분 = 초당 2.2요청 — 차단당한다).
+    # 대신 매매 대상은 자주, 그 외는 드물게 본다. tier 는 트레이딩 감시목록의
+    # collect_only 에서 동기화된다.
+    tier_interval_min:
+      trade: 30                # 매매 대상
+      collect: 120             # 수집전용
+      other: 720               # 그 외(뉴스 발굴 등)
 
 dedup:
   duplicate_threshold: 0.92    # 이상 → duplicate (LLM 생략)
@@ -54,3 +67,15 @@ alerts:
   quiet_end: "07:00"
   urgent_categories: [정정공시, 거래정지]   # 조용시간에도 즉시 발송
   shadow_mode: true            # true 면 어떤 조건에도 발송하지 않고 기록만 (M8 전환 시 false)
+
+# 고점수 뉴스·공시 종목의 트레이딩 감시목록 편입 — **수집전용으로만**.
+# 뉴스 점수는 아직 검증되지 않았다(Shadow 라벨링 2주 미완, 점수×수익률 이벤트
+# 스터디 미실시). 검증 전 신호로 매매하는 것은 발굴 3규칙에서 이미 겪은 실수다.
+# 지금 하는 일은 데이터를 먼저 쌓는 것뿐이고, 매매 tier 승격은 측정을 통과한 뒤
+# 사람이 결정한다.
+promote:
+  enabled: true
+  min_score: 70          # 알림 기본 임계(60)보다 높게 — 편입은 알림보다 보수적으로
+  window_hours: 24       # 최근 N시간 내 분석만
+  max_per_run: 5         # 사이클당 편입 상한(감시목록 급팽창 방지)
+  interval_min: 60

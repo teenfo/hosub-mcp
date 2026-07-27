@@ -56,6 +56,7 @@ DEDUP: dict = CONFIG.get("dedup", {})
 LLM: dict = CONFIG.get("llm", {})
 SCORE: dict = CONFIG.get("score", {})
 ALERTS: dict = CONFIG.get("alerts", {})
+PROMOTE: dict = CONFIG.get("promote", {})
 
 _SECRET_KEYS = (
     "DART_API_KEY", "NAVER_CLIENT_ID", "NAVER_CLIENT_SECRET",

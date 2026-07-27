@@ -19,13 +19,18 @@ log = logging.getLogger("tnm.watch")
 KST = ZoneInfo("Asia/Seoul")
 
 
-def parse_trading_watchlist(payload: dict) -> dict[str, str]:
-    """/api/watchlist 응답 → {ticker: name}. 형식 방어적으로 파싱."""
-    out: dict[str, str] = {}
+def parse_trading_watchlist(payload: dict) -> dict[str, tuple[str, str]]:
+    """/api/watchlist 응답 → {ticker: (name, tier)}. 형식 방어적으로 파싱.
+
+    tier 는 트레이딩의 collect_only 를 그대로 따른다 — 매매하지 않는 종목까지
+    뉴스를 30분마다 볼 이유가 없다(구글 RSS 는 종목당 1콜).
+    """
+    out: dict[str, tuple[str, str]] = {}
     for e in payload.get("entries", []) or []:
         code = str(e.get("code", "")).strip()
         if code:
-            out[code] = str(e.get("name") or code)
+            tier = "collect" if e.get("collect_only") else "trade"
+            out[code] = (str(e.get("name") or code), tier)
     return out
 
 
@@ -61,13 +66,16 @@ def parse_holdings(payload: dict) -> dict[str, str]:
     return out
 
 
-def merge_auto(trading: dict[str, str], holdings: dict[str, str]) -> dict[str, tuple[str, str]]:
-    """자동 동기 대상 병합: ticker -> (name, origin). 보유가 감시목록보다 우선."""
-    auto: dict[str, tuple[str, str]] = {}
-    for code, name in trading.items():
-        auto[code] = (name, "trading")
+def merge_auto(trading: dict[str, tuple[str, str]], holdings: dict[str, str],
+               ) -> dict[str, tuple[str, str, str]]:
+    """자동 동기 대상 병합: ticker -> (name, origin, tier). 보유가 감시목록보다 우선."""
+    auto: dict[str, tuple[str, str, str]] = {}
+    for code, v in trading.items():
+        name, tier = v if isinstance(v, tuple) else (v, "trade")
+        auto[code] = (name, "trading", tier)
     for code, name in holdings.items():
-        auto[code] = (name, "holding")   # 보유 종목은 origin='holding' 으로 우선
+        # 보유 종목은 origin='holding' 으로 우선 — 돈이 들어가 있으니 항상 매매 tier
+        auto[code] = (name, "holding", "trade")
     return auto
 
 

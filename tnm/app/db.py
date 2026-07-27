@@ -159,10 +159,13 @@ async def set_alert_settings(ticker: str, threshold: int | None,
         return cur.rowcount > 0
 
 
-async def apply_sync(auto: dict[str, tuple[str, str]],
+async def apply_sync(auto: dict[str, tuple[str, ...]],
                      ok_origins: set[str] | tuple[str, ...] = ("trading", "holding"),
                      ) -> dict:
-    """자동 동기 반영. auto: ticker -> (name, origin['trading'|'holding']).
+    """자동 동기 반영. auto: ticker -> (name, origin['trading'|'holding'], tier).
+
+    tier 는 뉴스 수집 주기를 가른다(매매 대상은 자주, 수집전용은 드물게).
+    생략하면 'trade' — 기존 호출부 호환.
 
     병합 규칙 (계획 4절):
     - 신규 코드: insert(origin, active) — 단 기존 행이 있으면 manual/excluded 존중
@@ -179,16 +182,19 @@ async def apply_sync(auto: dict[str, tuple[str, str]],
             "select ticker, origin, is_excluded, is_active from tnm_watchlist")
         rows = {r[0]: {"origin": r[1], "is_excluded": r[2], "is_active": r[3]}
                 for r in await cur.fetchall()}
-        for ticker, (name, origin) in auto.items():
+        for ticker, vals in auto.items():
+            name, origin = vals[0], vals[1]
+            tier = vals[2] if len(vals) > 2 else "trade"
             existing = rows.get(ticker)
             if existing is None:
                 await conn.execute(
                     "insert into tnm_watchlist (ticker, name, origin, last_seen_at,"
-                    " score_threshold, daily_alert_cap)"
-                    " values (%s, %s, %s, now(), %s, %s) on conflict (ticker) do nothing",
+                    " score_threshold, daily_alert_cap, tier)"
+                    " values (%s, %s, %s, now(), %s, %s, %s)"
+                    " on conflict (ticker) do nothing",
                     (ticker, name, origin,
                      int(settings.ALERTS.get("default_threshold", 60)),
-                     int(settings.ALERTS.get("default_daily_cap", 5))))
+                     int(settings.ALERTS.get("default_daily_cap", 5)), tier))
                 inserted += 1
                 continue
             if existing["origin"] == "manual" or existing["is_excluded"]:
@@ -197,9 +203,9 @@ async def apply_sync(auto: dict[str, tuple[str, str]],
             # 전환된 행은 이 UPDATE 가 건드리지 않는다 (0행 갱신).
             await conn.execute(
                 "update tnm_watchlist set last_seen_at = now(), is_active = true,"
-                " name = %s, origin = %s"
+                " name = %s, origin = %s, tier = %s"
                 " where ticker = %s and not is_excluded and origin <> 'manual'",
-                (name, origin, ticker))
+                (name, origin, tier, ticker))
             if not existing["is_active"]:
                 revived += 1
         # 조회에 성공한 소스(ok_origins)에서 사라진 auto 행만 비활성화
@@ -238,10 +244,51 @@ async def active_watch_for_collect() -> list[dict]:
     """수집 대상 활성 종목 + 소스별 증분 커서."""
     async with _pool.connection() as conn:
         cur = await conn.execute(
-            "select id, ticker, name, dart_corp_code, last_collected_at"
-            " from tnm_watchlist where is_active and not is_excluded order by ticker")
+            "select id, ticker, name, dart_corp_code, last_collected_at, tier,"
+            " last_attempt from tnm_watchlist"
+            " where is_active and not is_excluded order by ticker")
         return [{"id": r[0], "ticker": r[1], "name": r[2], "dart_corp_code": r[3],
-                 "last_collected_at": r[4] or {}} for r in await cur.fetchall()]
+                 "last_collected_at": r[4] or {}, "tier": r[5] or "trade",
+                 "last_attempt": r[6] or {}} for r in await cur.fetchall()]
+
+
+async def get_state(key: str) -> str | None:
+    """전역 수집 상태(종목에 매이지 않는 커서). DART 전종목 모드가 쓴다."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select value from tnm_collect_state where key = %s", (key,))
+        row = await cur.fetchone()
+        return row[0] if row else None
+
+
+async def set_state(key: str, value: str) -> None:
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "insert into tnm_collect_state (key, value) values (%s, %s)"
+            " on conflict (key) do update set value = excluded.value,"
+            " updated_at = now()", (key, value))
+
+
+async def watch_by_corp_code() -> dict[str, dict]:
+    """corp_code → 감시종목. 전종목 공시를 우리 종목으로 되돌리는 데 쓴다."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select id, ticker, name, dart_corp_code from tnm_watchlist"
+            " where is_active and not is_excluded and dart_corp_code is not null")
+        return {r[3]: {"id": r[0], "ticker": r[1], "name": r[2]}
+                for r in await cur.fetchall()}
+
+
+async def mark_attempt(tickers: list[str], source: str) -> None:
+    """소스별 '마지막 시도 시각' 기록 — 계층별 주기 판정에 쓴다.
+    커서(last_collected_at)와 분리한다: 새 글이 없어도 시도는 있었다."""
+    if not tickers:
+        return
+    async with _pool.connection() as conn:
+        await conn.execute(
+            "update tnm_watchlist set last_attempt ="
+            " last_attempt || jsonb_build_object(%s::text, now()::text)"
+            " where ticker = any(%s)", (source, tickers))
 
 
 async def set_cursor(ticker: str, source: str, cursor: str) -> None:
@@ -556,6 +603,23 @@ async def pending_alerts(limit: int = 50) -> list[dict]:
             " order by a.created_at limit %s", (limit,))
         keys = ("id", "score", "category", "impact_direction", "impact_horizon",
                 "summary", "title", "url", "ticker", "name")
+        return [dict(zip(keys, r)) for r in await cur.fetchall()]
+
+
+async def high_score_recent(min_score: int, hours: int) -> list[dict]:
+    """최근 N시간 내 고점수 분석 — 감시목록 편입 후보. 종목당 최고점 1건."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select distinct on (w.ticker) w.ticker, w.name, a.score,"
+            " a.impact_direction, a.category, r.title, r.url"
+            " from tnm_analyses a"
+            " join tnm_raw_items r on r.id = a.raw_item_id"
+            " join tnm_watchlist w on w.id = r.watchlist_id"
+            " where a.status = 'ok' and a.score >= %s"
+            "  and a.created_at >= now() - make_interval(hours => %s)"
+            " order by w.ticker, a.score desc", (int(min_score), int(hours)))
+        keys = ("ticker", "name", "score", "impact_direction", "category",
+                "title", "url")
         return [dict(zip(keys, r)) for r in await cur.fetchall()]
 
 
