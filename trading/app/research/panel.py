@@ -106,5 +106,8 @@ def forward(p: pd.DataFrame, horizons=(1, 3, 5)) -> pd.DataFrame:
     if "high" in p.columns and "low" in p.columns:
         nxt_high, nxt_low = p["high"].shift(-1), p["low"].shift(-1)
         out["fwd_up_1"] = (nxt_high / nxt_open - 1) * 100
+        # 하방도 필요하다 — 손절/목표 브래킷을 일봉으로 근사하려면
+        # 위·아래·종가 셋이 다 있어야 한다(research/ranking.py).
+        out["fwd_dn_1"] = (nxt_low / nxt_open - 1) * 100
         out["fwd_range_1"] = (nxt_high - nxt_low) / nxt_open * 100
     return out
