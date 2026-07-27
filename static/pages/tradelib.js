@@ -109,3 +109,35 @@ export function makeChanged() {
   changed.invalidate = (key) => { memo[key] = undefined; };
   return changed;
 }
+
+/** 기어 모달 — 설정을 카드에서 빼내 필요할 때만 연다.
+ *
+ * 설정 카드를 페이지에 상시 노출하면 자주 보는 정보(관심종목·상태)가 밀린다.
+ * `trading.js` 가 쓰던 형태를 여기로 올려 두 페이지가 같은 것을 쓰게 한다 —
+ * 파편화가 실제 손실로 이어진 사례를 하루에 여러 번 봤다.
+ *
+ * 반환: { button, show, hide, body } — button 을 카드 헤더나 툴바에 붙인다.
+ */
+export function makeGearModal(container, title, { icon = "gear-fill", size = "modal-lg",
+                                                  label = "설정" } = {}) {
+  const body = el("div", { class: "modal-body pt-2" });
+  const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
+    el("div", { class: `modal-dialog modal-dialog-centered ${size} modal-dialog-scrollable` },
+      el("div", { class: "modal-content" }, [
+        el("div", { class: "modal-header py-2" }, [
+          el("h5", { class: "modal-title", html: `<i class="bi bi-${icon}"></i> ${title}` }),
+          el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
+        ]),
+        body,
+        el("div", { class: "modal-footer py-2" },
+          el("button", { class: "btn btn-sm btn-secondary", type: "button",
+                         "data-bs-dismiss": "modal" }, "닫기")),
+      ])));
+  container.appendChild(modalEl);
+  const modal = new bootstrap.Modal(modalEl);
+  const button = el("button", {
+    class: "btn btn-sm btn-outline-secondary", type: "button", title,
+  }, [el("i", { class: `bi bi-${icon} me-1` }), label]);
+  button.onclick = () => modal.show();
+  return { button, body, show: () => modal.show(), hide: () => modal.hide() };
+}
