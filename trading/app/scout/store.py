@@ -145,22 +145,56 @@ def purge(days: int = RETAIN_DAYS, now: datetime | None = None) -> int:
 
 # --- 결정 이력 ---------------------------------------------------------------
 
+def _decision_key(d: dict) -> tuple:
+    """같은 결정인지 판별하는 키. **점수는 넣지 않는다** — 감쇠로 매 사이클
+    조금씩 움직이므로 점수를 넣으면 모든 행이 '새 결정' 이 된다."""
+    return (d["action"], d.get("from_tier"), d.get("to_tier"))
+
+
+def _last_keys(conn, codes: list[str]) -> dict[str, tuple]:
+    """코드별 가장 최근 결정의 키."""
+    if not codes:
+        return {}
+    marks = ",".join("?" * len(codes))
+    rows = conn.execute(
+        f"SELECT code, action, from_tier, to_tier FROM decisions WHERE id IN ("
+        f"  SELECT MAX(id) FROM decisions WHERE code IN ({marks}) GROUP BY code)",
+        codes,
+    ).fetchall()
+    return {r["code"]: (r["action"], r["from_tier"], r["to_tier"]) for r in rows}
+
+
 def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
-    """승격·강등 결정을 남긴다. **shadow 에서도 남긴다** — 적용하지 않은
-    결정이야말로 "엔진이라면 이렇게 했을 것" 의 기록이다."""
+    """승격·강등 결정을 남긴다. **바뀔 때만 남긴다**(regime_log 와 같은 규약).
+
+    shadow 에서도 남긴다 — 적용하지 않은 결정이야말로 "엔진이라면 이렇게 했을
+    것" 의 기록이다. 다만 shadow 는 결정을 반영하지 않으므로 상태가 영원히 그대로고,
+    그대로 두면 30초마다 **같은 결론이 다시 쌓인다**. 실측 2026-07-28 09:00~09:36:
+    1,140행이 쌓였는데 고유 종목은 27개였다(펌텍코리아 promote_trade 71회).
+
+    이게 원장을 못 쓰게 만든다. 소스별 기여도 측정(4주 뒤)이 읽을 표본이
+    "한 번의 판단"이 아니라 "그 판단을 몇 사이클 유지했는가"로 가중돼 버린다.
+    직전과 같은 결정은 정보가 없으므로 쓰지 않는다.
+
+    반환: **실제로 기록한** 행 수.
+    """
     if not rows:
         return 0
     ts = datetime.now(UTC).isoformat()
     with _conn() as conn:
+        last = _last_keys(conn, [d["code"] for d in rows])
+        fresh = [d for d in rows if last.get(d["code"]) != _decision_key(d)]
+        if not fresh:
+            return 0
         conn.executemany(
             "INSERT INTO decisions (ts, code, name, action, from_tier, to_tier,"
             " score, sources, reason, mode, applied) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [(ts, d["code"], d.get("name"), d["action"], d.get("from_tier"),
               d.get("to_tier"), d.get("score"),
               json.dumps(sorted(d.get("sources") or []), ensure_ascii=False),
-              d.get("reason"), mode, 1 if applied else 0) for d in rows],
+              d.get("reason"), mode, 1 if applied else 0) for d in fresh],
         )
-    return len(rows)
+    return len(fresh)
 
 
 def recent_decisions(limit: int = 200) -> list[dict]:

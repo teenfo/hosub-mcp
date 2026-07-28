@@ -8,6 +8,8 @@
 전용으로 시작하는 이유다.
 """
 import logging
+from datetime import UTC, datetime, time
+from zoneinfo import ZoneInfo
 
 from ... import settings
 from ...signals import scanner
@@ -16,6 +18,14 @@ from ..model import Signal
 from .base import rank_signals, watched_keep
 
 log = logging.getLogger(__name__)
+KST = ZoneInfo("Asia/Seoul")
+OPEN = time(9, 0)
+# 개장 후 이만큼 지나기 전에는 급증률을 믿지 않는다. 급증률의 분모인 '직전 기간
+# 거래량' 이 개장 직후에는 존재하지 않아 비율이 폭발하기 때문이다(model.py
+# SURGE_SANE_MAX 주석의 실측 참조). 기다리는 쪽을 택한 이유: 이 소스는 확정
+# 신호가 아니라 관찰 후보이고, 개장 10분을 놓치는 비용보다 대형주가 만점을
+# 받아 취합을 오염시키는 비용이 크다.
+PRESURGE_WARMUP_MIN = 10
 
 
 class VolumeSource:
@@ -103,10 +113,23 @@ class PresurgeSource:
     def interval_sec(self) -> int:
         return int(self._cfg().get("interval_sec", 60))
 
+    def warmed_up(self, now: datetime | None = None) -> bool:
+        """개장 워밍업이 끝났는가. 장중이 아니면 판단 자체를 하지 않는다.
+
+        빈 리스트를 돌려주는 것이지 예외가 아니다 — 예외로 올리면 백오프가
+        걸리고 `source_health` 가 '실패' 로 물든다. 워밍업은 실패가 아니다.
+        """
+        t = (now or datetime.now(UTC)).astimezone(KST)
+        mins = int(self._cfg().get("presurge_warmup_min", PRESURGE_WARMUP_MIN))
+        open_min = OPEN.hour * 60 + OPEN.minute
+        return (t.hour * 60 + t.minute) >= open_min + mins
+
     async def collect(self) -> list[Signal]:
         from ...kiwoom.client import client
 
         cfg = self._cfg()
+        if not self.warmed_up():
+            return []
         raw = await client.volume_surge_rank(cfg.get("market", "000"))
         items = scanner.filter_presurge(scanner.parse_surge(raw), cfg,
                                         keep=watched_keep())
