@@ -31,7 +31,10 @@ TR_VOLUME_SURGE = "ka10023"      # 거래량급증 (sdnin_rt 급증률 포함)
 TR_CHANGE_RATE_RANK = "ka10027"  # 전일대비등락률상위 (급등률 상위)
 TR_STOCK_LIST = "ka10099"        # 종목정보 리스트 (요청 필드 실호출 검증 필요)
 
+TR_QUOTE = "ka10006"             # 주식시세 — flu_rt(등락률) + cntr_str(체결강도)
+
 PATH_CHART = "/api/dostk/chart"
+PATH_MARKET = "/api/dostk/mrkcond"
 PATH_ORDER = "/api/dostk/ordr"
 PATH_ACCOUNT = "/api/dostk/acnt"
 PATH_RANK = "/api/dostk/rkinfo"
@@ -290,6 +293,13 @@ class KiwoomClient:
         return await self._call(
             PATH_ACCOUNT, TR_ACCOUNT_BALANCE, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
         )
+
+    async def quote(self, code: str) -> dict:
+        """현재 시세 (ka10006). 등락률·체결강도가 같이 온다.
+
+        매매 tier 승격 후보에만 부른다 — 하루 1~2종목이라 레이트리밋 부담이 없다.
+        """
+        return await self._call(PATH_MARKET, TR_QUOTE, {"stk_cd": code})
 
     async def daily_realized(self, start: str, end: str) -> dict:
         """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.
