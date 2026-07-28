@@ -157,7 +157,10 @@ export default {
         dayBody.appendChild(el("div", { class: "mb-3" }, [
           el("div", { class: "fw-semibold small mb-1",
             html: '<i class="bi bi-clipboard-check"></i> 관찰 사실 (체결 기록에서 계산)' }),
-          el("ul", { class: "small mb-0" }, facts.map((f) => el("li", {}, f))),
+          // '[관측]' 로 시작하는 줄은 아직 검증되지 않은 관측치다 — 판단에
+          // 쓰이는 사실과 같은 무게로 읽히지 않도록 흐리게 둔다.
+          el("ul", { class: "small mb-0" }, facts.map((f) =>
+            el("li", { class: String(f).startsWith("[관측]") ? "text-muted" : "" }, f))),
         ]));
       }
 

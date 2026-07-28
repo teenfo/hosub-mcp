@@ -225,6 +225,16 @@ def facts(entry: dict) -> list[str]:
             out.append(
                 f"일일 손실 가드를 {len(grants)}회 임시 해제(총 +{ovr.get('extra_loss_pct', 0):g}% 허용). "
                 "이 날의 손익은 한도를 열고 낸 결과이므로 다른 날과 같은 기준으로 비교할 수 없다.")
+    # 관측치는 사실 목록 맨 뒤에, 관측이라고 못 박아서 넣는다. 요약이 이걸
+    # 근거로 매매를 권하지 않도록 문장 안에 유보를 함께 싣는다.
+    be = entry.get("breakeven_shadow") or {}
+    if be.get("trades"):
+        out.append(
+            f"[관측] 본전 이동 shadow(목표거리 {be['arm_at_pct']:g}% 무장): "
+            f"{be['trades']}건 중 무장 {be['armed']}건 · 가상청산 "
+            f"{be['triggered']}건, 실제 대비 {be['delta_krw']:+,.0f}원"
+            f"(유리 {be['helped']}건 · 불리 {be['hurt']}건). 매매에 반영되지 않은 "
+            "가정치다 — 표본이 20거래일에 못 미치면 판단을 보류한다.")
     if entry.get("carried"):
         out.append(
             f"다음 날로 넘어간 미청산 포지션 {len(entry['carried'])}건 — "
@@ -272,6 +282,8 @@ def build(day: str | None = None) -> dict:
     """하루치 일지를 계산한다(LLM 요약 제외 — 순수 함수에 가깝게 유지)."""
     from .trade import ledger, override
 
+    from .trade import breakeven
+
     day = day or datetime.now(KST).date().isoformat()
     closed = [p for p in ledger.positions(status="closed", limit=500)
               if str(p.get("closed") or "")[:10] == day]
@@ -304,6 +316,9 @@ def build(day: str | None = None) -> dict:
         # 그날 손실 가드를 임시로 열었다면 그 사실을 함께 남긴다 — 성과를 읽을 때
         # '한도를 열고 낸 결과'인지 아닌지가 해석을 바꾼다.
         "guard": {"override": override.record_for(day)} if override.record_for(day) else {},
+        # 본전 이동 shadow — **관측치**다. 성과 집계(trades/by_rule)에는 섞지
+        # 않는다. 20거래일이 쌓이기 전에는 어느 쪽이 나은지 모른다.
+        "breakeven_shadow": breakeven.report(day),
         "summary": {},
     }
     entry["facts"] = facts(entry)
