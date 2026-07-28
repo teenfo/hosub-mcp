@@ -66,7 +66,8 @@ TRADING_URL = os.environ.get("HOSUB_TRADING_URL", "http://127.0.0.1:8600")
 TRADING_TOKEN = os.environ.get("HOSUB_TRADING_TOKEN", "")
 
 _TRADING_GET_RE = re.compile(
-    r"^(status|signals|orders|settings|account|scanner|discovery|watchlist"
+    r"^(status|signals|orders|settings|account|account/realized"
+    r"|scanner|discovery|watchlist"
     r"|prices|rules|performance|risk|journal|journal/history"
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
@@ -78,7 +79,7 @@ _TRADING_POST_RE = re.compile(
     r"|discovery/run|symbols/refresh|backtest/report/run|backtest/sweep/run|risk"
     r"|journal/run|guard/override(/clear)?"
     r"|research/(event-study|ranking|news-impact)/run"
-    r"|scout/(mode|run)"
+    r"|scout/(mode|run)|account/reconcile"
     r"|positions/[0-9a-f]{12}/close)$"
 )
 # 백테스트는 오래 걸린다(전 종목 리포트 수십 초, 종목별 재생도 봉이 쌓일수록·

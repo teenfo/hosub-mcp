@@ -82,3 +82,58 @@ def test_regime_history_shape(client, monkeypatch, tmp_path):
     d = _get(client, "/api/regime/history").json()
     assert {"daily", "recent", "score", "signals", "min_days"} <= set(d)
     assert set(d["signals"]) == set(regime_log.SIGNALS)
+
+
+# --- 계좌 실현손익 대조 ---
+
+def test_realized_requires_auth(client):
+    assert client.get("/api/account/realized").status_code == 401
+
+
+def test_realized_shape_without_api_key(client, monkeypatch, tmp_path):
+    """키가 없어도 500 이 아니라 사유를 돌려주고, 원장 쪽은 그대로 낸다."""
+    from app import main
+    from app.trade import ledger
+
+    monkeypatch.setattr(main.settings, "KIWOOM_APP_KEY", "")
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    d = _get(client, "/api/account/realized").json()
+    assert {"period", "broker", "engine", "untracked", "unconfirmed"} <= set(d)
+    assert d["broker"]["ok"] is False
+    assert d["untracked"] is None          # 계좌 값이 없으면 차이도 없다
+    assert d["engine"]["realized"] == 0
+
+
+def test_realized_puts_broker_and_engine_side_by_side(client, monkeypatch, tmp_path):
+    """이 라우트의 존재 이유 — 둘을 합치지 않고 차이를 이름 붙여 낸다."""
+    from app import main
+    from app.kiwoom.client import client as kc
+    from app.trade import ledger
+
+    monkeypatch.setattr(main.settings, "KIWOOM_APP_KEY", "K")
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    main._realized_cache.update(ts=0.0, data=None)
+
+    async def fake(start, end):
+        return {"return_code": 0, "rlzt_pl": "181019", "trde_cmsn": "890",
+                "trde_tax": "3497", "dt_rlzt_pl": []}
+
+    monkeypatch.setattr(kc, "daily_realized", fake)
+    ledger.open_position({"id": "p1", "symbol": "477850", "rule": "orb",
+                          "side": "long", "qty": 4, "entry": 26_850,
+                          "stop": 26_000, "target": 28_000}, fill=26_850)
+    ledger.close_position("p1", 27_750, "target")
+
+    d = _get(client, "/api/account/realized").json()
+    assert d["broker"]["realized"] == 181_019
+    # 차이 = 계좌 − 엔진. 실측에서 이 값의 정체가 '원장에 없는 수동매매' 였다
+    assert d["untracked"] == round(181_019 - d["engine"]["realized"], 0)
+    assert d["engine"]["trades"] == 1
+
+
+def test_reconcile_without_api_key_is_not_an_error_page(client, monkeypatch):
+    from app import main
+
+    monkeypatch.setattr(main.settings, "KIWOOM_APP_KEY", "")
+    r = client.post("/api/account/reconcile", headers={"X-Internal-Token": TOKEN})
+    assert r.status_code == 200 and r.json()["ok"] is False

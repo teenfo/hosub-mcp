@@ -22,6 +22,10 @@ TR_DAILY_CHART = "ka10081"    # 주식 일봉차트 조회
 TR_ORDER_BUY = "kt10000"      # 주식 매수주문
 TR_ORDER_SELL = "kt10001"     # 주식 매도주문
 TR_ACCOUNT_BALANCE = "kt00018"  # 계좌평가잔고
+# 실현손익 계열 — 2026-07-28 실호출로 전부 return_code=0 확인
+TR_SYMBOL_REALIZED = "ka10073"   # 일자별종목별실현손익(기간) — 매도 건별
+TR_DAILY_REALIZED = "ka10074"    # 일자별실현손익 — 기간 합계 + 수수료·거래세
+TR_EXECUTIONS = "ka10076"        # 체결내역 — ord_no·실체결가·실비용
 TR_TRADE_VALUE_RANK = "ka10032"  # 거래대금상위 (flu_rt/trde_prica 포함)
 TR_VOLUME_SURGE = "ka10023"      # 거래량급증 (sdnin_rt 급증률 포함)
 TR_CHANGE_RATE_RANK = "ka10027"  # 전일대비등락률상위 (급등률 상위)
@@ -286,6 +290,31 @@ class KiwoomClient:
         return await self._call(
             PATH_ACCOUNT, TR_ACCOUNT_BALANCE, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
         )
+
+    async def daily_realized(self, start: str, end: str) -> dict:
+        """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.
+
+        **증권사가 계산한 순 실현손익**이다 — 수수료·거래세가 이미 빠져 있다.
+        원장은 엔진이 낸 주문만 알므로 수동매매가 섞이면 계좌와 어긋난다.
+        그 차이를 재는 기준선이 이 값이다.
+        """
+        return await self._call(PATH_ACCOUNT, TR_DAILY_REALIZED,
+                                {"strt_dt": start, "end_dt": end})
+
+    async def symbol_realized(self, code: str, start: str, end: str) -> dict:
+        """종목별 실현손익, 매도 건별 (ka10073)."""
+        return await self._call(PATH_ACCOUNT, TR_SYMBOL_REALIZED,
+                                {"stk_cd": code, "strt_dt": start, "end_dt": end})
+
+    async def executions(self, code: str = "") -> dict:
+        """체결내역 (ka10076). `ord_no` 로 원장 포지션과 이어붙인다.
+
+        조회 범위가 당일이므로 마감 후 한 번 훑어 그날 체결을 확정한다.
+        """
+        return await self._call(
+            PATH_ACCOUNT, TR_EXECUTIONS,
+            {"stk_cd": code, "qry_tp": "0", "sell_tp": "0", "ord_no": "",
+             "stex_tp": "0"})
 
     async def aclose(self) -> None:
         await self._http.aclose()

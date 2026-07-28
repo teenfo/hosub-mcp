@@ -43,7 +43,14 @@ def _conn() -> sqlite3.Connection:
                      # 되받아 손익을 정정하기 위해 필요하다(이론가로 남기지 않는다).
                      ("exit_ord_no", "TEXT"),
                      ("exit_fill_confirmed", "INTEGER DEFAULT 0"),
-                     ("model_exit", "REAL")):
+                     ("model_exit", "REAL"),
+                     # 증권사가 실제로 부과한 비용. 있으면 모델 대신 이걸 쓴다
+                     # (_net_pnl_pct 주석 참조 — 모델은 세 군데가 틀렸다).
+                     # 진입·청산을 나눠 두는 이유는 **재대사 멱등성**이다. 한 칸에
+                     # 누적하면 체결내역을 두 번 훑을 때 비용이 두 배가 된다.
+                     ("entry_fee_krw", "REAL"),
+                     ("exit_fee_krw", "REAL"),
+                     ("tax_krw", "REAL")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -140,6 +147,91 @@ def record_fill(fill: dict) -> bool:
     return updated
 
 
+def reconcile_executions(execs: list[dict]) -> dict:
+    """증권사 체결내역(ka10076)으로 원장의 추정값을 실측으로 확정한다.
+
+    지금 원장의 진입·청산가는 주문체결 실시간을 못 받으면 **1분봉 종가 근사**다
+    (`open_position` 의 `latest_price` 폴백). 실측 2026-07-28 기준 진입 8건 ·
+    청산 11건이 미확정이었다. 실시간을 놓쳐도 마감 후 이걸 한 번 돌리면 메워진다.
+
+    `ord_no` 가 조인 키다 — 원장이 이미 `ord_no`/`exit_ord_no` 를 들고 있고
+    체결내역이 같은 번호를 준다. 새로 이어 붙일 것이 없다.
+
+    같은 주문번호에 체결이 여러 건이면(분할 체결) **수량가중 평균가**로 합치고
+    비용은 더한다. 한 건만 보고 확정하면 나머지 체결이 통째로 사라진다.
+
+    반환: {entries, exits} — 각각 갱신한 포지션 수.
+    """
+    agg: dict[str, dict] = {}
+    for e in execs:
+        ord_no, qty = e.get("ord_no") or "", int(e.get("qty") or 0)
+        if not ord_no or qty <= 0:
+            continue
+        a = agg.setdefault(ord_no, {"amt": 0.0, "qty": 0, "fee": 0.0, "tax": 0.0})
+        a["amt"] += float(e.get("price") or 0) * qty
+        a["qty"] += qty
+        a["fee"] += float(e.get("commission") or 0)
+        a["tax"] += float(e.get("tax") or 0)
+
+    entries = exits = 0
+    with _conn() as conn:
+        for ord_no, a in agg.items():
+            price = a["amt"] / a["qty"] if a["qty"] else 0.0
+            if price <= 0:
+                continue
+            row = conn.execute(
+                "SELECT * FROM positions WHERE ord_no=?", (ord_no,)).fetchone()
+            if row:
+                model = row["model_entry"] or price
+                conn.execute(
+                    "UPDATE positions SET entry=?, qty=?, slippage_pct=?, "
+                    "entry_fee_krw=?, fill_confirmed=1 WHERE id=?",
+                    (round(price, 2), a["qty"],
+                     round((price - model) / model * 100, 4) if model else 0.0,
+                     a["fee"], row["id"]),
+                )
+                entries += 1
+                continue
+            ex = conn.execute(
+                "SELECT * FROM positions WHERE exit_ord_no=? AND status='closed'",
+                (ord_no,)).fetchone()
+            if ex:
+                conn.execute(
+                    "UPDATE positions SET exit=?, exit_fee_krw=?, tax_krw=?, "
+                    "exit_fill_confirmed=1 WHERE id=?",
+                    (round(price, 2), a["fee"], a["tax"], ex["id"]),
+                )
+                exits += 1
+    if entries or exits:
+        apply_actual_costs()
+    return {"entries": entries, "exits": exits}
+
+
+def apply_actual_costs() -> int:
+    """양쪽 체결이 다 확정된 청산 포지션의 손익을 **실비용 기준**으로 다시 낸다.
+
+    한쪽만 확정된 것은 건드리지 않는다 — 비용이 반쪽이라 모델보다 더 틀린다.
+    반환: 갱신한 포지션 수.
+    """
+    n = 0
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE status='closed'"
+            " AND fill_confirmed=1 AND exit_fill_confirmed=1").fetchall()
+        for r in rows:
+            fee = (r["entry_fee_krw"] or 0) + (r["exit_fee_krw"] or 0)
+            krw = actual_pnl_krw(r["side"], r["entry"], r["exit"], r["qty"],
+                                 fee, r["tax_krw"] or 0)
+            cost_basis = (r["entry"] or 0) * (r["qty"] or 0)
+            pct = (krw / cost_basis * 100) if cost_basis else 0.0
+            if (round(krw, 1), round(pct, 4)) == (r["pnl_krw"], r["pnl_pct"]):
+                continue
+            conn.execute("UPDATE positions SET pnl_krw=?, pnl_pct=? WHERE id=?",
+                         (round(krw, 1), round(pct, 4), r["id"]))
+            n += 1
+    return n
+
+
 def fills(limit: int = 50) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
@@ -155,13 +247,41 @@ def latest_price(symbol: str) -> float | None:
 
 
 def _net_pnl_pct(side: str, entry: float, exit_px: float) -> float:
-    """비용(수수료 왕복·거래세·슬리피지) 반영 실현손익률. 백테스터와 동일 공식."""
+    """**모델** 비용 반영 실현손익률. 백테스터와 동일 공식.
+
+    실체결 비용을 아직 못 받은 포지션에만 쓴다. 증권사 실비용이 도착하면
+    `apply_actual_costs()` 가 이 값을 덮어쓴다.
+
+    백테스터에서는 이 공식이 맞다 — 모델가로 시뮬레이션하므로 슬리피지를 따로
+    빼야 한다. **실거래 원장에 그대로 쓴 것이 잘못이었다**(2026-07-28 실측,
+    마키나락스 3건 대조에서 건당 59~72원 과대 손실):
+
+      수수료   0.015%/편도(16원) vs 실제 **10원 고정**          → 과대
+      거래세   0.15%             vs 실제 **약 0.20%**           → 과소
+      슬리피지 0.05%×2 를 차감    vs **이미 체결가에 들어 있다** → 이중계상
+
+    셋이 상쇄돼 합계는 비슷해 보였지만 개별로는 전부 틀렸다.
+    """
     c = settings.COSTS
     raw = (exit_px - entry) / entry * 100
     if side == "short":
         raw = -raw
-    return raw - c.get("commission_pct", 0.015) * 2 - c.get("sell_tax_pct", 0.15) \
+    return raw - c.get("commission_pct", 0.015) * 2 - c.get("sell_tax_pct", 0.20) \
         - c.get("slippage_bp", 5) / 100 * 2
+
+
+def actual_pnl_krw(side: str, entry: float, exit_px: float, qty: int,
+                   fee: float, tax: float) -> float:
+    """실체결가 + 실비용으로 낸 실현손익(원). 슬리피지는 빼지 않는다 — 이미
+    체결가 안에 있다.
+
+    증권사 `tdy_sel_pl` 과 같은 정의다(실측 확인: 마키나락스 26,850 → 27,750
+    × 4주 → 총액 3,600 − 비용 242 = 3,358 = tdy_sel_pl).
+    """
+    gross = (exit_px - entry) * qty
+    if side == "short":
+        gross = -gross
+    return gross - (fee or 0) - (tax or 0)
 
 
 def open_position(order: dict, fill: float | None = None,
