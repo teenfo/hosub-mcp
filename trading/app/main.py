@@ -93,7 +93,7 @@ async def _ledger_loop() -> None:
     - 목표 도달: 승인 대기(청산 매도) — 사용자가 확인 후 발주
     - 장 마감: 미청산분 시장가 정리
     execution.auto_exit=false 면 전체 비활성(장부 기록만)."""
-    from .trade import ledger, orders
+    from .trade import breakeven, ledger, orders
 
     eod_done = ""
     while True:
@@ -105,6 +105,9 @@ async def _ledger_loop() -> None:
                 stop_mode = cfg.get("stop_mode", "auto")   # auto(B) / approve(A)
                 if "09:00" <= hhmm <= "15:30":
                     auto_all = settings.RISK.get("auto_approve", False)
+                    # 본전 이동 shadow — 실제 청산 판정과 **같은 가격·같은 주기**로
+                    # 관측한다. 기록 전용이라 아래 청산 로직에 관여하지 않는다.
+                    await _breakeven_observe(breakeven)
                     for ex in await asyncio.to_thread(ledger.due_exits, _price_of):
                         # 완전 자동 모드면 목표 도달 청산도 승인 없이 즉시 실행
                         # 시간 손절은 손절과 같은 성격(계좌 보호) — 같은 모드를 따른다
@@ -128,7 +131,30 @@ async def _ledger_loop() -> None:
                         log.info("장 마감 미청산 %d건 시장가 정리", n)
         except Exception:  # noqa: BLE001
             log.exception("청산 감시 오류")
+        # 정산은 장 마감 뒤에도 돌려야 eod 청산분이 채워진다. 관측 실패가 청산
+        # 감시를 멈추지 않도록 위 블록과 분리한다.
+        await _breakeven_settle()
         await asyncio.sleep(30)
+
+
+async def _breakeven_observe(breakeven) -> None:
+    """shadow 관측. **실패해도 청산 감시를 막지 않는다** — 측정이 실거래
+    경로를 위태롭게 하면 안 된다."""
+    try:
+        if breakeven.enabled():
+            await asyncio.to_thread(breakeven.observe, _price_of)
+    except Exception:  # noqa: BLE001
+        log.exception("본전 이동 shadow 관측 오류")
+
+
+async def _breakeven_settle() -> None:
+    try:
+        from .trade import breakeven
+
+        if breakeven.enabled():
+            await asyncio.to_thread(breakeven.settle)
+    except Exception:  # noqa: BLE001
+        log.exception("본전 이동 shadow 정산 오류")
 
 
 @asynccontextmanager
