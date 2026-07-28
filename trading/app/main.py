@@ -756,6 +756,83 @@ async def api_account(_=Depends(require_auth)):
     return data
 
 
+_realized_cache: dict = {"ts": 0.0, "data": None}
+
+
+@app.get("/api/account/realized")
+async def api_account_realized(days: int = 30, _=Depends(require_auth)):
+    """계좌 실현손익(증권사) vs 엔진 실현손익(원장), 그리고 그 차이.
+
+    둘은 **원래 다르다.** 원장은 승인·발주된 주문만 기록하므로 수동매매가
+    안 들어온다. 실측 2026-07-28: 계좌 +181,019 vs 원장 −23,465 인데, 차이의
+    99.9%가 원장에 없는 7/16 한 건(+204,645)이었다.
+
+    그래서 하나로 합치지 않고 나란히 둔다 — 차이 자체가 '수동매매분' 이라는
+    정보다. 지금은 엔진 값만 '실현손익' 이라 부르고 있어서 계좌와 다르면
+    버그처럼 보인다.
+    """
+    import time
+    from datetime import timedelta
+
+    from .kiwoom.client import client
+    from .kiwoom.realized import parse_daily
+    from .trade import ledger
+
+    now = time.monotonic()
+    if _realized_cache["data"] and now - _realized_cache["ts"] < 60:
+        return _realized_cache["data"]
+
+    today = datetime.now(KST).date()
+    start = (today - timedelta(days=max(1, days))).strftime("%Y%m%d")
+    broker = {"ok": False, "error": "API 키 미설정"}
+    if settings.KIWOOM_APP_KEY:
+        try:
+            broker = parse_daily(
+                await client.daily_realized(start, today.strftime("%Y%m%d")))
+        except Exception as e:  # noqa: BLE001 - 조회 실패는 화면에 표시
+            broker = {"ok": False, "error": str(e)}
+
+    closed = ledger.positions(status="closed", limit=1000)
+    engine_krw = round(sum(p.get("pnl_krw") or 0 for p in closed), 0)
+    data = {
+        "period": {"start": start, "end": today.strftime("%Y%m%d")},
+        "broker": broker,
+        "engine": {"realized": engine_krw, "trades": len(closed)},
+        # 증권사가 못 세는 게 아니라 원장이 못 보는 것이다 — 이름을 그렇게 붙인다
+        "untracked": (round(broker.get("realized", 0) - engine_krw, 0)
+                      if broker.get("ok") else None),
+        "unconfirmed": {
+            "entries": sum(1 for p in closed if not p.get("fill_confirmed")),
+            "exits": sum(1 for p in closed if not p.get("exit_fill_confirmed")),
+        },
+    }
+    if broker.get("ok"):
+        _realized_cache.update(ts=now, data=data)
+    return data
+
+
+@app.post("/api/account/reconcile")
+async def api_account_reconcile(_=Depends(require_auth)):
+    """증권사 체결내역으로 원장의 추정 진입·청산가를 실측 확정한다.
+
+    실시간 체결 수신을 놓친 건을 마감 후 메우는 경로다. 멱등이라 여러 번
+    돌려도 비용이 겹치지 않는다.
+    """
+    from .kiwoom.client import client
+    from .kiwoom.realized import parse_executions
+    from .trade import ledger
+
+    if not settings.KIWOOM_APP_KEY:
+        return {"ok": False, "error": "API 키 미설정"}
+    try:
+        execs = parse_executions(await client.executions())
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+    got = ledger.reconcile_executions(execs)
+    _realized_cache["data"] = None
+    return {"ok": True, "fills": len(execs)} | got
+
+
 @app.get("/api/risk")
 async def api_risk(_=Depends(require_auth)):
     """일일 목표·손실 가드 상태 + 오늘 실현손익 + 설정값."""

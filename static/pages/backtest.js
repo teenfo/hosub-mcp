@@ -71,11 +71,63 @@ export default {
     // ① 성과 요약 — 실거래 KPI + 규칙별 기대값
     // ==================================================================
     const sumBody = el("div", {}, emptyRow("불러오는 중…"));
+    const reconBody = el("div", { class: "mb-2" });
     summaryC.body.append(
       el("div", { class: "small text-secondary mb-2" },
         el("span", { html: '<i class="bi bi-cash-coin"></i> 승인·발주된 신호의 <b>실현손익</b> 집계. 진입가는 주문체결 실시간 수신 시 <b>실측</b>으로 갱신되고, 미수신분은 <b>근사</b>로 표시된다.' })),
+      reconBody,
       sumBody,
     );
+
+    // --- 계좌 대조 ---
+    // 계좌와 원장은 **원래 다르다.** 원장은 승인·발주된 주문만 기록하므로
+    // 수동매매가 안 들어온다. 실측 2026-07-28: 계좌 +181,019 vs 원장 −23,465
+    // 인데 차이의 99.9%가 원장에 없는 7/16 한 건이었다. 그래서 합치지 않고
+    // 나란히 두고 차이에 이름을 붙인다 — 그 차이 자체가 정보다.
+    const reconcile = async () => {
+      if (!confirm("증권사 체결내역으로 원장의 추정 진입·청산가를 실측 확정합니다.\n"
+                 + "여러 번 돌려도 비용이 겹치지 않습니다. 진행할까요?")) return;
+      try {
+        const r = await postJSON("/api/trading/account/reconcile");
+        if (!r.ok) throw new Error(r.error || "실패");
+        alert(`체결 ${r.fills}건 조회 — 진입 ${r.entries}건 · 청산 ${r.exits}건 확정`);
+        changed.invalidate("recon"); changed.invalidate("perf");
+        await Promise.all([loadRealized(), loadPerformance()]);
+      } catch (e) { alert("대사 실패: " + e.message); }
+    };
+
+    const loadRealized = async () => {
+      let d;
+      try { d = await fetchJSON("/api/trading/account/realized"); } catch (e) { return; }
+      if (!changed("recon", d)) return;
+      reconBody.innerHTML = "";
+      const b = d.broker || {};
+      if (!b.ok) {
+        reconBody.appendChild(el("div", { class: "small text-secondary" },
+          "계좌 실현손익 조회 불가 — " + (b.error || "알 수 없음")));
+        return;
+      }
+      const tone = (v) => v >= 0 ? "text-danger" : "text-primary";  // 한국식: 이익 빨강
+      const btn = el("button", { class: "btn btn-sm btn-outline-secondary py-0", type: "button" },
+                     "체결 대사");
+      btn.onclick = reconcile;
+      const u = d.unconfirmed || {};
+      const pending = (u.entries || 0) + (u.exits || 0);
+      reconBody.append(el("div", { class: "row g-2" }, [
+        stat("계좌 실현손익", won(b.realized), tone(b.realized),
+             "증권사 계산 · 수수료·세금 반영"),
+        stat("엔진 실현손익", won(d.engine.realized), tone(d.engine.realized),
+             `원장 ${d.engine.trades}건`),
+        stat("차이 (수동매매)", d.untracked == null ? "—" : won(d.untracked),
+             "text-secondary", "원장이 못 보는 거래"),
+      ]), el("div", { class: "small text-secondary mt-1 d-flex align-items-center gap-2" }, [
+        el("span", { html: `수수료 <b>${fmt(b.commission)}</b>원 · 거래세 <b>${fmt(b.tax)}</b>원 (${d.period.start}~${d.period.end})` }),
+        pending
+          ? badge(`체결 미확정 ${pending}건`, "warning")
+          : badge("체결 전량 실측", "success"),
+        btn,
+      ]));
+    };
 
     // ==================================================================
     // ② 포지션 · 체결 내역 — 보유 / 최근 청산
@@ -892,9 +944,12 @@ export default {
       runBacktest();
     }
 
-    await Promise.all([loadPerformance(), loadCoverage(), loadBacktestReport(),
+    await Promise.all([loadPerformance(), loadRealized(), loadCoverage(),
+                       loadBacktestReport(),
                        loadStudy(), loadRanking(), loadRegime(), loadNews()]);
     ctx.addTimer(setInterval(() => { loadPerformance(); loadCoverage(); }, 30_000));
+    // 계좌 대조는 키움 조회를 타므로(서버 60초 캐시) 성과보다 느슨하게 돈다
+    ctx.addTimer(setInterval(loadRealized, 120_000));
     ctx.addTimer(setInterval(() => {
       loadBacktestReport(); loadStudy(); loadRanking();
       loadRegime(); loadNews();

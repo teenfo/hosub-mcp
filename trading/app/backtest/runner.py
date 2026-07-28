@@ -33,7 +33,7 @@ class Trade:
         if self.side == "short":
             raw = -raw
         commission = costs.get("commission_pct", 0.015) * 2
-        tax = costs.get("sell_tax_pct", 0.15)
+        tax = costs.get("sell_tax_pct", 0.20)
         slip = costs.get("slippage_bp", 5) / 100 * 2
         return raw - commission - tax - slip
 
