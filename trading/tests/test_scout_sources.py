@@ -48,6 +48,16 @@ def _surge_payload(codes, surge=800.0, change=1.0, price=10_000):
          "now_trde_qty": "500000"} for c in codes]}
 
 
+@pytest.fixture(autouse=True)
+def _presurge_warm(monkeypatch):
+    """급증 소스의 개장 워밍업을 통과시킨다.
+
+    이걸 안 걸면 테스트 결과가 **실행 시각에 좌우된다**(09:10 KST 이전이면
+    빈 목록). 워밍업 자체는 아래 전용 테스트에서 시각을 넣어 확인한다.
+    """
+    monkeypatch.setattr(intraday.PresurgeSource, "warmed_up", lambda self, now=None: True)
+
+
 @pytest.fixture
 def fake_client(monkeypatch):
     """kiwoom.client 를 갈아 끼운다 — 네트워크 없이 어댑터만 잰다."""
@@ -155,6 +165,49 @@ async def test_presurge_uses_surge_rate_not_rank(fake_client):
     got = await intraday.PresurgeSource().collect()
     assert got[0].strength == pytest.approx(1.0, abs=0.01)
     assert got[0].raw == 3160.0
+
+
+# --- ⑤ 급증 소스 개장 워밍업 ---
+#
+# 실측 2026-07-28 09:00:25(개장 25초): 신일전자 13,605,700% · NAVER 718,757%
+# (등락률 0.00%) · LG전자 8,738,190%. 대형주가 최대 세기 '급등 조짐' 을 받았다.
+# 급증률의 분모인 '직전 기간 거래량' 이 개장 직후엔 존재하지 않기 때문이다.
+# 편입 경로가 없어 한 번도 측정된 적 없던 소스라, shadow 가 처음으로 드러냈다.
+
+def _at(hhmm: str):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    h, m = (int(x) for x in hhmm.split(":"))
+    return datetime(2026, 7, 28, h, m, tzinfo=ZoneInfo("Asia/Seoul"))
+
+
+@pytest.mark.parametrize("hhmm,ok", [
+    ("09:00", False), ("09:05", False), ("09:09", False),
+    ("09:10", True), ("10:30", True), ("15:20", True),
+])
+def test_presurge_waits_for_the_opening_baseline(hhmm, ok, monkeypatch):
+    monkeypatch.undo()          # autouse 워밍업 패치를 걷어낸다
+    assert intraday.PresurgeSource().warmed_up(_at(hhmm)) is ok
+
+
+@pytest.mark.asyncio
+async def test_presurge_returns_empty_not_error_during_warmup(fake_client, monkeypatch):
+    """빈 목록이지 예외가 아니다 — 예외면 백오프가 걸리고 상태가 '실패' 로 물든다."""
+    monkeypatch.setattr(intraday.PresurgeSource, "warmed_up",
+                        lambda self, now=None: False)
+    called = []
+
+    fake_client(surge=_surge_payload(["000001"]))
+    import app.kiwoom.client as mod
+    orig = mod.client.volume_surge_rank
+
+    async def spy(market):
+        called.append(market)
+        return await orig(market)
+
+    monkeypatch.setattr(mod.client, "volume_surge_rank", spy)
+    assert await intraday.PresurgeSource().collect() == []
+    assert called == []          # 호출 자체를 아낀다
 
 
 @pytest.mark.asyncio

@@ -141,6 +141,59 @@ def test_missing_optional_fields_do_not_break():
     assert d["sources"] == [] and d["score"] is None
 
 
+# --- ②-2 원장은 '바뀔 때만' 쌓인다 ---
+#
+# shadow 는 결정을 반영하지 않으므로 상태가 영원히 그대로고, 그대로 두면 30초마다
+# 같은 결론이 다시 쌓인다. 실측 2026-07-28 09:00~09:36: 1,140행이 쌓였는데 고유
+# 종목은 27개였다(펌텍코리아 promote_trade 71회 · 강등 10종목 각 71회).
+# 이러면 4주 뒤 소스별 기여도 측정이 "한 번의 판단" 이 아니라 "그 판단을 몇
+# 사이클 유지했는가" 로 가중된 표본을 읽는다.
+
+def test_repeating_the_same_decision_does_not_grow_the_ledger():
+    assert store.log_decisions([_dec()], mode="shadow", applied=False) == 1
+    for _ in range(5):
+        assert store.log_decisions([_dec()], mode="shadow", applied=False) == 0
+    assert len(store.recent_decisions()) == 1
+
+
+def test_score_drift_alone_is_not_a_new_decision():
+    """점수는 감쇠로 매 사이클 조금씩 움직인다 — 그걸 새 결정으로 세면 무의미하다.
+
+    실측에서 펌텍코리아 점수가 0.666 → 0.6649 로 흐르며 71행이 쌓였다.
+    """
+    store.log_decisions([_dec(score=0.666)], mode="shadow", applied=False)
+    assert store.log_decisions([_dec(score=0.6649)], mode="shadow", applied=False) == 0
+    assert len(store.recent_decisions()) == 1
+
+
+def test_a_changed_decision_is_recorded():
+    """중복만 지운다 — 판단이 바뀌면 반드시 남아야 한다."""
+    store.log_decisions([_dec()], mode="shadow", applied=False)
+    store.log_decisions([_dec(action="drop", from_tier="collect", to_tier="none")],
+                        mode="shadow", applied=False)
+    assert [d["action"] for d in store.recent_decisions()] == \
+           ["drop", "promote_collect"]
+
+
+def test_the_same_action_returns_after_something_else_happened():
+    """승격 → 강등 → 재승격은 세 건이다. 직전과만 비교하기 때문에 성립한다."""
+    seq = [_dec(),
+           _dec(action="drop", from_tier="collect", to_tier="none"),
+           _dec()]
+    for d in seq:
+        assert store.log_decisions([d], mode="shadow", applied=False) == 1
+    assert len(store.recent_decisions()) == 3
+
+
+def test_dedup_is_per_symbol():
+    """한 종목이 조용하다고 다른 종목의 새 결정까지 막으면 안 된다."""
+    store.log_decisions([_dec(code="000001")], mode="shadow", applied=False)
+    got = store.log_decisions([_dec(code="000001"), _dec(code="000002")],
+                              mode="shadow", applied=False)
+    assert got == 1
+    assert {d["code"] for d in store.recent_decisions()} == {"000001", "000002"}
+
+
 # --- ③ 소스 상태 — 실패를 숨기지 않는다 ---
 
 def test_consecutive_failures_accumulate_for_backoff():

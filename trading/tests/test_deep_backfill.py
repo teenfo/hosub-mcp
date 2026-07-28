@@ -155,8 +155,15 @@ async def test_pending_retries_failed_symbol(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_pending_marks_zero_bar_symbol(monkeypatch):
-    """0봉(거래정지·상장폐지)도 완료로 남겨 매 사이클 재조회를 막는다."""
+async def test_pending_gives_up_on_zero_bars_only_after_retries(monkeypatch):
+    """0봉은 **완료가 아니다** — 몇 번 더 시도한 뒤에 포기한다.
+
+    실측 2026-07-27: 동서·JB금융지주가 마감 백필 185종목 호출 **직후** 0봉으로
+    돌아왔고(1초 만에 2종목 × 5페이지가 끝났다 — 실제로는 1페이지에서 빈 응답),
+    그게 '완료' 로 기록돼 다시는 대상에 오르지 않았다. 둘 다 정상 거래 종목이라
+    실제 축적은 4~5일에 머물렀다. 분봉 API 는 실패를 200 + 빈 응답으로 주는
+    일이 있고, 그걸 '데이터가 없다' 로 읽으면 조용히 과거가 빈다.
+    """
     monkeypatch.setattr(settings, "WATCHLIST", {"000001": "가"})
     monkeypatch.setitem(settings.CONFIG, "collection", {"deep_backfill": True})
     calls = []
@@ -167,9 +174,39 @@ async def test_pending_marks_zero_bar_symbol(monkeypatch):
 
     monkeypatch.setattr(engine_mod.collector, "deep_backfill", empty)
     eng = SignalEngine()
-    assert await eng.deep_backfill_pending() == 1
+    for _ in range(store.DEEP_MAX_ATTEMPTS):
+        assert await eng.deep_backfill_pending() == 1
+    assert len(calls) == store.DEEP_MAX_ATTEMPTS
+    # 계속 0봉이면 그때는 포기한다 — 거래정지·상장폐지 종목 재시도 폭주 방어
     assert await eng.deep_backfill_pending() == 0
-    assert calls == ["000001"]
+    assert len(calls) == store.DEEP_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_zero_bar_symbol_recovers_when_a_later_call_succeeds(monkeypatch):
+    """일시적 빈 응답이면 다음 시도에서 회수된다 — 이게 고치려던 것이다."""
+    monkeypatch.setattr(settings, "WATCHLIST", {"000001": "가"})
+    monkeypatch.setitem(settings.CONFIG, "collection", {"deep_backfill": True})
+    calls = []
+
+    async def flaky(sym, pages):
+        calls.append(sym)
+        return 0 if len(calls) == 1 else 4500
+
+    monkeypatch.setattr(engine_mod.collector, "deep_backfill", flaky)
+    eng = SignalEngine()
+    assert await eng.deep_backfill_pending() == 1      # 0봉 — 아직 완료 아님
+    assert await eng.deep_backfill_pending() == 1      # 재시도 → 4500봉
+    assert await eng.deep_backfill_pending() == 0      # 이제 끝
+    assert len(calls) == 2
+
+
+def test_zero_bar_row_is_not_treated_as_done():
+    """`deep_backfilled()` 규약 — 봉을 받았거나 포기했을 때만 '끝' 이다."""
+    store.mark_deep_backfill("000001", 0)
+    assert "000001" not in store.deep_backfilled()
+    store.mark_deep_backfill("000002", 4500)
+    assert "000002" in store.deep_backfilled()
 
 
 # --- ③ 부하 방어 ---

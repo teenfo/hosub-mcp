@@ -28,6 +28,10 @@ def _conn() -> sqlite3.Connection:
             symbol TEXT PRIMARY KEY, done TEXT, bars INTEGER
         )"""
     )
+    # 0봉으로 끝난 시도를 세는 칸. 아래 mark_deep_backfill 주석 참조.
+    if "attempts" not in {r[1] for r in conn.execute(
+            "PRAGMA table_info(deep_backfill)")}:
+        conn.execute("ALTER TABLE deep_backfill ADD COLUMN attempts INTEGER DEFAULT 0")
     return conn
 
 
@@ -79,17 +83,38 @@ def prune_minutes(keep_days: int) -> int:
         return cur.rowcount or 0
 
 
+# 0봉으로 끝난 시도를 몇 번까지 재시도할지. 상장폐지·거래정지 종목은 몇 번을
+# 불러도 0봉이므로 무한 재시도를 막아야 하고, 일시적 빈 응답은 살려야 한다.
+DEEP_MAX_ATTEMPTS = 3
+
+
 def deep_backfilled() -> set[str]:
-    """연속조회 심층 백필을 이미 마친 종목 코드."""
+    """연속조회 심층 백필이 **끝난** 종목 — 봉을 받았거나 재시도를 포기한 것.
+
+    0봉 기록은 '완료' 가 아니다. 그렇게 두면 일시적 빈 응답이 영구 결손이 된다
+    (실측 2026-07-27: 동서·JB금융지주가 마감 백필 185종목 직후 0봉으로 기록돼
+    다시는 대상에 오르지 않았다. 둘 다 정상 거래 종목이다).
+    """
     with _conn() as conn:
-        return {r[0] for r in conn.execute("SELECT symbol FROM deep_backfill")}
+        return {r[0] for r in conn.execute(
+            "SELECT symbol FROM deep_backfill "
+            "WHERE bars > 0 OR COALESCE(attempts, 0) >= ?", (DEEP_MAX_ATTEMPTS,))}
 
 
 def mark_deep_backfill(symbol: str, bars: int) -> None:
-    """심층 백필 완료 기록. 0봉(상장폐지·거래정지 등)도 남겨 재시도 폭주를 막는다."""
+    """심층 백필 결과 기록.
+
+    봉을 받았으면 그대로 완료다. **0봉이면 완료가 아니라 시도 1회**로 센다 —
+    분봉 API 는 실패를 200 + 빈 응답으로 돌려주는 일이 있고, 그걸 "데이터가
+    없다" 로 읽으면 조용히 과거가 비어 버린다. `DEEP_MAX_ATTEMPTS` 번 연속
+    0봉이면 그때 포기한다(상장폐지·거래정지 종목의 재시도 폭주 방어).
+    """
     with _conn() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO deep_backfill VALUES (?,?,?)",
+            "INSERT INTO deep_backfill (symbol, done, bars, attempts)"
+            " VALUES (?,?,?,1) ON CONFLICT(symbol) DO UPDATE SET"
+            " done=excluded.done, bars=excluded.bars,"
+            " attempts=COALESCE(deep_backfill.attempts, 0) + 1",
             (symbol, datetime.now(UTC).isoformat(timespec="seconds"), int(bars)),
         )
 

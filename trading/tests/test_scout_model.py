@@ -44,6 +44,24 @@ def test_surge_strength_is_logarithmic():
     assert model.surge_strength(10_000) == 1.0     # 상한에서 포화
 
 
+@pytest.mark.parametrize("surge", [214_510.95, 718_757.12, 8_738_190.0, 13_605_700.0])
+def test_broken_surge_rate_scores_zero_not_maximum(surge):
+    """분모가 깨진 값을 **최대 세기로 읽는 것**이 실제로 저지른 잘못이었다.
+
+    실측 2026-07-28 09:00:25 개장 직후 값들이다 — NAVER 718,757%(등락률 0.00%),
+    LG전자 8,738,190%. 포화 구간이 1.0 이라 쓰레기가 전부 만점을 받았고, 오늘
+    presurge 신호 8건 중 5건이 세기 1.0 이었다. 급증률은 직전 기간 거래량 대비
+    비율이라, 그 기간이 비어 있으면 비율이 폭발한다. '더 강한 신호' 가 아니다.
+    """
+    assert model.surge_strength(surge) == 0.0
+
+
+def test_plausible_surges_still_pass():
+    """상한이 정상 급증까지 자르면 소스를 죽인 것이다 — 같은 날 실측값으로 고정."""
+    for surge in (315.86, 612.43, 925.26, 2621.95, 5185.13):
+        assert model.surge_strength(surge) > 0.0
+
+
 def test_score_and_news_strength():
     assert model.score_strength(3) == 1.0
     assert model.score_strength(0) == 0.0
