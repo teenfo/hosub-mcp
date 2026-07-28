@@ -260,6 +260,7 @@ export default {
     const decisionRows = (rows, withMode) => tableOf(
       (withMode ? "<th>시각</th>" : "") +
       "<th>종목</th><th>판단</th><th>변화</th><th class='text-end'>점수</th>" +
+      "<th class='text-end'>등락률</th><th class='text-end'>체결강도</th>" +
       "<th>정보원</th><th>사유</th>" + (withMode ? "<th>적용</th>" : ""),
       rows.map((d) => el("tr", {}, [
         withMode ? el("td", { class: "text-secondary text-nowrap" },
@@ -270,6 +271,14 @@ export default {
         el("td", { class: "text-secondary text-nowrap" },
            `${TIER_KO[d.from_tier] || d.from_tier || "—"} → ${TIER_KO[d.to_tier] || d.to_tier || "—"}`),
         el("td", { class: "text-end" }, d.score == null ? "—" : Number(d.score).toFixed(3)),
+        // 등락률·체결강도는 **관측만** 한다 — 판단에 쓰지 않는다(promote._dec 주석).
+        // 회색으로 두는 것이 그 표시다. 4주 뒤 측정에서 값이 있다고 나오면
+        // 그때 게이트로 올리고 색을 준다.
+        el("td", { class: "text-end text-secondary" },
+           d.change_pct == null ? "—" : Number(d.change_pct).toFixed(2) + "%"),
+        el("td", { class: "text-end text-secondary",
+                   title: "매수/매도 체결량 비율 · 100 = 균형. 아직 판단에 쓰지 않는다" },
+           d.cntr_str == null ? "—" : Number(d.cntr_str).toFixed(1)),
         el("td", {}, srcBadges(d.sources)),
         el("td", { class: "text-secondary small" }, d.reason || ""),
         withMode ? el("td", {}, d.applied

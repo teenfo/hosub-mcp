@@ -12,7 +12,7 @@ import pytest
 
 from app import settings
 from app.scout import engine as eng
-from app.scout import model, promote, store
+from app.scout import model, promote, scoring, store
 from app.scout.model import Signal
 
 NOW = datetime(2026, 7, 27, 1, 0, tzinfo=UTC)      # 월 10:00 KST — 장중
@@ -269,3 +269,66 @@ def test_snapshot_protects_everything_when_ledger_fails(monkeypatch):
 
     monkeypatch.setattr(ledger, "open_symbols", _boom)
     assert eng.snapshot_current().protected == frozenset({"000001"})
+
+
+# --- ⑦ 승격 후보에만 현재가를 실측한다 (레이트리밋) ---
+#
+# 전 후보에 부르면 30초 사이클마다 27콜(오늘 실측 고유 종목 수)이다.
+# 수집 tier 에 있는 것만 매매로 올라갈 수 있으므로 그 집합에만 부른다 —
+# 실측 기준 하루 1~2종목.
+
+def _quoter(monkeypatch, calls, fail=()):
+    from app.kiwoom import client as kc
+
+    async def q(code):
+        calls.append(code)
+        if code in fail:
+            raise RuntimeError("조회 실패")
+        return {"return_code": 0, "close_pric": "-10100", "flu_rt": "-1.5",
+                "cntr_str": "88.8", "trde_qty": "1000"}
+
+    monkeypatch.setattr(kc.client, "quote", q)
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "K")
+    # 장중이어야 한다 — 밖이면 아무것도 안 부르고 테스트가 공허해진다
+    monkeypatch.setattr(promote, "in_session", lambda now=None: True)
+
+
+@pytest.mark.asyncio
+async def test_quotes_are_fetched_only_for_promotion_candidates(monkeypatch):
+    calls = []
+    _quoter(monkeypatch, calls)
+    e = _engine([_Src(model.VOLUME, [_sig("000001"), _sig("000002")])])
+    await e.collect_due()
+    e.candidates = scoring.aggregate(store.live(), datetime.now(UTC))
+    cur = promote.Current(tier={"000001": promote.COLLECT}, since={},
+                          protected=frozenset(), names={})
+    assert await e.refresh_quotes(cur) == 1
+    assert calls == ["000001"]          # 수집 tier 인 것 하나만
+
+
+@pytest.mark.asyncio
+async def test_no_quote_calls_outside_the_session(monkeypatch):
+    calls = []
+    _quoter(monkeypatch, calls)
+    monkeypatch.setattr(promote, "in_session", lambda now=None: False)
+    e = _engine([_Src(model.VOLUME, [_sig("000001")])])
+    await e.collect_due()
+    e.candidates = scoring.aggregate(store.live(), datetime.now(UTC))
+    cur = promote.Current(tier={"000001": promote.COLLECT}, since={},
+                          protected=frozenset(), names={})
+    assert await e.refresh_quotes(cur) == 0 and calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_failed_quote_leaves_the_candidate_stale(monkeypatch):
+    """못 받으면 승격을 미룬다 — 틀린 값으로 매매를 여는 것보다 싸다."""
+    calls = []
+    _quoter(monkeypatch, calls, fail={"000001"})
+    e = _engine([_Src(model.NIGHTLY, [_sig("000001", source=model.NIGHTLY)])])
+    await e.collect_due()
+    e.candidates = scoring.aggregate(store.live(), datetime.now(UTC))
+    cur = promote.Current(tier={"000001": promote.COLLECT}, since={},
+                          protected=frozenset(), names={})
+    assert await e.refresh_quotes(cur) == 0
+    assert e.candidates[0].quote is None
+    assert e.candidates[0].price_fresh is False      # 게이트가 보류한다

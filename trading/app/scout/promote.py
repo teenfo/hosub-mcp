@@ -77,11 +77,23 @@ class Current:
 
 
 def _tradable(c: Candidate, cap: float) -> tuple[bool, str]:
-    """체결가능성 게이트. 가격을 모르면 **매매로 올리지 않는다**(보수적)."""
-    if c.price <= 0:
+    """체결가능성 게이트. 가격을 모르면 **매매로 올리지 않는다**(보수적).
+
+    '모른다' 에는 **낡은 값밖에 없는 경우**도 들어간다. nightly 는 발굴 배치일
+    종가를, news 는 수집 시점 가격을 싣는다 — 실측 2026-07-28 펌텍코리아
+    승격 결정의 '체결가능 48,600원' 이 어제 종가였고 당시 현재가는 47,050원
+    (−3.19%)이었다. 상한 근처에서 갭이 크면 판정이 뒤집힌다.
+
+    실측 시세를 못 받았으면 이번 사이클은 넘긴다. 30초 뒤 다시 온다 —
+    틀린 값으로 매매를 여는 것보다 한 사이클 늦는 편이 싸다.
+    """
+    price = c.live_price
+    if price <= 0:
         return False, "가격 미확인"
-    if c.price > cap:
-        return False, f"1주 {c.price:,.0f}원 > 한도 {cap:,.0f}원"
+    if not c.price_fresh:
+        return False, "현재가 미확인 — 낡은 가격으로 매매 승격하지 않는다"
+    if price > cap:
+        return False, f"1주 {price:,.0f}원 > 한도 {cap:,.0f}원"
     return True, ""
 
 
@@ -129,7 +141,7 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
                 continue
             trade_now += 1
             out.append(_dec(c, "promote_trade", tier, TRADE,
-                            f"체결가능 {c.price:,.0f}원 · 수집 체류 완료"))
+                            f"체결가능 {c.live_price:,.0f}원 · 수집 체류 완료"))
 
     # --- 강등 ---
     # **장 마감 후에는 강등하지 않는다.** 장중 소스는 시장이 닫히면 보고할 수가
@@ -194,6 +206,17 @@ def _drop(code: str, c: Candidate | None, cur: Current, score: float,
 
 
 def _dec(c: Candidate, action: str, frm: str, to: str, reason: str) -> dict:
-    return {"code": c.code, "name": c.name, "action": action, "from_tier": frm,
-            "to_tier": to, "score": c.score, "sources": list(c.sources),
-            "reason": reason}
+    """결정 한 건. 실측 시세가 있으면 **기록만** 하고 판단에는 쓰지 않는다.
+
+    등락률·체결강도를 여기 싣는 이유는 4주 뒤 측정 때문이다. 지금 승격 조건에
+    넣으면 발굴 3규칙 점수가 저지른 일을 반복하는 것이다 — 그것도 '그럴듯해서'
+    넣었고 1년 뒤 알파가 아니라 베타 프록시로 판명됐다. 체결강도는 어느 소스도
+    쓰지 않는 새 정보라, 원장에 쌓여야 비로소 질문을 던질 수 있다.
+    """
+    d = {"code": c.code, "name": c.name, "action": action, "from_tier": frm,
+         "to_tier": to, "score": c.score, "sources": list(c.sources),
+         "reason": reason}
+    if c.quote:
+        d["change_pct"] = c.quote.get("change_pct")
+        d["cntr_str"] = c.quote.get("cntr_str")
+    return d

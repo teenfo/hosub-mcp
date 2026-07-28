@@ -194,10 +194,40 @@ class Engine:
         want = {s.name for s in self.sources if s.enabled()}
         return bool(want) and want <= self.polled
 
-    def project(self, now: datetime | None = None) -> list[dict]:
+    async def refresh_quotes(self, cur, now: datetime | None = None) -> int:
+        """**매매 승격 후보에만** 현재 시세를 실측한다.
+
+        수집 tier 에 있는 후보만 매매로 올라갈 수 있으므로(promote.plan) 그
+        집합에만 부른다 — 실측 기준 하루 1~2종목이라 레이트리밋 부담이 없다.
+        전 후보(오늘 27종목)에 부르면 30초 사이클마다 27콜이라 얘기가 다르다.
+
+        실패는 삼킨다. 시세를 못 받으면 `price_fresh` 가 False 로 남고
+        `_tradable` 이 이번 사이클 승격을 보류한다 — 그게 올바른 결말이다.
+        반환: 실측에 성공한 종목 수.
+        """
+        if not settings.KIWOOM_APP_KEY or not promote.in_session(now):
+            return 0
+        from ..kiwoom.client import client
+        from ..kiwoom.quote import parse_quote
+
+        got = 0
+        for c in self.candidates:
+            if cur.tier.get(c.code) != promote.COLLECT:
+                continue
+            try:
+                c.quote = parse_quote(await client.quote(c.code))
+            except Exception as e:  # noqa: BLE001 - 못 받으면 승격을 미룬다
+                log.warning("현재가 조회 실패 %s — 이번 사이클 매매 승격 보류: %s",
+                            c.code, e)
+                continue
+            got += 1 if c.quote else 0
+        return got
+
+    def project(self, now: datetime | None = None, cur=None) -> list[dict]:
         now = now or datetime.now(UTC)
-        self.candidates = scoring.aggregate(store.live(now), now)
-        cur = snapshot_current()
+        if cur is None:
+            self.candidates = scoring.aggregate(store.live(now), now)
+            cur = snapshot_current()
         rows = promote.plan(self.candidates, cur, now)
         shrink = [r for r in rows if r["to_tier"] == NONE]
         if len(shrink) > MAX_SHRINK:
@@ -214,7 +244,13 @@ class Engine:
             self.last_cycle = datetime.now(KST).isoformat(timespec="seconds")
             return {"signals": got, "decisions": 0, "applied": 0,
                     "reason": "소스 첫 수집 대기 중"}
-        rows = self.project()
+        now = datetime.now(UTC)
+        self.candidates = scoring.aggregate(store.live(now), now)
+        cur = snapshot_current()
+        # 승격 후보의 가격을 실측한 **뒤에** 판정한다 — 순서가 뒤집히면
+        # 게이트가 또 낡은 값을 본다
+        await self.refresh_quotes(cur, now)
+        rows = self.project(now, cur)
         self.last_decisions = rows
         applied = await apply(rows)
         store.log_decisions(rows, mode=mode(), applied=bool(applied))
