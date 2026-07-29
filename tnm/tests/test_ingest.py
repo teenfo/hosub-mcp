@@ -97,11 +97,14 @@ def test_excluded_stock_is_not_revived(monkeypatch):
 
 def test_per_cycle_cap_defers_the_rest(monkeypatch):
     fake = _FakeDB(watch={})
-    items = [_item(f"00000{i}", uid=f"u{i}") for i in range(5)]
+    items = [dict(_item(f"00000{i}", uid=f"u{i}"), key=i) for i in range(5)]
     out = _run(fake, items, monkeypatch, cfg={"max_per_cycle": 2, "max_total": 100})
     assert out["registered"] == 2
     assert out["inserted"] == 2
     assert out["deferred"] == 3
+    # 어느 문서가 밀렸는지 알려야 호출자가 재시도 횟수에서 뺄 수 있다.
+    # 이걸 안 주면 상한에 밀린 문서가 시도 상한에 걸려 영영 버려진다.
+    assert sorted(out["deferred_keys"]) == [2, 3, 4]
 
 
 def test_total_cap_blocks_registration(monkeypatch):

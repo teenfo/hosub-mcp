@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app import brokers as broker_reg
+from app import settings as tnm_settings
 from app.collect import CollectRunner
 from app.collectors import research
 
@@ -401,6 +402,7 @@ class _FakeDB:
         self.raw: list[tuple[int, str, list[dict]]] = []
         self.ingested: set[str] = set()
         self.discovered: list[dict] = []
+        self.attempted: list[int] = []
         self.bumped: dict[str, int] = {}
         self.linked = 0
         self.state: dict[str, str] = {}
@@ -422,6 +424,7 @@ class _FakeDB:
                 if r.get("ticker") and r["source_uid"] not in self.ingested]
 
     async def bump_report_attempts(self, ids):
+        self.attempted.extend(ids)
         return len(ids)
 
     async def known_tickers(self):
@@ -552,6 +555,30 @@ def test_every_stock_report_enters_analysis_pipeline(runner, monkeypatch):
     assert fake.linked == 1
     uids = {r["source_uid"] for _, _, rows in fake.raw for r in rows}
     assert uids == {"naver:1", "naver:2"}
+
+
+def test_cap_deferred_report_does_not_burn_a_retry(runner, monkeypatch):
+    """등록 상한에 밀린 리포트는 시도로 세면 안 된다.
+
+    사이클당 등록 상한(15)과 시도 상한(3)이 맞물리면, 대기열 뒤쪽 리포트가
+    세 사이클 만에 시도를 다 쓰고 **영영 버려진다**. 상한은 다음 사이클에
+    풀리는 조건이므로 시도가 아니다.
+    """
+    fake = _FakeDB([{"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []}],
+                   watch={"000660": 7})
+    _use_db(monkeypatch, fake)
+    monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(0, result=[
+        _report("SK증권", "1", ticker="000660"),      # 등록돼 있음 → 적재
+        _report("SK증권", "2", ticker="111111"),      # 상한에 밀림
+        _report("SK증권", "3", ticker="222222"),      # 상한에 밀림
+    ]))
+    monkeypatch.setitem(tnm_settings.COLLECT["research"], "ingest",
+                        {"max_per_cycle": 0, "max_total": 250})
+
+    out = asyncio.run(runner.run_once("research"))
+    assert out["ingest_registered"] == 0 and out["ingest_deferred"] == 2
+    assert len(fake.attempted) == 1, "적재를 실제로 시도한 1건만 세야 한다"
+    assert "ingest_deferred_keys" not in out, "내부 키는 카운트로 새 나가지 않는다"
 
 
 def test_industry_report_has_no_stock_to_attach(runner, monkeypatch):
