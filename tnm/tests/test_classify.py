@@ -1,8 +1,11 @@
 """M5 완료판정 — LLM 분류: 스키마 검증·재시도·llm_failed 보존·폴백·보류·스코어 결정론."""
 import asyncio
 
+import pytest
+
 from app import db, ollama, settings
 from app.ollama import SchemaError
+from app.pipeline import classify
 from app.pipeline import workers as workers_mod
 from app.pipeline.classify import (build_user_msg, check_hallucination,
                                    extract_json, validate)
@@ -256,3 +259,65 @@ def test_chat_requires_token(monkeypatch):
     except ollama.OllamaUnavailable:
         raised = True
     assert raised
+
+# --- 스키마 흡수 (2026-07-29 실측 실패 원인) ---
+#
+# 7일간 분류 실패 원인 상위: impact_horizon 'unclear' 247건, category 위반
+# 175건(기술개발·규제·신제품 등), impact_direction 'mixed' 29건.
+# 프롬프트에 "그대로 쓰라"고 적어도 모델이 계속 벗어나므로 결정론적으로 흡수한다.
+
+def _payload(**over):
+    base = {"category": "실적", "is_material": True, "impact_direction": "positive",
+            "impact_horizon": "short", "confidence": 0.8,
+            "reason": "근거", "summary": "요약", "contains_numbers": False}
+    return base | over
+
+
+def test_horizon_unclear_is_accepted():
+    """direction 에는 '모르겠다'가 있는데 horizon 에는 없어 항목이 버려졌다.
+
+    게다가 impact_horizon 은 1년치 소급 측정에서 예측력이 확인되지 않은 필드다 —
+    예측력 없는 칸의 enum 이 좁아서 분석 자체를 버리는 것은 손해만 있다.
+    """
+    assert classify.validate(_payload(impact_horizon="unclear"))["impact_horizon"] == "unclear"
+
+
+@pytest.mark.parametrize("raw,expect", [
+    ("규제", "소송규제"),
+    ("매매거래정지", "거래정지"),
+    ("기재정정", "정정공시"),
+    ("수주", "공급계약"),
+    ("유상증자", "자금조달"),
+])
+def test_category_synonyms_map_to_canonical(raw, expect):
+    assert classify.validate(_payload(category=raw))["category"] == expect
+
+
+@pytest.mark.parametrize("raw", ["기술개발", "연구개발", "신제품출시", "투자", "ESG"])
+def test_vague_categories_fall_to_기타_not_증설투자(raw):
+    """'기술개발'을 증설투자(1.0)로 올리면 일반 기사가 공급계약과 같은 무게를 갖는다.
+
+    과대평가는 누락보다 비싸다 — 프롬프트도 '애매하면 기타'라고 지시한다.
+    """
+    assert classify.validate(_payload(category=raw))["category"] == "기타"
+
+
+def test_multi_value_takes_the_first():
+    """모델이 '실적 | 공급계약' 처럼 둘을 내놓는다(실측 11건). 앞이 주 판단이다."""
+    assert classify.validate(_payload(category="실적 | 공급계약"))["category"] == "실적"
+
+
+def test_direction_mixed_becomes_unclear():
+    assert classify.validate(_payload(impact_direction="mixed"))["impact_direction"] == "unclear"
+
+
+def test_unknown_category_still_fails():
+    """별칭에도 없는 값은 실패시킨다 — 모델 드리프트가 보이지 않으면 못 고친다."""
+    with pytest.raises(SchemaError):
+        classify.validate(_payload(category="완전히새로운분류"))
+
+
+def test_urgent_categories_survive_coercion():
+    """거래정지·정정공시는 긴급 판정의 입력이다 — 흡수 과정에서 뭉개지면 안 된다."""
+    for cat in ("거래정지", "정정공시"):
+        assert classify.validate(_payload(category=cat))["category"] == cat
