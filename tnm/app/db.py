@@ -187,6 +187,38 @@ async def count_origin(origin: str) -> int:
     return int(row[0]) if row else 0
 
 
+async def excluded_tickers() -> set[str]:
+    """사용자가 제외한 종목 — 어떤 소스도 되살리면 안 된다.
+
+    `known_tickers` 와 구분해야 한다. 비활성(is_active=false)은 매매 감시목록에서
+    빠지며 **자동으로** 된 것이고 사용자의 결정이 아니다. 둘을 같이 취급하면
+    한 번 스쳐간 종목은 영원히 다시 못 들어온다.
+    """
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select ticker from tnm_watchlist where is_excluded")
+        return {r[0] for r in await cur.fetchall()}
+
+
+async def revive_for_source(tickers: list[str], tier: str, origin: str) -> int:
+    """비활성 종목을 되살려 이 소스가 소유하게 한다. 제외 종목은 건드리지 않는다.
+
+    origin 을 바꾸는 것이 핵심이다. watchsync 는 origin in ('trading','holding')
+    행만 비활성화하므로(sync_watch 의 `gone`), origin 을 그대로 두면 30분마다
+    **되살리기와 비활성화가 핑퐁**한다. 트레이딩이 놓은 종목을 리서치가 되살렸으면
+    그 시점부터 소유자는 리서치다 — add_discovered 가 origin='dart' 행을
+    살려 두는 것과 같은 규약.
+    """
+    if not tickers:
+        return 0
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "update tnm_watchlist set is_active = true, tier = %s, origin = %s"
+            " where ticker = any(%s) and not is_active and not is_excluded",
+            (tier, origin, tickers))
+        return max(cur.rowcount, 0)
+
+
 async def known_tickers() -> set[str]:
     """이미 등록된 ticker 전부(제외·비활성 포함) — 발굴이 되살리지 않게."""
     async with _pool.connection() as conn:
