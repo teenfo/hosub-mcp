@@ -14,11 +14,14 @@ from app import ingest
 
 
 class _FakeDB:
-    def __init__(self, watch=None, known=None, origin_count=0):
+    def __init__(self, watch=None, known=None, origin_count=0, excluded=None):
         self._watch = dict(watch or {})
         self._known = set(known or self._watch)
+        self._excluded = set(excluded or ())
+        self._known |= self._excluded
         self._origin_count = origin_count
         self.registered: list[dict] = []
+        self.revived: list[str] = []
         self.inserted: list[tuple[int, str, list[dict]]] = []
         self.register_tier: str | None = None
         self.register_origin: str | None = None
@@ -29,6 +32,17 @@ class _FakeDB:
 
     async def known_tickers(self):
         return set(self._known)
+
+    async def excluded_tickers(self):
+        return set(self._excluded)
+
+    async def revive_for_source(self, tickers, tier, origin):
+        live = [t for t in tickers if t not in self._excluded]
+        self.register_tier, self.register_origin = tier, origin
+        for i, t in enumerate(live):
+            self._watch[t] = 800 + i
+        self.revived.extend(live)
+        return len(live)
 
     async def count_origin(self, origin):
         return self._origin_count
@@ -88,11 +102,41 @@ def test_registration_uses_slow_tier_and_source_origin(monkeypatch):
 
 def test_excluded_stock_is_not_revived(monkeypatch):
     """사용자가 제외한 종목을 소스가 되살리면 그 결정을 덮는 것이다."""
-    fake = _FakeDB(watch={}, known={"000660"})     # 등록된 적 있으나 지금 비활성
+    fake = _FakeDB(watch={}, excluded={"000660"})
     out = _run(fake, [_item("000660")], monkeypatch)
-    assert fake.registered == []
+    assert fake.registered == [] and fake.revived == []
     assert out["inserted"] == 0
     assert out["deferred"] == 1, "버린 게 아니라 미룬 것으로 세야 한다"
+
+
+def test_deactivated_stock_is_revived(monkeypatch):
+    """비활성은 사용자의 결정이 아니다 — 매매 감시목록에서 빠지며 자동으로 된다.
+
+    제외와 같이 막으면 한 번 스쳐간 종목은 영원히 다시 못 들어온다. 실측에서
+    하이브·고영·하나금융지주 리포트 7건이 이 이유로 매 사이클 밀리고 있었다.
+    """
+    fake = _FakeDB(watch={}, known={"352820"})     # 등록된 적 있으나 지금 비활성
+    out = _run(fake, [_item("352820", "하이브")], monkeypatch)
+    assert fake.revived == ["352820"]
+    assert fake.registered == [], "신규 등록이 아니라 되살리기다"
+    assert out["revived"] == 1 and out["inserted"] == 1 and out["deferred"] == 0
+
+
+def test_revive_transfers_ownership_to_this_source(monkeypatch):
+    """origin 을 안 바꾸면 watchsync 가 30분마다 다시 비활성화해 핑퐁이 된다."""
+    fake = _FakeDB(watch={}, known={"352820"})
+    _run(fake, [_item("352820")], monkeypatch, origin="research")
+    assert fake.register_origin == "research"
+    assert fake.register_tier == "other"
+
+
+def test_revive_takes_budget_before_new_registration(monkeypatch):
+    """되살리기도 폴링 부하가 같으므로 같은 예산을 쓴다. 아는 종목이 먼저다."""
+    fake = _FakeDB(watch={}, known={"352820"})
+    items = [_item("999999", uid="u9"), _item("352820", uid="u3")]
+    out = _run(fake, items, monkeypatch, cfg={"max_per_cycle": 1, "max_total": 100})
+    assert fake.revived == ["352820"] and fake.registered == []
+    assert out["revived"] == 1 and out["registered"] == 0 and out["deferred"] == 1
 
 
 def test_per_cycle_cap_defers_the_rest(monkeypatch):

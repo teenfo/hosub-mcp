@@ -62,7 +62,7 @@ async def attach_docs(items: list[dict], source: str, *, origin: str,
     몇 사이클 만에 시도 상한에 걸려 영영 버려진다.
     """
     counts = {"docs": len(items), "stocks": 0, "inserted": 0,
-              "registered": 0, "deferred": 0, "errors": 0,
+              "registered": 0, "revived": 0, "deferred": 0, "errors": 0,
               "deferred_keys": []}
     if not items or not _cfg(cfg, "enabled"):
         return counts | ({"skipped": "비활성"} if items else {})
@@ -75,21 +75,35 @@ async def attach_docs(items: list[dict], source: str, *, origin: str,
             wanted.setdefault(t, str(it.get("name") or t))
 
     if wanted:
-        # 이미 등록된 적이 있는 ticker 는 건드리지 않는다. 사용자가 제외한
-        # 종목을 소스가 되살리면 그 결정을 덮는 것이다(add_discovered 규약).
+        # 사용자가 **제외한** 종목만 손대지 않는다. 비활성(is_active=false)은
+        # 매매 감시목록에서 빠지며 자동으로 된 것이라 사용자의 결정이 아니다 —
+        # 둘을 같이 막으면 한 번 스쳐간 종목은 영원히 다시 못 들어온다.
+        blocked = await db.excluded_tickers()
         known = await db.known_tickers()
-        fresh = [(t, n) for t, n in wanted.items() if t not in known]
+        revive = [(t, n) for t, n in wanted.items()
+                  if t not in blocked and t in known]
+        fresh = [(t, n) for t, n in wanted.items()
+                 if t not in blocked and t not in known]
+        # 되살리기도 신규 등록과 같은 예산을 쓴다 — 폴링 부하가 같기 때문이다.
+        # 이미 시스템이 알던 종목이므로 신규보다 먼저 자리를 준다.
         room = int(_cfg(cfg, "max_total")) - await db.count_origin(origin)
-        take = fresh[:max(0, min(int(_cfg(cfg, "max_per_cycle")), room))]
-        if take:
+        budget = max(0, min(int(_cfg(cfg, "max_per_cycle")), room))
+        take_revive, take_fresh = revive[:budget], fresh[:max(0, budget - len(revive))]
+        if take_revive:
+            counts["revived"] = await db.revive_for_source(
+                [t for t, _ in take_revive], str(_cfg(cfg, "tier")), origin)
+            log.info("%s 비활성 종목 되살림: %d건 (%s)", source, counts["revived"],
+                     ", ".join(f"{t} {n}" for t, n in take_revive[:5]))
+        if take_fresh:
             counts["registered"] = await db.add_discovered(
-                [{"ticker": t, "name": n} for t, n in take],
+                [{"ticker": t, "name": n} for t, n in take_fresh],
                 tier=str(_cfg(cfg, "tier")), origin=origin)
             log.info("%s 신규 종목 등록: %d건 (%s)", source, counts["registered"],
-                     ", ".join(f"{t} {n}" for t, n in take[:5]))
+                     ", ".join(f"{t} {n}" for t, n in take_fresh[:5]))
+        if take_revive or take_fresh:
             wids = await db.watch_ids_by_ticker()
-        elif fresh:
-            log.info("%s 종목 등록 상한 — %d건 보류", source, len(fresh))
+        elif revive or fresh:
+            log.info("%s 종목 등록 상한 — %d건 보류", source, len(revive) + len(fresh))
 
     by_wid: dict[int, list[dict]] = {}
     for it in items:

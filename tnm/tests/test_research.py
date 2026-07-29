@@ -430,6 +430,12 @@ class _FakeDB:
     async def known_tickers(self):
         return set(self._watch)
 
+    async def excluded_tickers(self):
+        return set()
+
+    async def revive_for_source(self, tickers, tier, origin):
+        return 0
+
     async def count_origin(self, origin):
         return 0
 
