@@ -117,19 +117,17 @@ def test_stale_candidate_promotes_once_the_quote_arrives():
     assert "10,100원" in _trade(rows)[0]["reason"]     # 실측값이 사유에 남는다
 
 
-def test_the_actual_defect_a_stale_price_hid_a_cap_breach():
-    """낡은 값으로는 통과하고 실측으로는 막히는 경우 — 이게 실제 위험이다.
+def test_stale_price_still_blocks_promotion():
+    """가격 상한은 없어졌지만 **'낡은 값으로 판단하지 않는다'** 는 남는다.
 
-    한도 30,000. 어제 종가 29,000 이면 통과지만 오늘 갭상승으로 31,000 이면
-    1주도 못 산다. 종전 코드는 어제 값을 보고 매매 tier 를 열었다.
+    가격 자체를 상한과 비교하지 않게 됐어도, 실측 시세를 못 받은 상태로 매매를
+    여는 것은 여전히 위험하다 — 승격 결정의 근거(등락률·체결강도)가 전부 그
+    시세에 실려 있다. 실측이 오면 가격이 얼마든 열린다.
     """
     stale = _c(["nightly"], price=29_000)
     assert _trade(_plan([stale])) == []                       # 실측 없으면 보류
-    stale.quote = {"price": 31_000}
-    blocked = _plan([stale])
-    assert _trade(blocked) == []                              # 실측하니 한도 초과
-    stale.quote = {"price": 29_500}
-    assert len(_trade(_plan([stale]))) == 1                    # 실제로 살 수 있다
+    stale.quote = {"price": 310_000}
+    assert len(_trade(_plan([stale]))) == 1                    # 실측이 오면 가격 무관
 
 
 def test_intraday_candidate_still_promotes_without_a_quote():

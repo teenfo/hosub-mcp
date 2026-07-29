@@ -86,13 +86,19 @@ def _tradable(c: Candidate, cap: float) -> tuple[bool, str]:
 
     실측 시세를 못 받았으면 이번 사이클은 넘긴다. 30초 뒤 다시 온다 —
     틀린 값으로 매매를 여는 것보다 한 사이클 늦는 편이 싸다.
+
+    **가격 상한은 더 이상 여기서 보지 않는다**(사용자 결정 2026-07-29).
+    발굴엔진은 가격과 무관하게 매매 tier 로 올리고, 살 수 있는지는 매매 데스크가
+    승인대기 단계에서 판정한다. 여기서 막으면 비싼 종목은 신호가 났다는 사실조차
+    화면에 남지 않아 사람이 판단할 기회가 없다. `cap` 은 호출 규약 유지를 위해
+    남겨 두고 `scout.price_cap: true` 로 예전 동작을 되살릴 수 있다.
     """
     price = c.live_price
     if price <= 0:
         return False, "가격 미확인"
     if not c.price_fresh:
         return False, "현재가 미확인 — 낡은 가격으로 매매 승격하지 않는다"
-    if price > cap:
+    if cap > 0 and price > cap and bool(cfg().get("price_cap", False)):
         return False, f"1주 {price:,.0f}원 > 한도 {cap:,.0f}원"
     return True, ""
 

@@ -60,15 +60,26 @@ def test_high_score_alone_does_not_open_trading():
     assert rows[0]["to_tier"] == COLLECT
 
 
-def test_unaffordable_symbol_never_reaches_trade_tier():
-    """1주도 못 사는 종목을 매매 대상에 올려 봐야 '잔고 부족' 만 쌓인다.
+def test_expensive_symbol_reaches_trade_tier():
+    """**가격 상한은 여기서 보지 않는다** (사용자 결정 2026-07-29).
 
-    현행 야간 발굴 편입 경로에는 이 가드가 아예 없다 — replace_auto 의
-    INSERT 에 collect_only 컬럼이 없어 DEFAULT 0(매매 tier)이 적용된다.
+    발굴엔진은 가격과 무관하게 매매 tier 로 올리고, 살 수 있는지는 매매 데스크가
+    승인대기 단계에서 판정한다. 여기서 막으면 비싼 종목은 신호가 났다는 사실조차
+    화면에 남지 않아 사람이 판단할 기회가 없다.
     """
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
     rows = _plan([_c(score=3.0, price=412_000)], cur)
-    assert _by(rows, "promote_trade") == []
+    assert [r["action"] for r in _by(rows, "promote_trade")] == ["promote_trade"]
+
+
+def test_price_cap_can_be_restored_by_config(monkeypatch):
+    """되돌릴 수 있어야 한다 — 배포 없이 예전 동작으로."""
+    from app.scout import promote as promote_mod
+
+    monkeypatch.setattr(promote_mod, "cfg",
+                        lambda: {**promote_mod.DEFAULTS, "price_cap": True})
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    assert _by(_plan([_c(score=3.0, price=412_000)], cur), "promote_trade") == []
 
 
 def test_affordable_symbol_promotes_after_dwell():

@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from .. import settings
 from ..data import collector, store
+from ..notify import slack
 from ..trade import orders, risk
 from . import priority, rules
 
@@ -426,10 +427,28 @@ class SignalEngine:
             sig = rec.pop("_sig")
             symbol, name = rec["symbol"], rec["name"]
             key = (day, symbol, sig.rule)
-            # 감시 신호는 기록만이라도 남긴다. 승인대기 주문은 position_size
-            # (거래당 리스크 + 종목당 비중 상한 + 남은 매수여력)가 1주 이상일 때만.
+            # **수량과 자금 판정을 분리한다.**
+            #
+            # 종전에는 position_size 가 남은 현금까지 한 번에 잘라, 자금이 모자라면
+            # 주문이 아예 만들어지지 않았다. 그래서 발굴엔진이 올린 고가주는
+            # 승인대기 목록에 흔적조차 남지 않았다 — 사용자는 신호가 났다는 사실도
+            # 모른다. 이제 '리스크·비중 기준 수량' 을 먼저 정하고, 살 수 있는지는
+            # 따로 표시해 매매 데스크가 판정한다.
             qty = risk.position_size(self.equity, risk_pct, sig.entry, sig.stop,
-                                     max_weight_pct=max_w, available=avail)
+                                     max_weight_pct=max_w)
+            # 비중 상한이 0주를 내는 경우(1주 값 > 상한인 고가주)에도 **1주로
+            # 제안은 만든다** — 보이지 않으면 판단할 수 없다. 다만 그 사실을
+            # over_weight 로 남겨 자동승인이 집어가지 못하게 한다.
+            over_weight = False
+            if qty < 1 and risk.position_size(self.equity, risk_pct,
+                                              sig.entry, sig.stop) >= 1:
+                qty, over_weight = 1, True
+            need = qty * sig.entry
+            fundable = qty >= 1 and need <= avail
+            rec["fundable"] = fundable
+            rec["need_cash"] = int(need)
+            if over_weight:
+                rec["over_weight"] = True
             rec["qty"] = qty
             actionable = False
             # 국면 게이트: 인버스 ETF(직접 또는 숏→인버스 매핑)는 강세장 매수 보류.
@@ -460,20 +479,34 @@ class SignalEngine:
             if actionable:
                 rec["order_id"] = orders.propose(sig, qty)
                 rec["actionable"] = True
+                # 승인대기 주문이 생기는 **바로 이 지점**에서 알린다. 자금이
+                # 모자란 건도 보낸다 — 사용자가 입금하거나 다른 포지션을 정리해
+                # 살 수 있게 만드는 판단을 하려면 알아야 한다.
+                await slack.notify(slack.pending_order_text(rec))
                 if guard_warn:
                     # 가드 도달 상태에서 만든 승인대기 주문 — 화면·일지에 표시해
                     # 사용자가 '오늘 한도를 넘긴 뒤의 진입'임을 알고 승인하게 한다.
                     rec["guard_warn"] = guard_warn
-                avail = max(0.0, avail - qty * sig.entry)   # 남은 현금에서 차감
-                # 같은 사이클에서 한도를 넘어 발주하지 않도록 즉시 반영(보수적 계산 —
-                # 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음 사이클에
-                # _sync_open_positions 가 장부 실제값으로 다시 맞춘다.
-                self.state.open_positions += 1
-                if held is not None:
-                    held.add(symbol)
+                if fundable:
+                    avail = max(0.0, avail - need)   # 남은 현금에서 차감
+                    # 같은 사이클에서 한도를 넘어 발주하지 않도록 즉시 반영(보수적
+                    # 계산 — 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음
+                    # 사이클에 _sync_open_positions 가 장부 실제값으로 다시 맞춘다.
+                    self.state.open_positions += 1
+                    if held is not None:
+                        held.add(symbol)
+                else:
+                    # 자금이 모자란 제안은 자리를 점유하지 않는다. 점유시키면
+                    # 살 수도 없는 주문이 뒤에 오는 살 수 있는 신호를 막는다.
+                    rec["note"] = (f"자금 부족 — 필요 {need:,.0f}원 / 가용 "
+                                   f"{avail:,.0f}원. 승인대기에는 남습니다")
+                if over_weight:
+                    rec["note"] = (f"종목당 비중 상한 초과 — 1주 {sig.entry:,.0f}원. "
+                                   "자동승인 대상이 아닙니다(수동 승인만)")
                 # 완전 자동 발주: 승인 없이 즉시 발주(소액 계좌 + 안전장치 전제).
-                # 실패해도 주문은 대기열에 남아 수동 승인 가능(약속: 재시도 경로 유지).
-                if settings.RISK.get("auto_approve"):
+                # **자금이 되고 비중 상한을 넘지 않는 것만** 집어간다 — 데스크의
+                # 스크리닝이 여기다. 나머지는 대기열에 남아 사람이 판단한다.
+                if settings.RISK.get("auto_approve") and fundable and not over_weight:
                     try:
                         res = await orders.approve_and_send(rec["order_id"])
                         rec["auto_status"] = res.get("status")
