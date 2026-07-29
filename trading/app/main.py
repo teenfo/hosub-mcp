@@ -1038,14 +1038,18 @@ async def api_position_void(pos_id: str, payload: dict | None = Body(None),
     if not pos:
         return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
     holdings = await _holdings_map()
-    held = None if holdings is None else int(holdings.get(pos["symbol"], 0) or 0)
+    # 계좌에 실재하는지는 **실제 체결 종목**으로 본다 — 숏은 인버스 ETF 로 나간다
+    sym = ledger.executed_symbol(pos)
+    held = None if holdings is None else int(holdings.get(sym, 0) or 0)
     confirm = bool((payload or {}).get("confirm"))
     if not confirm and held != 0:
         return {"ok": False, "need_confirm": True, "held_qty": held,
                 "ledger_qty": pos.get("qty"),
+                "held_symbol": sym,
                 "error": ("계좌 보유 수량을 확인할 수 없습니다"
                           if held is None else
-                          f"계좌에 {held}주가 실재합니다 — 무효 처리하면 청산 감시가 사라집니다")}
+                          f"계좌에 {sym} {held}주가 실재합니다 — 무효 처리하면 "
+                          "청산 감시가 사라집니다")}
     ok = await asyncio.to_thread(ledger.void_position, pos_id, "수동 제외")
     if ok:
         log.warning("포지션 수동 무효 처리: %s(%s) 원장 %s주 · 계좌 %s주",

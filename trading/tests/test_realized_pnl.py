@@ -192,3 +192,55 @@ def test_reconcile_ignores_orders_the_ledger_never_placed():
 
 def test_reconcile_empty_is_safe():
     assert ledger.reconcile_executions([]) == {"entries": 0, "exits": 0}
+
+
+# --- ④ 인버스 ETF 대체 주문 — 체결가는 ETF 것이고 기준은 원 종목이다 ---
+
+def test_reconcile_does_not_overwrite_entry_when_the_order_went_to_another_symbol():
+    """숏 신호는 현물 계좌에서 공매도가 안 되므로 인버스 ETF 매수로 나간다.
+
+    실측 2026-07-29: LG디스플레이 숏(기준가 9,020)에 KODEX 인버스 체결가
+    1,235 가 들어가 슬리피지가 **−86.3%** 로 기록됐다. 손절·목표·손익은 원
+    종목 기준이라 가격만 다른 종목 것으로 바뀌면 기준 자체가 무너진다.
+    """
+    ledger.open_position(
+        {"id": "s1", "symbol": "034220", "rule": "orb", "side": "short", "qty": 11,
+         "entry": 9_020, "stop": 9_200, "target": 8_700,
+         "exec_symbol": "114800"}, fill=9_020, ord_no="A9")
+    got = ledger.reconcile_executions(
+        [{"ord_no": "A9", "code": "114800", "name": "KODEX 인버스", "side": "buy",
+          "price": 1_235, "qty": 11, "commission": 0, "tax": 0}])
+
+    p = ledger.positions()[0]
+    assert got["entries"] == 1
+    assert p["entry"] == 9_020, "ETF 체결가가 원 종목 진입가를 덮으면 안 된다"
+    assert p["fill_confirmed"] == 1, "체결 자체는 확정된 것이 맞다"
+    assert abs(p["slippage_pct"]) < 1
+
+
+def test_reconcile_does_not_overwrite_exit_when_the_order_went_to_another_symbol():
+    ledger.open_position(
+        {"id": "s1", "symbol": "034220", "rule": "orb", "side": "short", "qty": 11,
+         "entry": 9_020, "stop": 9_200, "target": 8_700,
+         "exec_symbol": "114800"}, fill=9_020, ord_no="A9")
+    ledger.close_position("s1", 8_900, "target", ord_no="B9")
+    ledger.reconcile_executions(
+        [{"ord_no": "B9", "code": "114800", "name": "KODEX 인버스", "side": "sell",
+          "price": 1_250, "qty": 11, "commission": 10, "tax": 3}])
+    p = ledger.positions(status="closed")[0]
+    assert p["exit"] == 8_900 and p["exit_fill_confirmed"] == 1
+
+
+def test_same_symbol_orders_are_still_reconciled_normally():
+    """대체 예외가 '전부 안 덮는다' 가 되면 대사 자체가 무의미해진다."""
+    _pos()
+    ledger.reconcile_executions([_exec("A1", 27_000)])
+    assert ledger.positions()[0]["entry"] == 27_000
+
+
+def test_executed_symbol_falls_back_to_the_position_symbol():
+    assert ledger.executed_symbol({"symbol": "005930"}) == "005930"
+    assert ledger.executed_symbol(
+        {"symbol": "034220", "exec_symbol": "114800"}) == "114800"
+    assert ledger.executed_symbol(
+        {"symbol": "034220", "exec_symbol": None}) == "034220"

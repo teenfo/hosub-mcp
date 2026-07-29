@@ -706,12 +706,16 @@ export default {
       const holds = (acct && acct.ok && acct.holdings) || [];
       const holdBy = {};
       for (const h of holds) holdBy[h.code] = h;
+      // 계좌와 대조할 때는 **실제 체결 종목**을 쓴다 — 숏 신호는 현물 계좌에서
+      // 공매도가 안 되므로 인버스 ETF 매수로 나간다(exec_symbol). 원 종목으로
+      // 보면 실보유가 전부 '계좌에 없음' 으로 읽힌다.
+      const execSym = (p) => p.exec_symbol || p.symbol;
       const trackBy = {};
-      for (const p of open) trackBy[p.symbol] = p;
+      for (const p of open) trackBy[execSym(p)] = p;
 
       // 불일치 경고 — 계좌엔 있는데 미추적 / 추적 중인데 계좌에 없음
       const untracked = holds.filter((h) => !trackBy[h.code]);
-      const ghost = open.filter((p) => !holdBy[p.symbol]);
+      const ghost = open.filter((p) => !holdBy[execSym(p)]);
       if (acct && acct.ok && (untracked.length || ghost.length)) {
         const msgs = [];
         if (ghost.length) msgs.push(`추적 중이나 계좌에 없음 ${ghost.length}건 (${ghost.map((p) => p.name || p.symbol).join(", ")}) — 미체결·수동매도 가능성`);
