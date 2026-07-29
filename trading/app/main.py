@@ -22,7 +22,7 @@ from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
-from .trade import orders
+from .trade import desk, orders
 from . import journal
 
 logging.basicConfig(level=logging.INFO)
@@ -158,8 +158,6 @@ async def _desk_rest_price(symbol: str) -> float | None:
 
 
 async def _desk_loop() -> None:
-    from .trade import desk, orders
-
     await desk.loop(
         fresh_price=lambda s: aggregator.fresh_price(s, desk.stale_sec()),
         rest_price=_desk_rest_price,
@@ -327,6 +325,8 @@ async def api_status(_=Depends(require_auth)):
         "market": engine.market_status(),
         # 키움 REST 호출 부하 — 주기를 줄일 여유가 있는지 판단 근거
         "api_usage": _api_usage(),
+        # 매매 데스크 계측. WS 대비 REST 비율이 이 설계의 성적표다
+        "desk": desk.status(),
     }
 
 
@@ -899,9 +899,14 @@ async def api_account_realized(days: int = 30, _=Depends(require_auth)):
 
     closed = ledger.positions(status="closed", limit=1000)
     engine_krw = round(sum(p.get("pnl_krw") or 0 for p in closed), 0)
+    # 화면의 '오늘 실현손익' 은 이 값을 쓴다. 원장 합산은 모델 비용이라
+    # 2026-07-28 실측에서 손실을 1,796원 과대계상했고, 가드가 그 값으로 판정했다.
+    ymd = today.strftime("%Y%m%d")
+    today_row = next((d for d in (broker.get("days") or []) if d["date"] == ymd), None)
     data = {
-        "period": {"start": start, "end": today.strftime("%Y%m%d")},
+        "period": {"start": start, "end": ymd},
         "broker": broker,
+        "today": today_row,
         "engine": {"realized": engine_krw, "trades": len(closed)},
         # 증권사가 못 세는 게 아니라 원장이 못 보는 것이다 — 이름을 그렇게 붙인다
         "untracked": (round(broker.get("realized", 0) - engine_krw, 0)

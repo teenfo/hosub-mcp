@@ -60,6 +60,20 @@ DEFAULTS = {
     "degraded_interval_sec": 30.0,   # WS 미연결 시 강등 주기
 }
 
+# 화면이 읽는 계측. "WS 로 몇 건, REST 로 몇 건" 이 이 설계의 성적표다 —
+# REST 가 늘고 있으면 분리한 의미가 사라지는 중이므로 눈에 보여야 한다.
+STATE: dict = {
+    "cycles": 0, "ws": 0, "rest": 0, "no_price": 0, "exits": 0, "lines": 0,
+    "watched": 0, "degraded": False, "last_tick": None, "last_line": None,
+}
+
+
+def status() -> dict:
+    c = cfg()
+    return dict(STATE, enabled=bool(c.get("enabled", False)),
+                interval_sec=_num("interval_sec"), stale_sec=_num("stale_sec"),
+                max_symbols=int(_num("max_symbols")))
+
 
 def cfg() -> dict:
     c = (settings.CONFIG.get("execution", {}) or {}).get("desk", {})
@@ -141,6 +155,9 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
             if ledger.set_lines(pos["id"], lines[0], lines[1], now=now):
                 stat["lines"] += 1
                 pos = {**pos, "stop_live": lines[0], "target_live": lines[1]}
+                STATE["last_line"] = {
+                    "at": now.strftime("%H:%M:%S"), "symbol": pos["symbol"],
+                    "name": pos.get("name"), "stop": lines[0], "target": lines[1]}
 
         stop, target = ledger.effective_lines(pos)
         if pos["side"] == "long":
@@ -164,6 +181,12 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
                      pos.get("symbol"), px)
         else:
             ledger.set_exit_pending(pos["id"], 0)   # 실패면 다음 사이클에 다시 본다
+
+    STATE["cycles"] += 1
+    for k in ("ws", "rest", "no_price", "exits", "lines"):
+        STATE[k] += stat[k]
+    STATE["watched"] = stat["watched"]
+    STATE["last_tick"] = now.strftime("%H:%M:%S")
     return stat
 
 
@@ -179,10 +202,12 @@ async def loop(fresh_price, rest_price, execute_exit, ws_ok) -> None:
         interval = _num("interval_sec")
         try:
             if enabled() and in_session():
-                if not ws_ok():
+                degraded = not ws_ok()
+                if degraded:
                     # 전 종목이 낡아 매 사이클 REST 를 타게 된다 — 주기를 늦춘다
                     interval = _num("degraded_interval_sec")
                     log.warning("WS 미연결 — 데스크 주기를 %.0f초로 강등", interval)
+                STATE["degraded"] = degraded
                 await tick(fresh_price, rest_price, execute_exit)
         except Exception:  # noqa: BLE001 - 데스크 오류가 서비스를 멈추지 않는다
             log.exception("매매 데스크 오류")

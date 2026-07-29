@@ -201,6 +201,21 @@ def test_꺼져_있으면_비활성이다(env, monkeypatch):
     assert desk.enabled() is False
 
 
+async def test_계측이_쌓여_화면에_노출된다(env):
+    """WS 로 몇 건 · REST 로 몇 건. 이 비율이 늘면 분리한 의미가 사라지는 중이다."""
+    before = dict(desk.STATE)
+    _open("p1", "005930")
+    _open("p2", "000660", entry=20_000, stop=19_600, target=20_800)
+    spy = _Spy(ws={"005930": 10_100}, rest={"000660": 20_100})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+
+    st = desk.status()
+    assert st["ws"] - before["ws"] == 1 and st["rest"] - before["rest"] == 1
+    assert st["cycles"] - before["cycles"] == 1
+    assert st["last_tick"] == "10:00:00"
+    assert st["enabled"] is True and st["interval_sec"] == 2
+
+
 def test_장중에만_돈다():
     assert desk.in_session(datetime(2026, 7, 30, 10, 0, tzinfo=KST)) is True
     assert desk.in_session(datetime(2026, 7, 30, 15, 45, tzinfo=KST)) is False

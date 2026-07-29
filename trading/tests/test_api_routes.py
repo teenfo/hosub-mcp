@@ -131,6 +131,51 @@ def test_realized_puts_broker_and_engine_side_by_side(client, monkeypatch, tmp_p
     assert d["engine"]["trades"] == 1
 
 
+def test_realized_gives_today_row_for_the_screen(client, monkeypatch, tmp_path):
+    """화면의 '오늘 실현손익' 은 이 값을 쓴다 — 원장 합산이 아니라 증권사 실측.
+
+    2026-07-28 실측: 모델 비용이 손실을 1,796원 과대계상했고 가드가 그 값으로
+    판정했다. 금액은 증권사 값을 보여주고 원장값은 대조로 나란히 둔다.
+    """
+    from datetime import datetime
+
+    from app import main
+    from app.kiwoom.client import client as kc
+    from app.trade import ledger
+
+    monkeypatch.setattr(main.settings, "KIWOOM_APP_KEY", "K")
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    main._realized_cache.update(ts=0.0, data=None)
+    ymd = datetime.now(main.KST).strftime("%Y%m%d")
+
+    async def fake(start, end):
+        return {"return_code": 0, "rlzt_pl": "-10442", "dt_rlzt_pl": [
+            {"dt": ymd, "tdy_sel_pl": "-10442", "tdy_trde_cmsn": "230"},
+            {"dt": "20260728", "tdy_sel_pl": "1234"}]}
+
+    monkeypatch.setattr(kc, "daily_realized", fake)
+    d = _get(client, "/api/account/realized").json()
+    assert d["today"]["realized"] == -10_442, "당일 행을 골라내야 화면이 쓴다"
+    assert d["today"]["date"] == ymd
+
+
+def test_realized_today_is_none_when_broker_is_unreachable(client, monkeypatch, tmp_path):
+    """조회 실패면 None — 화면은 그때만 원장값으로 폴백하고 그 사실을 표시한다."""
+    from app import main
+    from app.trade import ledger
+
+    monkeypatch.setattr(main.settings, "KIWOOM_APP_KEY", "")
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    main._realized_cache.update(ts=0.0, data=None)
+    assert _get(client, "/api/account/realized").json()["today"] is None
+
+
+def test_status_exposes_desk_metrics(client):
+    """WS 대비 REST 비율이 이 설계의 성적표다 — 화면에 보이지 않으면 못 잰다."""
+    d = _get(client, "/api/status").json()
+    assert {"enabled", "ws", "rest", "cycles", "interval_sec"} <= set(d["desk"])
+
+
 def test_reconcile_without_api_key_is_not_an_error_page(client, monkeypatch):
     from app import main
 
