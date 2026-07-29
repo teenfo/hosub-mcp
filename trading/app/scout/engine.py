@@ -66,6 +66,24 @@ def mode() -> str:
     return m if m in MODES else "shadow"
 
 
+def owns_watchlist() -> bool:
+    """엔진이 감시목록 편입을 **소유하는가**. `full` 모드에서만 참이다.
+
+    참이면 기존 직접 편입 경로가 물러난다 —
+    `discovery.replace_auto` · `scanner.replace_active` · `scanner.replace_gainers`.
+    그 셋이 엔진과 중복되는 부분이고, 흡수의 실체가 이 한 줄이다.
+
+    **`full` 이전에는 물러나지 않는다.** shadow·collect 에서 물러나면 감시목록에
+    아무도 쓰지 않게 되어 매매가 통째로 멈춘다. 전환과 흡수는 같은 순간에
+    일어나야 하고, 되돌리기도 모드 하나를 되돌리는 것으로 끝나야 한다.
+
+    소유가 넘어가도 **discovery·scanner 의 수집은 계속 돈다** — 전종목 일봉·피처·
+    국면·급등 후보는 엔진의 입력이지 중복이 아니다. 회수되는 것은 '감시목록에
+    직접 쓰는' 부분뿐이다.
+    """
+    return mode() == "full"
+
+
 def frozen() -> bool:
     """킬 스위치 — 쓰기만 멈추고 감시목록은 현 상태로 동결한다."""
     return bool(_state().get("frozen"))

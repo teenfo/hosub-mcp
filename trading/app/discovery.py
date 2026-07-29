@@ -158,6 +158,24 @@ class Discovery:
                 "progress": self.progress, "last_run": self.last_run,
                 "market": market}
 
+    async def apply_auto_watch(self, top: list[dict], cfg: dict) -> bool:
+        """발굴 상위 종목을 감시목록에 편입한다(이전 auto 항목은 교체). 반환: 썼는가.
+
+        **엔진이 `full` 이면 물러난다** — 이 호출이 엔진과 중복되는 유일한 부분이다.
+        수집·피처·국면 계산은 그대로 돈다(엔진의 입력이지 중복이 아니다).
+        """
+        from .data import watchlist
+        from .scout import engine as scout
+
+        if not (cfg.get("auto_watch", True) and top):
+            return False
+        if scout.owns_watchlist():
+            log.info("발굴 자동편입 보류 — 감시목록은 엔진(full)이 소유")
+            return False
+        watchlist.replace_auto(top[: cfg.get("auto_watch_n", 5)])
+        await watchlist.notify()
+        return True
+
     async def run_once(self) -> int:
         """전종목 수집 + 스크리닝. 반환: 발굴 종목 수."""
         from .kiwoom.client import client  # 지연 임포트
@@ -230,12 +248,7 @@ class Discovery:
                     [(today, p["code"], p["name"], p["close"], p["score"],
                       json.dumps(p["reasons"], ensure_ascii=False)) for p in top],
                 )
-            # 발굴 상위 종목 자동 감시 편입 (이전 auto 항목은 교체)
-            if cfg.get("auto_watch", True) and top:
-                from .data import watchlist
-
-                watchlist.replace_auto(top[: cfg.get("auto_watch_n", 5)])
-                await watchlist.notify()
+            await self.apply_auto_watch(top, cfg)
             self.progress = f"완료: {len(symbols)}종목 분석 → {len(top)}종목 발굴"
             self.last_run = datetime.now(KST).isoformat(timespec="seconds")
             log.info("야간 발굴 %s", self.progress)
