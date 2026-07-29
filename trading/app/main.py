@@ -140,6 +140,34 @@ async def _ledger_loop() -> None:
         await asyncio.sleep(30)
 
 
+async def _desk_rest_price(symbol: str) -> float | None:
+    """WS 값이 낡은 종목만 REST 로 보충한다(데스크 폴백).
+
+    보유 종목 한정이라 최악에도 사이클당 몇 콜이다. 실패하면 None —
+    데스크는 가격을 모르면 판정하지 않는다.
+    """
+    from .kiwoom.client import client
+    from .kiwoom.quote import parse_quote
+
+    try:
+        q = parse_quote(await client.quote(symbol))
+    except Exception:  # noqa: BLE001
+        log.warning("데스크 REST 시세 실패 %s", symbol)
+        return None
+    return float(q["price"]) if q else None
+
+
+async def _desk_loop() -> None:
+    from .trade import desk, orders
+
+    await desk.loop(
+        fresh_price=lambda s: aggregator.fresh_price(s, desk.stale_sec()),
+        rest_price=_desk_rest_price,
+        execute_exit=orders.execute_exit,
+        ws_ok=lambda: feed.connected,
+    )
+
+
 async def _holdings_map() -> dict[str, int] | None:
     """{종목코드: 보유수량}. 조회 실패·미설정이면 **None** — 호출자는 아무것도 하지 않는다.
 
@@ -225,6 +253,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
         asyncio.create_task(_ledger_loop()),
+        # 매매 데스크 — 보유 포지션만 초 단위로 본다. execution.desk.enabled 가
+        # false 면 아무것도 하지 않고 위 _ledger_loop(30초)가 그대로 맡는다.
+        asyncio.create_task(_desk_loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")

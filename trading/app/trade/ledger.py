@@ -50,7 +50,14 @@ def _conn() -> sqlite3.Connection:
                      # 누적하면 체결내역을 두 번 훑을 때 비용이 두 배가 된다.
                      ("entry_fee_krw", "REAL"),
                      ("exit_fee_krw", "REAL"),
-                     ("tax_krw", "REAL")):
+                     ("tax_krw", "REAL"),
+                     # 매매 데스크가 장중에 갱신하는 손절·익절선. **원본(stop/target)은
+                     # 건드리지 않는다** — 갱신 규칙이 나빴을 때 되돌릴 기준이 남아야
+                     # 하고, 일지·백테스트·본전 이동 shadow 가 "원래 설계가 무엇이었나"
+                     # 를 계속 읽어야 한다.
+                     ("stop_live", "REAL"),
+                     ("target_live", "REAL"),
+                     ("lines_updated", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -404,6 +411,44 @@ def held_minutes(opened: str, now: datetime | None = None) -> float | None:
     return (now - t).total_seconds() / 60
 
 
+def effective_lines(row) -> tuple[float, float]:
+    """지금 판정에 쓸 (손절선, 목표가).
+
+    매매 데스크가 갱신한 `*_live` 가 있으면 그 값을, 없으면 진입 시 고정값을 쓴다.
+    데스크가 꺼져 있거나 아직 갱신하지 않은 포지션은 자동으로 기존 동작이 된다.
+    """
+    def _pick(live_key: str, base_key: str) -> float:
+        try:
+            v = row[live_key]
+        except (KeyError, IndexError):     # 구버전 행(컬럼 없음)
+            v = None
+        return float(v if v is not None else row[base_key])
+
+    return _pick("stop_live", "stop"), _pick("target_live", "target")
+
+
+def set_lines(pos_id: str, stop: float | None, target: float | None,
+              now: datetime | None = None) -> bool:
+    """손절·익절선 갱신. **값이 실제로 바뀔 때만 쓴다**(반환: 썼는가).
+
+    데스크가 초 단위로 도는데 매번 UPDATE 하면 SQLite 쓰기가 그만큼 잦아진다.
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT stop_live, target_live FROM positions WHERE id=? AND status='open'",
+            (pos_id,)).fetchone()
+        if row is None:
+            return False
+        if row["stop_live"] == stop and row["target_live"] == target:
+            return False
+        conn.execute(
+            "UPDATE positions SET stop_live=?, target_live=?, lines_updated=? WHERE id=?",
+            (stop, target,
+             (now or datetime.now(KST)).isoformat(timespec="seconds"), pos_id),
+        )
+    return True
+
+
 def due_exits(price_of, now: datetime | None = None) -> list[dict]:
     """손절/목표/시간초과에 걸린 오픈 포지션 목록(청산 대상).
 
@@ -422,13 +467,14 @@ def due_exits(price_of, now: datetime | None = None) -> list[dict]:
         p = price_of(row["symbol"])
         if p is None:
             continue
+        stop, target = effective_lines(row)
         if row["side"] == "long":
-            reason = "stop" if p <= row["stop"] else ("target" if p >= row["target"] else None)
+            reason = "stop" if p <= stop else ("target" if p >= target else None)
         else:
-            reason = "stop" if p >= row["stop"] else ("target" if p <= row["target"] else None)
+            reason = "stop" if p >= stop else ("target" if p <= target else None)
         px = None
         if reason:
-            px = float(row["stop"] if reason == "stop" else row["target"])
+            px = float(stop if reason == "stop" else target)
         else:
             limit = max_hold_min(row["rule"])
             held = held_minutes(row["opened"], now) if limit else None
