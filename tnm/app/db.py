@@ -134,8 +134,12 @@ async def add_manual(ticker: str, name: str) -> dict:
         return _row_to_watch(await cur.fetchone())
 
 
-async def add_discovered(rows: list[dict], tier: str = "other") -> int:
-    """DART 발굴 종목을 관심종목에 등록한다(origin='dart').
+async def add_discovered(rows: list[dict], tier: str = "other",
+                         origin: str = "dart") -> int:
+    """발굴 종목을 관심종목에 등록한다.
+
+    `origin` 은 어느 소스가 올렸는지다(기본 'dart'). 소스마다 다르게 둬야
+    출처별 상한(count_origin)과 성적을 따로 잴 수 있다.
 
     `add_manual` 과 다른 점 셋:
 
@@ -165,7 +169,7 @@ async def add_discovered(rows: list[dict], tier: str = "other") -> int:
             " on conflict (ticker) do nothing",
             ([r["ticker"] for r in rows],
              [r.get("name") or r["ticker"] for r in rows],
-             ["dart"] * len(rows),
+             [origin] * len(rows),
              [tier] * len(rows),
              [r.get("corp_code") or None for r in rows],
              [int(settings.ALERTS.get("default_threshold", 60))] * len(rows),
@@ -515,6 +519,41 @@ async def insert_reports(rows: list[dict]) -> int:
                  d.get("target_price"), d.get("opinion"), d["published_at"]))
             inserted += max(cur.rowcount, 0)
     return inserted
+
+
+async def pending_report_ingest(days: int = 7, limit: int = 200,
+                                max_attempts: int = 3) -> list[dict]:
+    """분석 파이프라인에 아직 못 들어간 리포트 (종목이 붙은 것만).
+
+    적재는 수집과 분리돼 있다. 종목 등록 상한에 걸려 이번 사이클에 못 들어간
+    리포트가 다음 사이클에 다시 시도되게 하려면, '적재 대기' 를 **수집 결과가
+    아니라 DB 상태**로 표현해야 한다. raw_item_id 가 그 표시다.
+    """
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select id, source, source_uid, broker, ticker, stock_name, title,"
+            " summary, url, target_price, opinion, analyst, published_at"
+            " from tnm_reports"
+            " where raw_item_id is null and ticker is not null"
+            "   and ingest_attempts < %s"
+            "   and published_at >= now() - make_interval(days => %s)"
+            " order by published_at desc limit %s",
+            (max_attempts, max(1, days), min(max(limit, 1), 1000)))
+        keys = ("id", "source", "source_uid", "broker", "ticker", "stock_name",
+                "title", "summary", "url", "target_price", "opinion", "analyst",
+                "published_at")
+        return [dict(zip(keys, r)) for r in await cur.fetchall()]
+
+
+async def bump_report_attempts(ids: list[int]) -> int:
+    """적재 시도 횟수 +1. 상한에 닿으면 pending 에서 빠져 무한 재시도를 멈춘다."""
+    if not ids:
+        return 0
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "update tnm_reports set ingest_attempts = ingest_attempts + 1"
+            " where id = any(%s)", (ids,))
+        return max(cur.rowcount, 0)
 
 
 async def link_report_items() -> int:

@@ -13,7 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from . import brokers as broker_reg
-from . import corp_codes, db, discover, settings
+from . import corp_codes, db, discover, ingest, settings
 from .collectors import research
 from .collectors.base import Collector, RawDoc
 from .collectors.dart import DartCollector
@@ -227,27 +227,48 @@ class CollectRunner:
                 "target_price": r.target_price, "opinion": r.opinion,
                 "published_at": r.published_at}
 
-    def _report_to_raw(self, r: research.Report) -> dict:
-        """리포트 → raw_items 행. 목표가·투자의견을 본문에 넣는다.
+    def _report_to_raw(self, r: dict) -> dict:
+        """리포트(DB 행) → raw_items 행. 목표가·투자의견을 본문에 넣는다.
 
         분류 LLM 이 보는 것은 본문 텍스트뿐이라, 별도 칼럼에만 있는 목표가는
         분류·점수에 반영되지 않는다. 리포트에서 가장 중요한 정보를 문장으로
         옮겨 넣어야 파이프라인이 그것을 읽는다.
         """
-        parts = [f"[{r.broker} 리포트] {r.title}"]
-        if r.summary:
-            parts.append(r.summary)
-        if r.target_price:
-            parts.append(f"목표주가 {r.target_price:,}원")
-        if r.opinion:
-            parts.append(f"투자의견 {r.opinion}")
-        if r.analyst:
-            parts.append(f"작성 {r.analyst}")
-        body = " / ".join(parts)
-        return {"source_uid": f"{r.source}:{r.source_uid}", "title": r.title,
-                "body": body, "url": r.url, "published_at": r.published_at,
-                "content_hash": content_hash(r.title, body),
-                "norm_body": normalize(r.title + " " + body)}
+        title = r["title"]
+        body = ingest.doc_body(f"[{r['broker']} 리포트] {title}", [
+            r.get("summary"),
+            f"목표주가 {r['target_price']:,}원" if r.get("target_price") else None,
+            f"투자의견 {r['opinion']}" if r.get("opinion") else None,
+            f"작성 {r['analyst']}" if r.get("analyst") else None,
+        ])
+        return {"source_uid": f"{r['source']}:{r['source_uid']}", "title": title,
+                "body": body, "url": r["url"], "published_at": r["published_at"],
+                "content_hash": content_hash(title, body),
+                "norm_body": normalize(title + " " + body)}
+
+    async def _ingest_reports(self, cfg: dict) -> dict:
+        """적재 대기 리포트를 분석 파이프라인에 태운다 (DART·뉴스와 같은 경로).
+
+        수집과 분리한 이유: 종목 등록 상한에 걸려 이번에 못 들어간 리포트가
+        다음 사이클에 다시 시도돼야 한다. 그러려면 '대기' 가 수집 결과가
+        아니라 **DB 상태**여야 한다(raw_item_id is null).
+        """
+        icfg = cfg.get("ingest") or {}
+        rows = await db.pending_report_ingest(
+            days=int(icfg.get("days", 7)), limit=int(icfg.get("batch", 200)),
+            max_attempts=int(icfg.get("max_attempts", 3)))
+        if not rows:
+            return {}
+        # 시도 횟수를 **먼저** 올린다. 적재가 영영 안 되는 건(중복·제외 종목)이
+        # 매 사이클 같은 일을 반복하지 않도록 상한에서 빠져나가게 해야 한다.
+        await db.bump_report_attempts([r["id"] for r in rows])
+        out = await ingest.attach_docs(
+            [{"ticker": r["ticker"], "name": r.get("stock_name") or r["ticker"],
+              "row": self._report_to_raw(r)} for r in rows],
+            source="research", origin="research", cfg=icfg)
+        if out.get("inserted"):
+            out["linked"] = await db.link_report_items()
+        return {f"ingest_{k}": v for k, v in out.items()}
 
     async def _collect_foreign(self, brokers: list[dict], cfg: dict,
                                counts: dict) -> list[research.Report]:
@@ -303,7 +324,7 @@ class CollectRunner:
         보여준다 — 이름을 놓쳤다는 사실 자체가 목록을 고칠 근거다.
         """
         cfg = settings.COLLECT.get("research", {}) or {}
-        counts = {"fetched": 0, "kept": 0, "inserted": 0, "raw_inserted": 0,
+        counts = {"fetched": 0, "kept": 0, "inserted": 0,
                   "disabled_skip": 0, "unregistered": 0, "errors": 0}
         if not cfg.get("enabled", True):
             return counts | {"skipped": "비활성"}
@@ -355,34 +376,27 @@ class CollectRunner:
             known = set()
         keep = [r for r in keep if (r.source, r.source_uid) not in known]
         counts["kept"] = len(keep)
+        if keep:
+            try:
+                await research.fill_naver_targets(
+                    keep, limit=int(cfg.get("detail_max_per_cycle", 20)))
+            except Exception as e:  # noqa: BLE001 — 보조 정보라 실패해도 계속
+                log.warning("리서치 상세(목표가) 조회 실패: %s", e)
+            counts["inserted"] = await db.insert_reports(
+                [self._report_row(r) for r in keep])
+
+        # 신규가 0건이어도 적재는 돌린다 — 지난 사이클에 상한으로 밀린 리포트가
+        # 여기서 풀린다. 수집과 적재를 붙여 두면 그 대기열이 영영 안 빠진다.
+        try:
+            counts |= await self._ingest_reports(cfg)
+        except Exception as e:  # noqa: BLE001 — 적재 실패가 수집을 되돌리지 않는다
+            counts["errors"] += 1
+            log.warning("리서치 분석 적재 실패: %s", e)
+
         if not keep:
             self.last_run["research"] = datetime.now(KST).isoformat(timespec="seconds")
             self.last_result["research"] = counts
             return counts
-
-        try:
-            await research.fill_naver_targets(
-                keep, limit=int(cfg.get("detail_max_per_cycle", 20)))
-        except Exception as e:  # noqa: BLE001 — 보조 정보라 실패해도 계속
-            log.warning("리서치 상세(목표가) 조회 실패: %s", e)
-
-        counts["inserted"] = await db.insert_reports([self._report_row(r) for r in keep])
-
-        # 관심종목 리포트는 raw_items 에도 넣어 기존 분석 파이프라인을 태운다.
-        wids = await db.watch_ids_by_ticker()
-        by_wid: dict[int, list[dict]] = {}
-        for r in keep:
-            wid = wids.get(r.ticker or "")
-            if wid:
-                by_wid.setdefault(wid, []).append(self._report_to_raw(r))
-        for wid, rows in by_wid.items():
-            try:
-                counts["raw_inserted"] += await db.insert_raw_items(wid, "research", rows)
-            except Exception as e:  # noqa: BLE001 — 종목 단위 격리
-                counts["errors"] += 1
-                log.warning("리서치 raw 적재 실패 watchlist_id=%s: %s", wid, e)
-        if counts["raw_inserted"]:
-            await db.link_report_items()
 
         tally: dict[str, int] = {}
         for r in keep:

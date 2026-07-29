@@ -17,6 +17,7 @@ const ORIGIN_BADGE = {
   holding: '<span class="badge text-bg-danger">보유</span>',
   manual: '<span class="badge text-bg-success">수동</span>',
   dart: '<span class="badge text-bg-warning" title="감시목록 밖 공시에서 발굴된 종목">공시발굴</span>',
+  research: '<span class="badge text-bg-info" title="증권사 리포트에서 발굴된 종목">리포트발굴</span>',
 };
 // 파이프라인 단계 — /api/status 의 키 순서가 곧 데이터가 흐르는 순서다.
 const STAGES = [
@@ -370,7 +371,10 @@ export default {
         changed.invalidate("brokers"); changed.invalidate("reports");
         await Promise.all([loadBrokers(), loadReports()]);
         alert(`수집 완료 — 조회 ${r.fetched ?? 0} · 저장 ${r.inserted ?? 0}` +
-              ` · 분석큐 ${r.raw_inserted ?? 0} · 제외(끔) ${r.disabled_skip ?? 0}`);
+              ` · 분석큐 ${r.ingest_inserted ?? 0}` +
+              (r.ingest_registered ? ` (신규 종목 ${r.ingest_registered})` : "") +
+              (r.ingest_deferred ? ` · 대기 ${r.ingest_deferred}` : "") +
+              ` · 제외(끔) ${r.disabled_skip ?? 0}`);
       } catch (e) { alert("실패: " + e.message); }
       finally { brkRunBtn.disabled = false; brkRunBtn.textContent = "지금 수집"; }
     };
