@@ -46,16 +46,33 @@ class _RateLimiter:
 _limiter = _RateLimiter()
 
 
+def _published_at(rcept_dt: str, now: datetime | None = None) -> datetime:
+    """접수일(YYYYMMDD) → 발행 시각 추정.
+
+    list.json 은 **날짜만** 준다(rcept_no 의 일련번호도 시각이 아니다). 자정으로
+    두면 15:00 에 나온 거래정지 공시가 15시간 전 것으로 보인다 — 신선도로 줄을
+    세우는 곳(분류 큐 우선순위·promote 의 window_hours)에서 공시가 구조적으로
+    뒤로 밀린다.
+
+    **오늘 접수분은 수집 시각을 쓴다.** 전종목 모드가 장중 10분 주기로 도므로
+    수집 시각은 실제 접수 시각의 상한이고 오차가 한 주기 안이다. 어제 이전은
+    그날 자정 그대로 — 소급 백필이 전부 '방금'이 되어 버리면 안 된다.
+    """
+    now = now or datetime.now(KST)
+    try:
+        day = datetime.strptime(rcept_dt, "%Y%m%d").replace(tzinfo=KST)
+    except ValueError:
+        return now
+    return now if day.date() == now.date() else day
+
+
 def _to_doc(it: dict) -> RawDoc:
     report_nm = str(it.get("report_nm", "")).strip()
     corp_name = str(it.get("corp_name", "")).strip()
     flr_nm = str(it.get("flr_nm", "")).strip()
     rm = str(it.get("rm", "")).strip()
-    rcept_dt = str(it.get("rcept_dt", "")).strip()   # YYYYMMDD
-    try:
-        published = datetime.strptime(rcept_dt, "%Y%m%d").replace(tzinfo=KST)
-    except ValueError:
-        published = datetime.now(KST)
+    rcept_dt = str(it.get("rcept_dt", "")).strip()   # YYYYMMDD — **시각이 없다**
+    published = _published_at(rcept_dt)
     body = f"{corp_name} 공시 — {report_nm}. 제출인: {flr_nm}."
     if rm:
         body += f" 비고: {rm}"
