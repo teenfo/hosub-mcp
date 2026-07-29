@@ -859,6 +859,18 @@ async def api_trailing_run(_=Depends(require_auth)):
             "hint": "GET /api/research/trailing 으로 진행·결과를 봅니다"}
 
 
+@app.get("/api/research/trailing/real")
+async def api_trailing_real(day: str | None = None, _=Depends(require_auth)):
+    """실거래 진입을 그대로 두고 청산 정책만 투사한 결과.
+
+    표본이 작아(원장 전체 57건) 값을 고르는 용도가 아니다 — "내 거래에 켰다면
+    어땠나" 를 보는 경로다. 원장 조회 + 분봉 재생이라 가볍다(전종목 스윕과 다르다).
+    """
+    from .research import trailing as _t
+
+    return await asyncio.to_thread(_t.analyze_real, None, day)
+
+
 @app.get("/api/research/ranking")
 async def api_ranking(_=Depends(require_auth)):
     """랭킹 방식 비교 최신 결과(조회성 — 주문 없음)."""

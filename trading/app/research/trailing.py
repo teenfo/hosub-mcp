@@ -33,9 +33,14 @@
 - **청산 판정이 갱신보다 먼저다.** 같은 봉에서 손절과 목표가 함께 닿으면 손절.
 - **틱이 아니라 분이다.** 데스크는 2초마다 보는데 여기서는 60초마다 본다.
 
-반대 방향의 낙관이 하나 있다: **봉 안에서 손절선을 스치고 되돌아온 경우를 잡지
-못한다.** 확정 비율이 높을수록(손절선이 가격에 붙을수록) 이 낙관이 커진다 —
-즉 **높은 N 의 성적은 과대평가된다.** 결과를 읽을 때 이걸 감안해야 한다.
+반대 방향의 낙관도 하나 있다: **손절선에 닿으면 그 가격 그대로 체결된다고
+가정한다.** 실제로는 breach 를 보고 시장가를 던지므로 체결은 그보다 나쁘다.
+손절 청산 건수는 N 이 오를수록 늘어나므로(실측 1,643 → 3,068건) 이 낙관도
+**N 이 클수록 커진다.** 비용 모델의 슬리피지가 일부 상쇄하지만 전부는 아니다.
+
+(초판 주석에서 이 낙관을 '봉 안에서 손절선을 스치고 되돌아온 경우를 못 잡는다'
+라고 적었는데 **틀렸다.** 재생은 `bar.low <= stop` 으로 그 경우를 잡는다.
+실제 낙관은 위의 체결가 가정이다.)
 
 ## 최적값을 고를 때의 함정
 
@@ -48,8 +53,11 @@ import json
 import logging
 import multiprocessing as mp
 import os
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from .. import settings
 from ..backtest import runner
@@ -58,6 +66,7 @@ from ..signals import rules
 from ..trade import desk
 
 log = logging.getLogger(__name__)
+KST = ZoneInfo("Asia/Seoul")
 
 # 스윕 값 — 사용자 지시(2026-07-29): 30 부터 올리며 본다
 LOCK_GRID = (30, 40, 50, 60, 70, 80, 90)
@@ -340,3 +349,130 @@ def main() -> None:  # pragma: no cover - CLI
 
 if __name__ == "__main__":  # pragma: no cover
     main()
+
+
+# --------------------------------------------------------------------------
+# 4) 실거래 투사 — 진입은 실제 체결, 청산만 정책별로 다시 본다
+# --------------------------------------------------------------------------
+# 사용자 제안(2026-07-29): "실거래의 진입 금액과 시점만 투사하고, 청산은 차트로
+# 확인한다." 규칙이 만들어낸 가짜 진입 대신 **내가 실제로 잡은 자리**에서 청산만
+# 바꿔 본다 — 진입 규칙의 성적이 청산 정책 비교에 섞이지 않는다.
+#
+# 다만 **봉 해상도의 낙관은 이 방식으로도 사라지지 않는다.** 낙관은 진입이 아니라
+# 청산 모델에 있다(체결가 가정·봉 종가 갱신). 이 방식이 없애는 것은 진입 편향이다.
+# 그리고 표본이 작다 — 원장 전체가 57건이다. 값을 고르기엔 모자라고,
+# "내 거래에 켰다면 어땠나" 를 보는 용도다.
+
+
+def _bars_after(symbol: str, day: str, after: str):
+    """그 날의 1분봉 중 진입 시각 **이후**만. 없으면 빈 리스트."""
+    df = store.load_bars(symbol, "1m", limit=4000)
+    if df.empty:
+        return []
+    same = df[df.index.normalize() == pd.Timestamp(day, tz=KST)]
+    if same.empty:
+        return []
+    try:
+        t0 = datetime.fromisoformat(after)
+    except (TypeError, ValueError):
+        return []
+    if t0.tzinfo is None:
+        t0 = t0.replace(tzinfo=KST)
+    return list(same[same.index > t0].itertuples())
+
+
+def _project(pos: dict, bars, update: bool, hold_limit: int) -> tuple[float, str]:
+    """한 포지션을 정책 하나로 재생 → (청산가, 사유). 봉이 없으면 실제값 그대로."""
+    entry = float(pos["entry"])
+    stop, target = float(pos["stop"]), float(pos["target"])
+    side = pos["side"]
+    clock = bars[0].Index if bars else None
+    for bar in bars:
+        if side == "long":
+            hit_stop, hit_target = bar.low <= stop, bar.high >= target
+        else:
+            hit_stop, hit_target = bar.high >= stop, bar.low <= target
+        if hit_stop:
+            return stop, "stop"
+        if hit_target:
+            return target, "target"
+        if hold_limit and clock is not None \
+                and bar.Index - clock >= timedelta(minutes=hold_limit):
+            return float(bar.close), "timeout"
+        if update:
+            new_stop, new_target = _lines(entry, float(pos["stop"]),
+                                          float(pos["target"]), side,
+                                          stop, target, float(bar.close))
+            if new_stop != stop:
+                clock = bar.Index
+            stop, target = new_stop, new_target
+    return (float(bars[-1].close), "eod") if bars else (
+        float(pos["exit"] or entry), "실제")
+
+
+def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict:
+    """실제 청산된 포지션에 정책별 청산을 투사한다.
+
+    비교 기준은 **같은 비용 모델로 다시 계산한 실제 청산**이다(`as_executed`).
+    원장에 적힌 손익과는 조금 다를 수 있는데, 그건 증권사 실측 비용이 반영돼
+    있기 때문이다 — 정책 간 비교를 같은 자로 하기 위해 이렇게 둔다.
+    """
+    from ..trade import ledger
+
+    names = names or variants()
+    costs = settings.COSTS
+    hold_limit = settings.RULES.get("max_hold_min", 0) or 0
+    rows = [p for p in ledger.positions(status="closed", limit=2000)
+            if p.get("exit") and p.get("opened")]
+    if day:
+        rows = [p for p in rows if str(p["opened"])[:10] == day]
+
+    def _krw(pos, exit_px):
+        t = runner.Trade(pos["symbol"], pos.get("rule") or "", pos["side"],
+                         None, float(pos["entry"]), float(pos["stop"]),
+                         float(pos["target"]), None, float(exit_px), "")
+        return t.pnl_pct(costs) / 100 * float(pos["entry"]) * int(pos["qty"] or 0)
+
+    out = {v: {"krw": 0.0, "wins": 0, "exits": {}} for v in names}
+    base = {"krw": 0.0, "wins": 0, "exits": {}}
+    used = no_bars = 0
+    old_file, desk.STATE_FILE = desk.STATE_FILE, Path("/nonexistent/desk.json")
+    old = (settings.CONFIG.get("execution", {}) or {}).get("desk")
+    try:
+        for pos in rows:
+            bars = _bars_after(pos["symbol"], str(pos["opened"])[:10],
+                               str(pos["opened"]))
+            if not bars:
+                no_bars += 1
+                continue
+            used += 1
+            k = _krw(pos, pos["exit"])
+            base["krw"] += k
+            base["wins"] += 1 if k > 0 else 0
+            r = pos.get("exit_reason") or "?"
+            base["exits"][r] = base["exits"].get(r, 0) + 1
+            for v in names:
+                cfg = _cfg_of(v)
+                settings.CONFIG.setdefault("execution", {})["desk"] = \
+                    cfg or {"enabled": False}
+                px, why = _project(pos, bars, cfg is not None, hold_limit)
+                k = _krw(pos, px)
+                out[v]["krw"] += k
+                out[v]["wins"] += 1 if k > 0 else 0
+                out[v]["exits"][why] = out[v]["exits"].get(why, 0) + 1
+    finally:
+        desk.STATE_FILE = old_file
+        if old is None:
+            settings.CONFIG.get("execution", {}).pop("desk", None)
+        else:
+            settings.CONFIG["execution"]["desk"] = old
+
+    def _fin(d):
+        return {"krw": round(d["krw"], 0),
+                "win_rate": round(d["wins"] / used * 100, 1) if used else 0.0,
+                "exits": dict(sorted(d["exits"].items(), key=lambda kv: -kv[1]))}
+
+    return {"trades": used, "no_bars": no_bars, "day": day,
+            "as_executed": _fin(base),
+            "policies": {v: _fin(out[v]) for v in names},
+            "note": "표본이 작다. 값을 고르는 용도가 아니라 '내 거래에 켰다면' 을 본다"}
