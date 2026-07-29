@@ -24,8 +24,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "COSTS", {"commission_pct": 0.015,
                                             "sell_tax_pct": 0.20,
                                             "slippage_bp": 5})
-    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
-        "enabled": True, "interval_sec": 2, "stale_sec": 5, "max_symbols": 5}})
+    monkeypatch.setitem(settings.CONFIG, "execution", {"stop_mode": "auto", "desk": {
+        "enabled": True, "interval_sec": 2, "stale_sec": 5, "max_symbols": 0}})
+    # 승인 규약은 명시한다 — 기본값에 기대면 config 가 바뀔 때 조용히 뒤집힌다
+    monkeypatch.setitem(settings.RISK, "auto_approve", True)
     return tmp_path
 
 
@@ -84,7 +86,21 @@ async def test_가격을_모르면_판정하지_않는다(env):
     assert spy.exits == [], "가격을 모르는 채로 청산하면 안 된다"
 
 
-async def test_보유가_max_symbols_를_넘으면_초과분은_건드리지_않는다(env, monkeypatch):
+async def test_기본값은_보유_전량을_본다(env):
+    """데스크의 목적은 **보유 종목 전부**를 초 단위로 보는 것이다.
+
+    상한을 걸면 그 초과분이 2초 감시 밖으로 나간다 — 수동 매수 등으로 보유가
+    늘었을 때 하필 그 종목만 30초로 떨어진다.
+    """
+    for i in range(8):
+        _open(f"p{i}", f"00000{i}")
+    spy = _Spy(ws={f"00000{i}": 10_100 for i in range(8)})
+    stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert stat["watched"] == 8
+
+
+async def test_상한을_두면_그만큼만_본다(env, monkeypatch):
+    """레이트리밋이 문제가 될 때를 위한 안전장치. 기본값은 아니다."""
     monkeypatch.setitem(settings.CONFIG, "execution",
                         {"desk": {"enabled": True, "max_symbols": 2}})
     for i in range(4):
@@ -140,6 +156,70 @@ async def test_발주_실패면_잠금을_풀어_다음_사이클에_다시_본�
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
     assert len(spy.exits) == 2, "실패했으면 다시 시도해야 한다"
+
+
+def test_켜지면_손절_목표는_30초_루프에서_빠진다(env):
+    """`_ledger_loop` 이 `desk.owns()` 로 거른다 — 소유권을 하나로 둔다."""
+    assert desk.owns("stop") is True and desk.owns("target") is True
+    assert desk.owns("timeout") is False, "시각 기준이라 데스크로 넘기지 않는다"
+    assert desk.owns("eod") is False
+
+
+def test_꺼지면_전부_30초_루프가_맡는다(env):
+    """되돌리기의 실체 — 끄는 순간 감시가 비지 않아야 한다."""
+    desk.set_state(enabled=False)
+    assert [desk.owns(r) for r in ("stop", "target", "timeout")] == [False] * 3
+
+
+async def test_데스크가_직접_발주한다(env):
+    """판정만 빠르고 발주가 30초 루프를 타면 빨라진 의미가 없다.
+
+    같은 사이클 안에서 `execute_exit` 이 불려야 한다 — 그것이 이 분리의 목적이다.
+    """
+    _open()
+    spy = _Spy(ws={"005930": 9_790})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert spy.exits == [("p1", "stop", 9_800.0)]
+    assert ledger.positions(status="open") == [], "같은 사이클에 원장이 닫혀야 한다"
+
+
+# --------------------------------------------------------------------------
+# 승인 규약 — 데스크를 켜는 것은 주기를 바꾸는 것이지 규칙을 바꾸는 게 아니다
+# --------------------------------------------------------------------------
+async def test_승인_모드에서는_목표_청산을_승인_대기로_올린다(env, monkeypatch):
+    """이게 갈리면 데스크를 켜는 순간 목표 청산이 조용히 자동 발주로 바뀐다."""
+    monkeypatch.setitem(settings.RISK, "auto_approve", False)
+    _open()
+    proposed = []
+    spy = _Spy(ws={"005930": 10_450})          # 목표 도달
+    stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW,
+                           propose_exit=lambda p, r, px: proposed.append((p["id"], r, px)))
+    assert spy.exits == [], "목표는 항상 승인이다"
+    assert proposed == [("p1", "target", 10_400.0)] and stat["proposed"] == 1
+
+
+async def test_승인_모드여도_손절은_stop_mode_를_따른다(env, monkeypatch):
+    """손절은 계좌 보호다 — 30초 루프와 같은 규약."""
+    monkeypatch.setitem(settings.RISK, "auto_approve", False)
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"stop_mode": "auto", "desk": {"enabled": True}})
+    _open()
+    spy = _Spy(ws={"005930": 9_790})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW,
+                    propose_exit=lambda *a: None)
+    assert spy.exits == [("p1", "stop", 9_800.0)]
+
+
+async def test_stop_mode_가_approve_면_손절도_승인_대기다(env, monkeypatch):
+    monkeypatch.setitem(settings.RISK, "auto_approve", False)
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"stop_mode": "approve", "desk": {"enabled": True}})
+    _open()
+    proposed = []
+    spy = _Spy(ws={"005930": 9_790})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW,
+                    propose_exit=lambda p, r, px: proposed.append((p["id"], r, px)))
+    assert spy.exits == [] and proposed == [("p1", "stop", 9_800.0)]
 
 
 # --------------------------------------------------------------------------

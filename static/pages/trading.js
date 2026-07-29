@@ -633,7 +633,7 @@ export default {
     const deskBox = el("div", { class: "small mb-2" });
     posC.body.append(
       el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-shield-check"></i> <b>손절·목표</b>에 닿으면 자동 시장가 청산하고, <b>15:30 이후</b> 남은 물량은 종가로 정리합니다(오버나이트 없음). 감시 주기는 아래 <b>매매 데스크</b> 표시를 따릅니다 — 데스크가 꺼져 있으면 기존 30초 주기입니다.' })),
+        el("span", { html: '<i class="bi bi-shield-check"></i> <b>손절·목표</b>에 닿으면 자동 시장가 청산하고, <b>15:30 이후</b> 남은 물량은 종가로 정리합니다(오버나이트 없음). 감시·발주 주기는 아래 <b>매매 데스크</b> 표시를 따릅니다 — 켜져 있으면 데스크가, 꺼져 있으면 기존 30초 루프가 맡습니다.' })),
       deskBox,
       posBody);
 
@@ -672,7 +672,7 @@ export default {
       role: "switch", id: "deskOn" });
     deskToggle.onchange = async () => {
       const on = deskToggle.checked;
-      if (on && !confirm("매매 데스크를 켭니다.\n\n보유 포지션의 손절·목표를 초 단위로 보고 도달하면 시장가로 청산합니다. 판정 주기만 빨라질 뿐 규칙은 지금과 같습니다.\n\n이상이 보이면 이 스위치로 즉시 끌 수 있습니다.")) {
+      if (on && !confirm("매매 데스크를 켭니다.\n\n보유 종목 전부의 손절·목표를 초 단위로 보고, 닿으면 데스크가 그 자리에서 시장가로 발주합니다. 그동안 30초 루프는 손절·목표를 보지 않습니다(시간 손절·마감 정리는 그대로).\n\n판정과 발주가 빨라질 뿐 승인 규칙은 지금과 같습니다.\n\n이상이 보이면 이 스위치로 즉시 끌 수 있습니다.")) {
         deskToggle.checked = false; return;
       }
       deskToggle.disabled = true;
@@ -694,7 +694,7 @@ export default {
         deskBox.appendChild(el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
           deskSwitch(d),
           el("span", { class: "text-secondary" },
-            `청산 감시는 기존 30초 주기입니다. 켜면 ${d.interval_sec}초 주기로 보유 ${d.max_symbols}종목까지 봅니다.`),
+            `청산 감시·발주를 기존 30초 루프가 맡고 있습니다. 켜면 보유 ${d.max_symbols ? d.max_symbols + "종목까지" : "전 종목을"} ${d.interval_sec}초마다 보고 데스크가 직접 발주합니다.`),
         ]));
         return;
       }
@@ -704,8 +704,9 @@ export default {
         deskSwitch(d),
         el("span", { class: "badge text-bg-" + (d.degraded ? "warning" : "success") },
           d.degraded ? `강등 (WS 미연결 — ${d.degraded_interval_sec}초)` : `${d.interval_sec}초 주기`),
-        el("span", { class: "badge text-bg-light text-dark", title: "보유 감시 대상 / 상한" },
-          `감시 ${d.watched ?? 0}/${d.max_symbols ?? 5}종목`),
+        el("span", { class: "badge text-bg-light text-dark",
+          title: d.max_symbols ? "보유 감시 대상 / 상한" : "보유 전 종목을 봅니다" },
+          `감시 ${d.watched ?? 0}종목` + (d.max_symbols ? ` / 상한 ${d.max_symbols}` : "")),
         el("span", {
           class: "badge text-bg-" + (restPct > 20 ? "warning" : "light") + (restPct > 20 ? "" : " text-dark"),
           title: `WS 값으로 판정한 횟수 대 REST 로 보충한 횟수. REST 가 늘면 추가 호출이 늘고 있다는 뜻입니다(${d.stale_sec}초 넘게 틱이 없는 종목만 보충).` },
@@ -713,7 +714,9 @@ export default {
         d.no_price ? el("span", { class: "badge text-bg-secondary", title: "가격을 모르면 판정하지 않습니다" },
           `가격없음 ${fmt(d.no_price)}`) : null,
         el("span", { class: "text-secondary" },
-          `사이클 ${fmt(d.cycles || 0)} · 청산 ${fmt(d.exits || 0)}건` + (d.last_tick ? ` · ${d.last_tick}` : "")),
+          `사이클 ${fmt(d.cycles || 0)} · 청산 ${fmt(d.exits || 0)}건`
+          + (d.proposed ? ` · 승인대기 ${fmt(d.proposed)}건` : "")
+          + (d.last_tick ? ` · ${d.last_tick}` : "")),
       ]));
       if (d.override && Object.keys(d.override).length) {
         deskBox.appendChild(el("div", { class: "text-secondary mt-1",
