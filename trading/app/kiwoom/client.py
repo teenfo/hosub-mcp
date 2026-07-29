@@ -33,6 +33,7 @@ TR_STOCK_LIST = "ka10099"        # 종목정보 리스트 (요청 필드 실호�
 
 TR_QUOTE = "ka10006"             # 주식시세 — flu_rt(등락률) + cntr_str(체결강도)
 TR_STOCK_BASIC = "ka10001"       # 주식기본정보 — 시총·PER·EPS·52주 고저 등
+TR_WATCH_INFO = "ka10095"        # 관심종목정보 — **여러 종목을 1콜로**. 편입 게이트용
 
 PATH_CHART = "/api/dostk/chart"
 PATH_MARKET = "/api/dostk/mrkcond"
@@ -309,6 +310,17 @@ class KiwoomClient:
         예산에 미치는 영향이 사실상 없다.
         """
         return await self._call(PATH_STOCK_INFO, TR_STOCK_BASIC, {"stk_cd": code})
+
+    async def watch_info(self, codes: list[str]) -> dict:
+        """관심종목정보 (ka10095) — 종목코드를 '|' 로 이어 **한 번에** 조회한다.
+
+        ka10006(주식시세)은 종목당 1콜이라 편입 게이트가 목록을 훑을 때마다
+        종목 수만큼 콜이 든다. 이건 89종목을 1콜로 받는다(실측 2026-07-29).
+        응답 배열 키는 `atn_stk_infr`, 거래대금(trde_prica)·체결강도(cntr_str)·
+        5호가·시총이 한 행에 함께 온다.
+        """
+        return await self._call(PATH_STOCK_INFO, TR_WATCH_INFO,
+                                {"stk_cd": "|".join(codes)})
 
     async def daily_realized(self, start: str, end: str) -> dict:
         """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.

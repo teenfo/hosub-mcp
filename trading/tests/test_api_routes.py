@@ -29,6 +29,12 @@ def client(monkeypatch, tmp_path):
     return TestClient(main.app)
 
 
+def _noop_async():
+    async def _f(*a, **k):
+        return None
+    return _f
+
+
 def _get(client, path):
     return client.get(path, headers={"X-Internal-Token": TOKEN})
 
@@ -335,3 +341,123 @@ def test_stock_basic_is_cached(client, monkeypatch):
     assert _get(client, "/api/stock/005930").json()["cached"] is False
     assert _get(client, "/api/stock/005930").json()["cached"] is True
     assert len(calls) == 1
+
+
+# --- 편입 채널 분리 + 수동 게이트 ---
+
+def _post(client, path, body):
+    return client.post(path, json=body, headers={"X-Internal-Token": TOKEN})
+
+
+@pytest.fixture()
+def no_gate(monkeypatch):
+    """게이트를 통과시키는 기본 응답 — 게이트 자체는 test_admit 이 본다."""
+    from app.kiwoom import client as kw
+
+    async def fake(codes):
+        return {"atn_stk_infr": [{"stk_cd": c, "stk_nm": "테스트종목",
+                                  "cur_prc": "-10000", "trde_prica": "50000"}
+                                 for c in codes]}
+
+    monkeypatch.setattr(kw.client, "watch_info", fake)
+
+
+def test_tnm_promotion_is_tagged_news_not_manual(client, monkeypatch, no_gate):
+    """seed/manual 은 정리 경로가 건드리지 않는다 — 자동 편입이 그 보호를 받으면
+    어떤 경로로도 지워지지 않는다(실측 42종목 영구 잔류)."""
+    from app.data import watchlist
+
+    seen = {}
+    monkeypatch.setattr(watchlist, "add",
+                        lambda c, n, source="manual": seen.update(code=c, source=source))
+    monkeypatch.setattr(watchlist, "notify", _noop_async())
+    r = _post(client, "/api/watchlist", {"code": "005930", "source": "news"})
+    assert r.json()["ok"] is True
+    assert seen == {"code": "005930", "source": "news"}
+
+
+def test_unknown_source_is_rejected(client):
+    """seed 는 config 소유다 — API 로 만들 수 있으면 정리 우회 문이 하나 더 생긴다."""
+    for src in ("seed", "scout", "아무거나"):
+        assert _post(client, "/api/watchlist",
+                     {"code": "005930", "source": src}).status_code == 400
+
+
+def test_manual_add_is_blocked_by_gate_with_reasons(client, monkeypatch):
+    from app.data import watchlist
+    from app.kiwoom import client as kw
+
+    async def thin(codes):
+        return {"atn_stk_infr": [{"stk_cd": "005930", "stk_nm": "삼성전자",
+                                  "cur_prc": "-10000", "trde_prica": "50"}]}
+
+    monkeypatch.setattr(kw.client, "watch_info", thin)
+    added = []
+    monkeypatch.setattr(watchlist, "add", lambda *a, **k: added.append(a))
+    r = _post(client, "/api/watchlist", {"code": "005930"})
+    assert r.status_code == 409
+    d = r.json()
+    assert d["gate"] is True and d["reasons"] and d["metrics"]["trde_prica"] == 50
+    assert added == [], "막혔으면 넣지 않는다"
+
+
+def test_force_overrides_the_gate(client, monkeypatch):
+    from app.data import watchlist
+    from app.kiwoom import client as kw
+
+    async def thin(codes):
+        return {"atn_stk_infr": [{"stk_cd": "005930", "stk_nm": "삼성전자",
+                                  "cur_prc": "-10000", "trde_prica": "50"}]}
+
+    monkeypatch.setattr(kw.client, "watch_info", thin)
+    added = []
+    monkeypatch.setattr(watchlist, "add", lambda c, n, source="manual": added.append(c))
+    monkeypatch.setattr(watchlist, "notify", _noop_async())
+    r = _post(client, "/api/watchlist", {"code": "005930", "force": True})
+    assert r.json()["ok"] is True and r.json()["forced"] is True
+    assert added == ["005930"]
+
+
+def test_unknown_code_cannot_be_forced(client, monkeypatch):
+    """오타를 통과시키면 죽은 코드가 감시목록에 남아 백필이 계속 실패한다."""
+    from app.kiwoom import client as kw
+
+    async def empty(codes):
+        return {"atn_stk_infr": []}
+
+    monkeypatch.setattr(kw.client, "watch_info", empty)
+    assert _post(client, "/api/watchlist",
+                 {"code": "999999", "force": True}).status_code == 404
+
+
+def test_news_source_skips_the_gate(client, monkeypatch):
+    """TNM 은 자기 점수로 이미 걸렀고, 편입 즉시 수집전용으로 내려간다."""
+    from app.data import watchlist
+    from app.kiwoom import client as kw
+
+    called = []
+
+    async def spy(codes):
+        called.append(codes)
+        return {"atn_stk_infr": []}
+
+    monkeypatch.setattr(kw.client, "watch_info", spy)
+    monkeypatch.setattr(watchlist, "add", lambda *a, **k: None)
+    monkeypatch.setattr(watchlist, "notify", _noop_async())
+    assert _post(client, "/api/watchlist",
+                 {"code": "005930", "source": "news"}).json()["ok"] is True
+    assert called == [], "자동 편입은 게이트 조회를 하지 않는다"
+
+
+def test_gate_lookup_failure_does_not_block(client, monkeypatch):
+    """조회 실패로 사람의 편입을 막지 않는다 — 과차단보다 통과(기존 관례)."""
+    from app.data import watchlist
+    from app.kiwoom import client as kw
+
+    async def boom(codes):
+        raise RuntimeError("레이트리밋")
+
+    monkeypatch.setattr(kw.client, "watch_info", boom)
+    monkeypatch.setattr(watchlist, "add", lambda *a, **k: None)
+    monkeypatch.setattr(watchlist, "notify", _noop_async())
+    assert _post(client, "/api/watchlist", {"code": "005930"}).json()["ok"] is True

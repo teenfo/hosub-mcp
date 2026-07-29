@@ -129,8 +129,12 @@ class Promoter:
                     out["already"] += 1
                     continue
                 try:
+                    # source='news' — 사람이 넣은 것이 아니다. manual 로 들어가면
+                    # 정리 경로(replace_*·scout 강등)가 "사용자 의도" 로 보고
+                    # 건드리지 않아 영구 잔류한다(실측: 42종목).
                     r = await client.post(f"{base}/api/watchlist", headers=headers,
-                                          json={"code": ticker, "name": p.get("name") or ticker})
+                                          json={"code": ticker, "source": "news",
+                                                "name": p.get("name") or ticker})
                     r.raise_for_status()
                     # 검증 전 신호이므로 매매에서 제외한다 — 데이터만 쌓는다
                     r = await client.post(f"{base}/api/watchlist/mode", headers=headers,

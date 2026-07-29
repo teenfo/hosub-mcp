@@ -175,7 +175,19 @@ export default {
       add.onclick = async () => {
         add.disabled = true;
         try {
-          await postJSON("/api/trading/watchlist", { code: r.code, name: r.name });
+          try {
+            await postJSON("/api/trading/watchlist", { code: r.code, name: r.name });
+          } catch (err) {
+            const g = err.data;
+            if (!(g && g.gate)) throw err;
+            if (!confirm(`${g.name || g.code} 편입 기준 미달\n\n`
+                       + `${g.reasons.join("\n")}\n\n그래도 추가할까요?`)) {
+              add.disabled = false;
+              return;
+            }
+            await postJSON("/api/trading/watchlist",
+                           { code: r.code, name: r.name, force: true });
+          }
           add.textContent = "추가됨";
           add.classList.replace("btn-outline-primary", "btn-success");
           afterWatchChange();
@@ -406,6 +418,24 @@ export default {
         wQuery.value = "";
         afterWatchChange();
       } catch (e) {
+        // 편입 게이트(409)는 거절이 아니라 확인 절차다 — 무엇이 모자란지
+        // 숫자로 보여주고, 사람이 근거가 있으면 그대로 넣을 수 있어야 한다.
+        const g = e.data;
+        if (g && g.gate) {
+          wMsg.className = "small mt-1";
+          wMsg.innerHTML = `<span class="text-warning">편입 기준 미달</span> `
+            + `<span class="text-secondary">${g.name || g.code} — ${g.reasons.join(" · ")}</span>`;
+          const m = g.metrics || {};
+          wCands.innerHTML = "";
+          wCands.appendChild(el("div", { class: "text-secondary small w-100", html:
+            `현재가 ${fmt(m.price || 0)}원 · 거래대금 ${fmt(m.trde_prica || 0)}백만`
+            + ` · 체결강도 ${m.cntr_str ?? "-"} · 시총 ${fmt(m.mac || 0)}억` }));
+          const go = el("button", { class: "btn btn-sm btn-outline-warning py-0" },
+                        "그래도 추가");
+          go.onclick = () => addByQuery({ code: g.code, name: g.name, force: true });
+          wCands.appendChild(go);
+          return;
+        }
         wMsg.className = "small mt-1 text-danger";
         wMsg.textContent = "추가 실패: " + e.message;
       } finally {

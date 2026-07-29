@@ -1335,17 +1335,68 @@ async def api_watchlist(_=Depends(require_auth)):
 @app.post("/api/watchlist")
 async def api_watchlist_add(payload: dict, _=Depends(require_auth)):
     """종목을 감시목록에 편입. 코드(6자리) 또는 종목명으로 추가 가능.
-    종목명이 여러 종목과 매칭되면 candidates 를 돌려주고 추가하지 않는다."""
-    from .data import symbols
+    종목명이 여러 종목과 매칭되면 candidates 를 돌려주고 추가하지 않는다.
+
+    `source` 를 받는다. 종전에는 'manual' 로 하드코딩돼 있어 **TNM 자동 편입분도
+    manual 로 들어갔다** — 그런데 `replace_*` 와 scout 강등은 "seed/manual 은
+    사용자 의도라 건드리지 않는다" 를 지키므로, 사람이 넣은 적 없는 종목이
+    어떤 정리 경로에도 걸리지 않고 영구 잔류했다(실측: manual 64종목 중 42개가
+    TNM 편입 흔적인 수집전용).
+
+    `seed` 는 config 소유라 API 로 만들 수 없다 — 받아주면 정리 경로를 우회하는
+    문이 하나 더 생긴다.
+    """
+    from .data import admit, symbols
 
     code = str(payload.get("code", "")).strip()
     query = str(payload.get("query", "")).strip() or str(payload.get("name", "")).strip()
+    source = str(payload.get("source", "manual")).strip() or "manual"
+    if source not in ("manual", "news"):
+        return JSONResponse({"ok": False, "error": "source 는 manual|news"}, 400)
+    force = bool(payload.get("force"))
+
+    async def _gate(c: str, n: str) -> dict | None:
+        """편입 게이트. 통과하면 None, 막히면 응답 dict.
+
+        자동 편입(news)은 이 문을 지나지 않는다 — TNM 은 자기 점수 기준으로
+        이미 걸렀고, 편입 즉시 수집전용으로 내려 매매에 닿지 않는다.
+        """
+        if source != "manual":
+            return None
+        from .kiwoom.client import client
+
+        try:
+            row = admit.row_of(await client.watch_info([c]), c)
+        except Exception as e:  # noqa: BLE001 — 조회 실패로 편입을 막지 않는다
+            log.warning("편입 게이트 조회 실패 %s: %s", c, e)
+            return None
+        verdict = admit.evaluate(row, c)
+        if verdict["ok"]:
+            return None
+        # 종목이 실재하지 않는 것은 force 로도 넘길 수 없다 — 오타를 통과시키면
+        # 감시목록에 죽은 코드가 남고 백필·구독이 계속 실패한다.
+        if verdict.get("fatal"):
+            return JSONResponse({"ok": False, "error": verdict["reasons"][0]}, 404)
+        if not force:
+            return JSONResponse({"ok": False, "gate": True, "code": c,
+                                 "name": verdict["metrics"].get("name") or n,
+                                 "reasons": verdict["reasons"],
+                                 "metrics": verdict["metrics"],
+                                 "error": " · ".join(verdict["reasons"])}, 409)
+        log.warning("편입 게이트 무시하고 추가: %s(%s) — %s",
+                    n, c, " · ".join(verdict["reasons"]))
+        return None
 
     async def _add(c: str, n: str):
-        watchlist.add(c, n or symbols.name_of(c) or c, source="manual")
+        blocked = await _gate(c, n)
+        if blocked is not None:
+            return blocked
+        watchlist.add(c, n or symbols.name_of(c) or c, source=source)
         await watchlist.notify()
-        log.info("감시목록 편입: %s(%s) — 총 %d 종목", n, c, len(settings.WATCHLIST))
-        return {"ok": True, "added": {"code": c, "name": n}, "watchlist": settings.WATCHLIST}
+        log.info("감시목록 편입[%s]: %s(%s) — 총 %d 종목",
+                 source, n, c, len(settings.WATCHLIST))
+        return {"ok": True, "source": source, "forced": force,
+                "added": {"code": c, "name": n}, "watchlist": settings.WATCHLIST}
 
     # 6자리 코드 직접 추가
     if code.isdigit() and len(code) == 6:
