@@ -963,15 +963,58 @@ async def api_performance(_=Depends(require_auth)):
 
 @app.post("/api/positions/{pos_id}/close")
 async def api_position_close(pos_id: str, _=Depends(require_auth)):
-    """추적 중인 포지션을 현재가로 청산 처리(장부상 — 실제 청산 주문은 별도)."""
-    from .trade import ledger
+    """**실제 매도를 발주**하고 체결 접수된 경우에만 원장을 닫는다.
+
+    2026-07-29 까지 이 경로는 주문을 내지 않고 원장만 닫았다(`close_position` 직접
+    호출). 화면 버튼은 '청산' 이라고 보이는데 계좌에는 종목이 그대로 남아, 원장과
+    계좌가 어긋난 **고아 종목**이 생겼다. 그날 고아가 만들어진 원인 중 하나다.
+
+    사람이 화면에서 명시적으로 누른 것이 이미 승인이므로 즉시 시장가로 나간다.
+    발주가 실패하면 `execute_exit` 가 원장을 닫지 않는다 — 그것이 이 수정의 핵심이다.
+    계좌와 어긋난 항목을 장부에서만 정리하려면 `/void` 를 쓴다.
+    """
+    from .trade import ledger, orders
 
     pos = next((p for p in ledger.positions(status="open", limit=200)
                 if p["id"] == pos_id), None)
     if not pos:
         return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
     px = _price_of(pos["symbol"]) or pos["entry"]
-    return {"ok": ledger.close_position(pos_id, float(px), "manual")}
+    return await orders.execute_exit(pos, "manual", float(px))
+
+
+@app.post("/api/positions/{pos_id}/void")
+async def api_position_void(pos_id: str, payload: dict | None = Body(None),
+                            _=Depends(require_auth)):
+    """계좌와 어긋난 원장 항목을 무효 처리한다(**주문 없음**).
+
+    청산이 아니다 — 계좌에 실재하지 않는데 원장에만 남은 고아를 지우는 경로다.
+    `void` 는 실현손익·가드·일지·성과 집계에서 빠지고 감사 흔적은 남는다.
+
+    계좌에 **실재하는** 종목을 무효 처리하면 청산 감시가 사라지므로, 보유 수량이
+    0이 아니면 `confirm: true` 없이는 거절한다. 계좌 조회에 실패하면 수량을 모르는
+    것이므로 마찬가지로 거절한다 — 모르는 상태에서 지우지 않는다.
+    """
+    from .trade import ledger
+
+    pos = next((p for p in ledger.positions(status="open", limit=200)
+                if p["id"] == pos_id), None)
+    if not pos:
+        return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
+    holdings = await _holdings_map()
+    held = None if holdings is None else int(holdings.get(pos["symbol"], 0) or 0)
+    confirm = bool((payload or {}).get("confirm"))
+    if not confirm and held != 0:
+        return {"ok": False, "need_confirm": True, "held_qty": held,
+                "ledger_qty": pos.get("qty"),
+                "error": ("계좌 보유 수량을 확인할 수 없습니다"
+                          if held is None else
+                          f"계좌에 {held}주가 실재합니다 — 무효 처리하면 청산 감시가 사라집니다")}
+    ok = await asyncio.to_thread(ledger.void_position, pos_id, "수동 제외")
+    if ok:
+        log.warning("포지션 수동 무효 처리: %s(%s) 원장 %s주 · 계좌 %s주",
+                    pos.get("name"), pos.get("symbol"), pos.get("qty"), held)
+    return {"ok": ok, "held_qty": held, "ledger_qty": pos.get("qty")}
 
 
 @app.get("/api/scanner")

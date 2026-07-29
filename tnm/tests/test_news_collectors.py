@@ -72,7 +72,12 @@ def test_rss_body_fallback_to_description(monkeypatch):
         return None                       # trafilatura 실패 시뮬레이션
 
     monkeypatch.setattr(rss_mod, "fetch_article_body", broken_fetch)
-    docs, cursor = asyncio.run(col.fetch({"name": "효성중공업"}, None))
+    # 커서를 명시한다. None 이면 `initial_days`(기본 7일) 창이 **현재 시각 기준**으로
+    # 잡혀, 고정 날짜 픽스처가 시간이 지나면 창 밖으로 밀려난다 —
+    # 실제로 2026-07-29 10:00 KST 를 지나며 두 번째 기사가 빠져 이 테스트가 깨졌다.
+    # 폴백 동작을 보는 테스트이지 창 계산을 보는 테스트가 아니므로 창을 고정한다.
+    docs, cursor = asyncio.run(
+        col.fetch({"name": "효성중공업"}, "2026-07-21T00:00:00+00:00"))
     assert len(docs) == 2
     assert docs[0].body == "효성중공업 수주 소식"             # 폴백 본문
     assert docs[0].url == "https://news.example.com/a1"     # 원문 링크 보존 (P5)
