@@ -139,6 +139,9 @@ def stale_sec() -> float:
     return _num("stale_sec")
 
 
+FAST = ("stop", "target")     # 데스크가 다루는 사유. 시각 기준(timeout)은 제외
+
+
 def owns(reason: str) -> bool:
     """이 청산 사유를 데스크가 소유하는가 — 30초 루프는 소유하지 않은 것만 낸다.
 
@@ -148,8 +151,39 @@ def owns(reason: str) -> bool:
 
     시간 손절(`timeout`)은 넘기지 않는다 — 시각 기준이라 2초 해상도가 필요 없고,
     보유시간 규칙은 데스크가 들고 있지 않다.
+
+    **상한이 걸려 보유를 다 못 보면 소유권을 가져가지 않는다.** `max_symbols` 를
+    두면 초과분은 데스크가 건너뛰는데, 그때도 소유권을 주장하면 그 종목은 데스크도
+    30초 루프도 보지 않는 상태가 된다 — 손절이 아무도 없는 채로 남는다.
+    상한이 걸린 동안에는 판정이 겹치지만, 겹치는 것보다 비는 것이 훨씬 위험하다.
     """
-    return enabled() and reason in ("stop", "target")
+    if not (enabled() and reason in FAST):
+        return False
+    limit = int(_num("max_symbols"))
+    if limit <= 0:
+        return True                       # 보유 전량을 본다 — 온전한 소유권
+    return len(ledger.positions(status="open", limit=200)) <= limit
+
+
+def exit_route(reason: str) -> str:
+    """30초 루프가 이 청산 사유를 어떻게 처리해야 하는가. 정책을 한 곳에 둔다.
+
+    - `skip`    : 데스크가 소유한다. 손대지 않는다
+    - `approve` : **자동 발주하지 않고 승인 대기로 올린다** (데스크 꺼짐 + 손절·목표)
+    - `auto`    : 기존 규약(`stop_mode`/`auto_approve`)을 따른다
+
+    `approve` 는 사용자 결정이다(2026-07-29). 30초 판정으로 시장가를 던지면 판정
+    시점 가격과 벌어지는 것을 감수하는 셈인데, 그 트레이드오프를 사람이 보고
+    정하겠다는 뜻이다. 데스크를 켜는 것이 곧 '그 판단을 자동에 맡긴다' 가 된다.
+
+    상한 초과로 데스크가 못 보는 종목은 `auto` 로 남는다 — 그건 되돌리기가 아니라
+    **감시 구멍**이고, 구멍에서는 보수적인 쪽이 자동 청산이다.
+    """
+    if owns(reason):
+        return "skip"
+    if not enabled() and reason in FAST:
+        return "approve"
+    return "auto"
 
 
 def in_session(now: datetime | None = None) -> bool:

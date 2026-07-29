@@ -39,6 +39,21 @@ def test_propose_exit_sets_pending_and_hides_from_due(tmp_path, monkeypatch):
     assert ledger.due_exits(lambda s: 10_500) == []
 
 
+def test_승인_문구가_청산_사유를_구분한다(tmp_path, monkeypatch):
+    """승인 화면은 사람이 급할 때 보는 목록이다.
+
+    문구가 사유와 무관하게 '목표 도달' 로 고정돼 있어서, **손절 승인이 이익
+    실현처럼 읽혔다.** 데스크를 끄면 손절도 이 경로로 올라오므로 더 중요해졌다.
+    """
+    _fresh(tmp_path, monkeypatch)
+    ledger.open_position(_order("p9"), fill=10_000)
+    ex = ledger.due_exits(lambda s: 9_700)[0]
+    assert ex["reason"] == "stop"
+    orders.propose_exit(ex, "stop", ex["exit_px"])
+    o = [x for x in orders.list_orders(status="pending") if x["kind"] == "exit"][0]
+    assert "손절" in o["reason"] and "목표" not in o["reason"]
+
+
 @pytest.mark.asyncio
 async def test_execute_exit_closes_position(tmp_path, monkeypatch):
     _fresh(tmp_path, monkeypatch)

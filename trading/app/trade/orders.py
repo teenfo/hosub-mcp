@@ -101,17 +101,30 @@ def propose(sig: Signal, qty: int) -> str:
     return order_id
 
 
+# 승인 화면은 사람이 급할 때 보는 목록이다. 사유를 문구로 구분하지 않으면
+# **손절이 '목표 도달'로 읽힌다** — 손실 확정을 이익 실현으로 착각하게 된다.
+_EXIT_LABEL = {
+    "stop": "🛑 손절선 도달 — 청산(매도) 승인",
+    "target": "🎯 목표 도달 — 청산(매도) 승인",
+    "timeout": "⏱ 보유시간 초과 — 청산(매도) 승인",
+    "eod": "🔔 장 마감 정리 — 청산(매도) 승인",
+}
+
+
 def propose_exit(pos: dict, reason: str, exit_px: float) -> str:
-    """포지션 청산을 '승인 대기 주문'으로 등록(매도). 목표 도달 청산(승인제)에 사용.
-    당일 만료로 두어 미승인 시 사라지되, exit_pending 을 세워 중복 제안을 막는다."""
+    """포지션 청산을 '승인 대기 주문'으로 등록(매도).
+
+    당일 만료로 두어 미승인 시 사라지되, exit_pending 을 세워 중복 제안을 막는다.
+    """
     order_id = uuid.uuid4().hex[:12]
     now = datetime.now(UTC)
     exec_symbol = pos.get("exec_symbol") or pos["symbol"]
+    label = _EXIT_LABEL.get(reason, f"청산({reason}) 승인")
     with _conn() as conn:
         conn.execute(
             f"INSERT INTO orders ({_ENTRY_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (order_id, now.isoformat(), (now + timedelta(hours=8)).isoformat(),
-             pos["symbol"], pos["side"], pos["rule"], "🎯 목표 도달 — 청산(매도) 승인",
+             pos["symbol"], pos["side"], pos["rule"], label,
              pos["entry"], pos["stop"], pos["target"], pos["qty"],
              exec_symbol, "sell", pos["qty"], "pending", None,
              "exit", pos["id"], float(exit_px)),

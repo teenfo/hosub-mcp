@@ -116,8 +116,21 @@ async def _ledger_loop() -> None:
                     # 이중 발주는 exit_pending 이 막지만, 어느 루프가 냈는지가
                     # 흐려지고 데스크를 껐을 때와 켰을 때의 동작이 뒤섞인다.
                     # 시간 손절은 남긴다: 시각 기준이라 2초 해상도가 필요 없다.
+                    #
+                    # 데스크가 **꺼져 있으면** 손절·목표를 자동 발주하지 않고 승인
+                    # 대기로 올린다(사용자 결정 2026-07-29). 30초 판정으로 시장가를
+                    # 던지면 판정 시점 가격과 벌어지는 것을 감수하는 셈인데, 그
+                    # 트레이드오프를 사람이 보고 정하겠다는 뜻이다. 도달 사실은
+                    # 화면에 남으므로 놓치지는 않는다.
                     for ex in await asyncio.to_thread(ledger.due_exits, _price_of):
-                        if desk.owns(ex["reason"]):
+                        route = desk.exit_route(ex["reason"])
+                        if route == "skip":
+                            continue
+                        if route == "approve":
+                            await asyncio.to_thread(orders.propose_exit, ex,
+                                                    ex["reason"], ex["exit_px"])
+                            log.info("청산 승인 대기 %s (%s) — 데스크 꺼짐",
+                                     ex["symbol"], ex["reason"])
                             continue
                         # 완전 자동 모드면 목표 도달 청산도 승인 없이 즉시 실행
                         # 시간 손절은 손절과 같은 성격(계좌 보호) — 같은 모드를 따른다

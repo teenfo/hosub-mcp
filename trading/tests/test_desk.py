@@ -165,10 +165,41 @@ def test_켜지면_손절_목표는_30초_루프에서_빠진다(env):
     assert desk.owns("eod") is False
 
 
-def test_꺼지면_전부_30초_루프가_맡는다(env):
-    """되돌리기의 실체 — 끄는 순간 감시가 비지 않아야 한다."""
+def test_꺼지면_손절_목표는_승인_대기로_올라간다(env):
+    """사용자 결정(2026-07-29) — 자동 발주 대신 사람이 보고 정한다.
+
+    되돌리기의 실체이기도 하다: 끄는 순간 **감시가 비지는 않는다.** 도달 사실이
+    승인 대기로 올라오므로 놓치지 않고, 발주 여부만 사람 손으로 넘어간다.
+    """
     desk.set_state(enabled=False)
-    assert [desk.owns(r) for r in ("stop", "target", "timeout")] == [False] * 3
+    assert desk.exit_route("stop") == "approve"
+    assert desk.exit_route("target") == "approve"
+    assert desk.exit_route("timeout") == "auto", "시간 손절은 기존 규약 그대로다"
+    assert desk.exit_route("eod") == "auto"
+
+
+def test_켜지면_손절_목표는_데스크_몫이다(env):
+    assert desk.exit_route("stop") == "skip"
+    assert desk.exit_route("target") == "skip"
+    assert desk.exit_route("timeout") == "auto"
+
+
+def test_상한_때문에_못_보는_동안에는_소유권을_가져가지_않는다(env, monkeypatch):
+    """겹치는 것보다 **비는 것**이 훨씬 위험하다.
+
+    상한이 걸리면 초과분은 데스크가 건너뛴다. 그때도 소유권을 주장하면 그 종목은
+    데스크도 30초 루프도 보지 않는다 — 손절이 아무도 없는 채로 남는다.
+    """
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"desk": {"enabled": True, "max_symbols": 2}})
+    _open("p1", "005930")
+    _open("p2", "000660")
+    assert desk.owns("stop") is True, "상한 안이면 데스크가 다 본다"
+
+    _open("p3", "035720")                  # 상한 초과
+    assert desk.owns("stop") is False, "못 보는 동안에는 30초 루프가 받아야 한다"
+    assert desk.exit_route("stop") == "auto", \
+        "구멍에서는 보수적인 쪽이 자동 청산이다 — 승인 대기로 미루면 손절이 늦는다"
 
 
 async def test_데스크가_직접_발주한다(env):
