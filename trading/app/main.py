@@ -2,6 +2,7 @@
 import asyncio
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
@@ -508,6 +509,44 @@ async def api_signals(_=Depends(require_auth)):
 async def api_prices(_=Depends(require_auth)):
     """감시목록 종목의 현재가 맵 — 프론트가 가격 셀만 2초 주기로 부분 갱신."""
     return {"prices": {code: _price_of(code) for code in settings.WATCHLIST}}
+
+
+# 종목 기본정보 캐시. 사람이 목록에서 종목을 연달아 누르면 같은 종목을 몇 번씩
+# 부르게 되는데, 기본정보는 분 단위로 바뀌는 값이 아니다(현재가만 움직인다).
+# 현재가는 WS 스냅샷에서 따로 얹으므로 캐시가 낡아도 가격은 신선하다.
+_BASIC_TTL_SEC = 300.0
+_basic_cache: dict[str, tuple[float, dict]] = {}
+
+
+@app.get("/api/stock/{code}")
+async def api_stock_basic(code: str, _=Depends(require_auth)):
+    """종목 기본정보 (키움 ka10001) — 화면에서 종목을 눌렀을 때 띄우는 모달용.
+
+    원본 payload 를 그대로 실어 보낸다. 키움 응답 필드는 문서와 어긋나는 경우가
+    있어(실호출로 확인한 것만 화면이 골라 쓴다) 화면이 모르는 필드를 서버가
+    미리 잘라내면 나중에 무엇이 있었는지 알 수 없다.
+    """
+    if not (code.isdigit() and len(code) == 6):
+        return JSONResponse({"ok": False, "error": "6자리 종목코드가 필요합니다"}, 400)
+    from .kiwoom.client import client
+
+    now = time.monotonic()
+    hit = _basic_cache.get(code)
+    if hit and now - hit[0] < _BASIC_TTL_SEC:
+        data, cached = hit[1], True
+    else:
+        try:
+            data = await client.stock_basic(code)
+        except Exception as e:  # noqa: BLE001 — 조회 실패가 화면을 깨지 않는다
+            log.warning("종목 기본정보 조회 실패 %s: %s", code, e)
+            return JSONResponse({"ok": False, "code": code, "error": str(e)}, 502)
+        _basic_cache[code] = (now, data)
+        cached = False
+    holdings = await _holdings_map()
+    return {"ok": True, "code": code, "cached": cached,
+            "price": _price_of(code),
+            "held": None if holdings is None else int(holdings.get(code, 0) or 0),
+            "basic": data}
 
 
 @app.get("/api/rules")

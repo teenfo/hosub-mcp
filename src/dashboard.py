@@ -69,7 +69,7 @@ _TRADING_GET_RE = re.compile(
     r"^(status|signals|orders|settings|account|account/realized"
     r"|scanner|discovery|watchlist"
     r"|prices|rules|performance|risk|journal|journal/history"
-    r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}"
+    r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}|stock/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
     r"|research/(event-study|ranking|news-impact|trailing|trailing/real)|scout|regime/history)$"
 )
