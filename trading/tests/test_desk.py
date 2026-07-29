@@ -689,3 +689,47 @@ def test_한_번도_못_받은_종목은_None():
     agg = BarAggregator()
     assert agg.age_sec("005930") is None
     assert agg.fresh_price("005930", 5) is None
+
+
+# --------------------------------------------------------------------------
+# 로그 — 전환과 활성화를 같은 날 하면 원인이 겹친다. 그때 로그가 갈라야 한다
+# --------------------------------------------------------------------------
+async def test_요약_로그는_1분에_한_줄만_남긴다(env, caplog):
+    """2초 루프에서 매 사이클 찍으면 로그가 무의미해진다."""
+    desk._LAST_SUMMARY.update(at=None, ws=0, rest=0)
+    _open("p1", "005930")
+    spy = _Spy(ws={"005930": 10_100})
+    with caplog.at_level("INFO", logger="app.trade.desk"):
+        await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)          # 기준점
+        await desk.tick(spy.fresh, spy.rest, spy.execute,
+                        now=NOW + timedelta(seconds=30))                    # 아직
+        assert not [r for r in caplog.records if "데스크 요약" in r.message]
+        await desk.tick(spy.fresh, spy.rest, spy.execute,
+                        now=NOW + timedelta(seconds=90))                    # 넘김
+    lines = [r for r in caplog.records if "데스크 요약" in r.message]
+    assert len(lines) == 1
+
+
+async def test_REST_비율이_높으면_경고로_올린다(env, caplog):
+    """WS 대비 REST 가 늘면 추가 호출이 늘고 있다는 뜻이다 — INFO 로는 묻힌다."""
+    desk._LAST_SUMMARY.update(at=None, ws=0, rest=0)
+    _open("p1", "005930")
+    spy = _Spy(rest={"005930": 10_100})          # WS 없음 → 전부 REST
+    with caplog.at_level("INFO", logger="app.trade.desk"):
+        await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+        await desk.tick(spy.fresh, spy.rest, spy.execute,
+                        now=NOW + timedelta(seconds=90))
+    warn = [r for r in caplog.records
+            if "데스크 요약" in r.message and r.levelname == "WARNING"]
+    assert warn, "REST 비율 20% 초과면 경고여야 한다"
+
+
+async def test_아무_일도_없으면_요약을_남기지_않는다(env, caplog):
+    """보유가 0이면 찍을 것이 없다 — 장중 내내 빈 줄이 쌓이면 안 된다."""
+    desk._LAST_SUMMARY.update(at=None, ws=0, rest=0)
+    spy = _Spy()
+    with caplog.at_level("INFO", logger="app.trade.desk"):
+        await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+        await desk.tick(spy.fresh, spy.rest, spy.execute,
+                        now=NOW + timedelta(seconds=90))
+    assert not [r for r in caplog.records if "데스크 요약" in r.message]

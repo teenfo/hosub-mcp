@@ -422,7 +422,35 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
         STATE[k] += stat[k]
     STATE["watched"] = stat["watched"]
     STATE["last_tick"] = now.strftime("%H:%M:%S")
+    _summarize(now)
     return stat
+
+
+# 주기 요약 — 2초 루프라 매 사이클 찍으면 로그가 무의미해진다. 1분에 한 줄.
+_LAST_SUMMARY: dict = {"at": None, "ws": 0, "rest": 0}
+SUMMARY_SEC = 60.0
+
+
+def _summarize(now: datetime) -> None:
+    """"WS 로 몇 건, REST 로 몇 건" 을 로그에도 남긴다.
+
+    화면에는 누적값이 보이지만, **무엇이 언제 나빠졌는지**는 시계열이라야 읽힌다.
+    발굴 엔진 전환과 데스크 활성화를 같은 날 하면 원인이 겹치는데(사용자 결정
+    2026-07-29), 그때 둘을 가르는 것은 이 줄과 WS 재구독 로그의 시각이다.
+    """
+    prev = _LAST_SUMMARY["at"]
+    if prev is not None and (now - prev).total_seconds() < SUMMARY_SEC:
+        return
+    _LAST_SUMMARY["at"] = now
+    d_ws = STATE["ws"] - _LAST_SUMMARY["ws"]
+    d_rest = STATE["rest"] - _LAST_SUMMARY["rest"]
+    _LAST_SUMMARY.update(ws=STATE["ws"], rest=STATE["rest"])
+    if prev is None or (d_ws + d_rest) == 0:
+        return
+    pct = d_rest / (d_ws + d_rest) * 100
+    fn = log.warning if pct > 20 else log.info
+    fn("데스크 요약(최근 %.0f초): 감시 %d종목 · WS %d · REST %d (%.0f%%) · 청산 %d",
+       SUMMARY_SEC, STATE["watched"], d_ws, d_rest, pct, STATE["exits"])
 
 
 # --------------------------------------------------------------------------
