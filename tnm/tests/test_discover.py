@@ -95,22 +95,22 @@ def test_allowlist_centres_on_measured_categories():
 
 def test_candidates_from_unmatched_only():
     pairs = [_pair(corp="AAA", ticker="000001"), _pair(corp="BBB", ticker="000002")]
-    got = discover.candidates(pairs, known={"AAA"}, watched_tickers=set())
+    got = discover.candidates(pairs, known={"AAA"}, blocked_tickers=set())
     assert [c["ticker"] for c in got] == ["000002"]
 
 
 def test_unlisted_companies_are_skipped():
     """비상장사는 stock_code 가 비어 있다 — 매매 대상이 아니다."""
-    got = discover.candidates([_pair(ticker="")], known=set(), watched_tickers=set())
+    got = discover.candidates([_pair(ticker="")], known=set(), blocked_tickers=set())
     assert got == []
-    got = discover.candidates([_pair(ticker="12345")], known=set(), watched_tickers=set())
+    got = discover.candidates([_pair(ticker="12345")], known=set(), blocked_tickers=set())
     assert got == []       # 6자리가 아니면 종목코드가 아니다
 
 
-def test_already_watched_tickers_are_skipped():
-    """corp_code 가 아직 안 채워진 종목이 중복 등록되는 것을 막는다."""
+def test_excluded_tickers_are_skipped():
+    """사용자가 제외한 종목은 후보가 되지 않는다."""
     got = discover.candidates([_pair(ticker="005930")], known=set(),
-                              watched_tickers={"005930"})
+                              blocked_tickers={"005930"})
     assert got == []
 
 
@@ -118,13 +118,13 @@ def test_one_entry_per_ticker_per_cycle():
     """같은 종목이 하루에 공시를 여러 개 내도 후보는 하나다."""
     pairs = [_pair(ticker="000001", report="단일판매ㆍ공급계약체결"),
              _pair(ticker="000001", report="유상증자결정")]
-    got = discover.candidates(pairs, known=set(), watched_tickers=set())
+    got = discover.candidates(pairs, known=set(), blocked_tickers=set())
     assert len(got) == 1 and got[0]["reason"] == "공급계약"   # 첫 통과 사유
 
 
 def test_candidate_carries_the_evidence():
     """'왜 이 종목이 들어왔나' 를 나중에 물을 수 있어야 한다."""
-    got = discover.candidates([_pair()], known=set(), watched_tickers=set())[0]
+    got = discover.candidates([_pair()], known=set(), blocked_tickers=set())[0]
     assert got["ticker"] == "005930" and got["name"] == "삼성전자"
     assert got["corp_code"] == "AAA" and got["reason"] == "공급계약"
     assert got["report_nm"] and got["rcept_no"]
@@ -132,7 +132,7 @@ def test_candidate_carries_the_evidence():
 
 def test_non_material_reports_produce_no_candidate():
     got = discover.candidates([_pair(report="분기보고서")], known=set(),
-                              watched_tickers=set())
+                              blocked_tickers=set())
     assert got == []
 
 
@@ -143,22 +143,35 @@ def test_empty_input_is_safe():
 # --- ③ 상한 — 등록할수록 RSS 폴링이 늘어난다 ---
 
 class _FakeDB:
-    def __init__(self, dart_count=0, known=()):
+    def __init__(self, dart_count=0, known=(), excluded=()):
         self.dart_count = dart_count
         self._known = set(known)
+        self._excluded = set(excluded)
         self.added: list[dict] = []
+        self.revived: list[str] = []
         self.tier = None
+        self.revive_origin = None
 
     async def known_tickers(self):
-        return self._known
+        return self._known | self._excluded
+
+    async def excluded_tickers(self):
+        return self._excluded
 
     async def count_origin(self, origin):
         return self.dart_count
 
-    async def add_discovered(self, rows, tier="other"):
+    async def add_discovered(self, rows, tier="other", origin="dart"):
         self.added.extend(rows)
         self.tier = tier
         return len(rows)
+
+    async def revive_for_source(self, tickers, tier, origin):
+        live = [t for t in tickers if t not in self._excluded]
+        self.revived.extend(live)
+        self.tier = tier
+        self.revive_origin = origin
+        return len(live)
 
 
 def _collector(monkeypatch, fake, **over):
@@ -213,8 +226,35 @@ def test_disabled_switch_stops_everything(monkeypatch):
     assert out == {} and fake.added == []
 
 
-def test_known_tickers_are_excluded_by_the_collector(monkeypatch):
+def test_excluded_tickers_are_never_touched_by_the_collector(monkeypatch):
     """사용자가 제외한 종목을 발굴이 되살리면 사용자 의도를 덮는 것이다."""
+    fake = _FakeDB(excluded={"000001"})
+    out = _collector(monkeypatch, fake)([_pair(ticker="000001")])
+    assert out["candidates"] == 0
+    assert fake.added == [] and fake.revived == []
+
+
+def test_inactive_ticker_is_revived_not_reregistered(monkeypatch):
+    """비활성은 사용자 결정이 아니다 — 관심 공시가 다시 나오면 되살린다.
+
+    종전에는 등록된 적 있는 ticker 전부를 후보에서 뺐다. 그래서 한 번
+    감시목록을 스쳐간 종목은 공급계약·실적 공시를 아무리 내도 다시는
+    들어오지 못했다.
+    """
     fake = _FakeDB(known={"000001"})
     out = _collector(monkeypatch, fake)([_pair(ticker="000001")])
-    assert out["candidates"] == 0 and fake.added == []
+    assert out["candidates"] == 1
+    assert fake.revived == ["000001"]
+    assert fake.added == [], "신규 등록이 아니라 되살리기다"
+    assert out["revived"] == 1 and out["discovered"] == 0
+    # origin 을 넘기지 않으면 watchsync 가 30분마다 다시 내려 핑퐁이 된다
+    assert fake.revive_origin == "dart" and fake.tier == "other"
+
+
+def test_revive_and_new_share_one_budget(monkeypatch):
+    """되살리기도 폴링 부하가 같다 — 같은 상한을 쓰고, 아는 종목이 먼저다."""
+    fake = _FakeDB(known={"000002"})
+    run = _collector(monkeypatch, fake, max_per_cycle=1)
+    out = run([_pair(ticker="000001"), _pair(ticker="000002")])
+    assert fake.revived == ["000002"] and fake.added == []
+    assert out["revived"] == 1 and out["discovered"] == 0

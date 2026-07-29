@@ -113,13 +113,21 @@ def classify_report(report_nm: str) -> str | None:
 
 
 def candidates(pairs: list[tuple], known: set[str],
-               watched_tickers: set[str]) -> list[dict]:
+               blocked_tickers: set[str]) -> list[dict]:
     """매칭 안 된 공시 → 신규 종목 후보.
 
     pairs: `[(corp_code, RawDoc, meta)]` — collect 가 넘긴 전종목 공시
     known: 이미 감시 중인 corp_code (매칭된 것은 후보가 아니다)
-    watched_tickers: 이미 관심종목인 ticker — corp_code 가 아직 안 채워진
-        종목이 중복 등록되는 것을 막는다
+    blocked_tickers: **사용자가 제외한** ticker — 어떤 소스도 되살리면 안 된다
+
+    종전에는 여기에 `known_tickers()`(등록된 적 있는 전부)를 넣었다. 그러면
+    비활성 종목이 후보에서 영구히 빠진다 — 비활성은 매매 감시목록에서 빠질 때
+    watchsync 가 **자동으로** 내린 것이지 사용자의 결정이 아니다. 제외만 막고,
+    비활성은 근거가 생기면 호출자가 되살린다.
+
+    이미 활성인 종목은 `known`(corp_code) 에서 걸러진다. corp_code 가 아직
+    안 채워진 종목은 여기서 안 걸리지만, 등록이 `on conflict do nothing` 이라
+    중복이 생기지 않는다.
 
     같은 종목이 한 사이클에 여러 공시를 내면 **첫 통과 사유 하나만** 남긴다.
     """
@@ -129,7 +137,7 @@ def candidates(pairs: list[tuple], known: set[str],
             continue
         ticker = str(meta.get("stock_code") or "").strip()
         # 비상장사는 stock_code 가 비어 있다 — 매매 대상이 아니다
-        if not re.fullmatch(r"\d{6}", ticker) or ticker in watched_tickers:
+        if not re.fullmatch(r"\d{6}", ticker) or ticker in blocked_tickers:
             continue
         if ticker in out:
             continue
