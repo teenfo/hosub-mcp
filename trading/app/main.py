@@ -806,6 +806,59 @@ async def api_event_study_run(_=Depends(require_auth)):
         _study_running["on"] = False
 
 
+@app.get("/api/research/trailing")
+async def api_trailing(_=Depends(require_auth)):
+    """라인 추종 스윕 최신 결과(조회성 — 주문 없음)."""
+    import json as _json
+
+    p = Path(settings.DATA_DIR) / "trailing.json"
+    running = _trail_running["on"]
+    if not p.exists():
+        return {"ok": False, "running": running,
+                "error": "실행 중입니다" if running else "아직 실행된 적이 없습니다"}
+    try:
+        got = await asyncio.to_thread(
+            lambda: _json.loads(p.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as e:
+        return {"ok": False, "running": running, "error": str(e)}
+    return {"ok": True, "running": running,
+            "updated_at": datetime.fromtimestamp(
+                p.stat().st_mtime, tz=KST).isoformat(timespec="seconds")} | got
+
+
+_trail_running = {"on": False}
+
+
+@app.post("/api/research/trailing/run")
+async def api_trailing_run(_=Depends(require_auth)):
+    """라인 추종 스윕 실행. **즉시 돌아오고 결과는 파일로 남는다.**
+
+    전 종목 × 변종 9종이라 수십 분 걸린다. 다른 research 잡처럼 결과를 기다리면
+    호출자가 그동안 묶인다 — 2026-07-29 에 MCP 셸로 돌렸다가 실행 슬롯이 막혀
+    장중 운영 명령이 통째로 멈췄다(`echo` 조차 타임아웃). 중단 명령도 같은
+    슬롯에 걸려 못 들어갔다.
+
+    그래서 여기서는 자식 프로세스를 띄우고 바로 응답한다. 진행 여부는
+    `GET /api/research/trailing` 의 `running` 으로, 결과는 같은 응답으로 본다.
+    """
+    from .backtest import offload
+
+    if _trail_running["on"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+
+    async def _go():
+        _trail_running["on"] = True
+        try:
+            got = await offload.run_job("trailing")
+            log.info("라인 추종 스윕 완료: %s", str(got)[:200])
+        finally:
+            _trail_running["on"] = False
+
+    asyncio.create_task(_go())
+    return {"ok": True, "started": True,
+            "hint": "GET /api/research/trailing 으로 진행·결과를 봅니다"}
+
+
 @app.get("/api/research/ranking")
 async def api_ranking(_=Depends(require_auth)):
     """랭킹 방식 비교 최신 결과(조회성 — 주문 없음)."""
