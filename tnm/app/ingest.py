@@ -56,10 +56,14 @@ async def attach_docs(items: list[dict], source: str, *, origin: str,
 
     반환 카운트에서 `deferred` 는 **버린 것이 아니라 미룬 것**이다 — 상한이나
     사용자 제외 때문에 지금은 종목이 없어서 적재하지 못한 문서 수이고,
-    호출자가 다음 사이클에 다시 넣어야 한다.
+    호출자가 다음 사이클에 다시 넣어야 한다. 어느 문서가 미뤄졌는지는
+    `deferred_keys` 로 돌려준다(item 의 `key` 값). 호출자가 재시도 횟수를
+    셀 때 **미뤄진 것은 시도로 세면 안 된다** — 상한 때문에 밀린 문서가
+    몇 사이클 만에 시도 상한에 걸려 영영 버려진다.
     """
     counts = {"docs": len(items), "stocks": 0, "inserted": 0,
-              "registered": 0, "deferred": 0, "errors": 0}
+              "registered": 0, "deferred": 0, "errors": 0,
+              "deferred_keys": []}
     if not items or not _cfg(cfg, "enabled"):
         return counts | ({"skipped": "비활성"} if items else {})
 
@@ -92,6 +96,7 @@ async def attach_docs(items: list[dict], source: str, *, origin: str,
         wid = wids.get(str(it.get("ticker") or ""))
         if wid is None:
             counts["deferred"] += 1
+            counts["deferred_keys"].append(it.get("key"))
             continue
         by_wid.setdefault(wid, []).append(it["row"])
     counts["stocks"] = len(by_wid)

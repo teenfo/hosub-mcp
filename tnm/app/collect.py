@@ -259,15 +259,20 @@ class CollectRunner:
             max_attempts=int(icfg.get("max_attempts", 3)))
         if not rows:
             return {}
-        # 시도 횟수를 **먼저** 올린다. 적재가 영영 안 되는 건(중복·제외 종목)이
-        # 매 사이클 같은 일을 반복하지 않도록 상한에서 빠져나가게 해야 한다.
-        await db.bump_report_attempts([r["id"] for r in rows])
         out = await ingest.attach_docs(
-            [{"ticker": r["ticker"], "name": r.get("stock_name") or r["ticker"],
+            [{"key": r["id"], "ticker": r["ticker"],
+              "name": r.get("stock_name") or r["ticker"],
               "row": self._report_to_raw(r)} for r in rows],
             source="research", origin="research", cfg=icfg)
         if out.get("inserted"):
             out["linked"] = await db.link_report_items()
+        # 시도 횟수는 **실제로 적재를 시도한 건**만 올린다. 종목 등록 상한 때문에
+        # 밀린 건(deferred)까지 세면, 사이클당 15종목 상한과 시도 상한 3회가
+        # 맞물려 대기열 뒤쪽 리포트가 세 사이클 만에 영영 버려진다.
+        # 그 건들은 published_at 7일 창이 자연히 만료시킨다.
+        deferred = set(out.pop("deferred_keys", []))
+        await db.bump_report_attempts([r["id"] for r in rows
+                                       if r["id"] not in deferred])
         return {f"ingest_{k}": v for k, v in out.items()}
 
     async def _collect_foreign(self, brokers: list[dict], cfg: dict,
