@@ -501,8 +501,8 @@ def set_lines(pos_id: str, stop: float | None, target: float | None,
     ts = (now or datetime.now(KST)).isoformat(timespec="seconds")
     with _conn() as conn:
         row = conn.execute(
-            "SELECT stop, stop_live, target_live, stop_moved FROM positions "
-            "WHERE id=? AND status='open'", (pos_id,)).fetchone()
+            "SELECT entry, side, stop, stop_live, target_live, stop_moved "
+            "FROM positions WHERE id=? AND status='open'", (pos_id,)).fetchone()
         if row is None:
             return False
         if row["stop_live"] == stop and row["target_live"] == target:
@@ -511,9 +511,17 @@ def set_lines(pos_id: str, stop: float | None, target: float | None,
         # 바뀐 것으로 보유시간을 늘리면 근거가 없다. **원본과 비교**하는 이유는
         # 첫 갱신에서 live 가 None→원본값 으로 채워지는 경우가 있어서다 —
         # 값은 그대로인데 시계만 초기화되면 안 된다.
+        #
+        # **손실 구간에서는 리셋하지 않는다**(사용자 결정 2026-07-29). 잠깐 반등해
+        # 손절선이 한 칸 오른 것만으로 만기가 뒤로 밀리면, 그 사이 더 빠진 채로
+        # 시간 청산된다 — 실측에서 그 전이(timeout− → timeout−) 6건이 5,245원을
+        # 깎았다. 시계를 늘릴 근거는 "이익을 확정했다" 이지 "잠깐 올랐다" 가 아니다.
         prev_stop = row["stop_live"] if row["stop_live"] is not None else row["stop"]
-        moved = ts if (stop is not None and float(stop) != float(prev_stop)) \
-            else row["stop_moved"]
+        entry = float(row["entry"] or 0)
+        in_profit = stop is not None and entry > 0 and (
+            float(stop) > entry if row["side"] == "long" else float(stop) < entry)
+        moved = ts if (stop is not None and float(stop) != float(prev_stop)
+                       and in_profit) else row["stop_moved"]
         conn.execute(
             "UPDATE positions SET stop_live=?, target_live=?, lines_updated=?, "
             "stop_moved=? WHERE id=?", (stop, target, ts, moved, pos_id))

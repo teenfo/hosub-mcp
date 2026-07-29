@@ -71,10 +71,13 @@ KST = ZoneInfo("Asia/Seoul")
 # 스윕 값 — 사용자 지시(2026-07-29): 30 부터 올리며 본다
 LOCK_GRID = (30, 40, 50, 60, 70, 80, 90)
 BASELINES = ("fixed", "trail")
+# 익절선까지 따라 올리던 옛 동작 — 고정과의 차이를 보기 위한 대조군
+TGT_REF = (30, 90)
 
 
 def variants() -> list[str]:
-    return [*BASELINES, *(f"lock{n}" for n in LOCK_GRID)]
+    return [*BASELINES, *(f"lock{n}" for n in LOCK_GRID),
+            *(f"tgt{n}" for n in TGT_REF)]
 
 
 def _cfg_of(variant: str) -> dict | None:
@@ -83,9 +86,12 @@ def _cfg_of(variant: str) -> dict | None:
         return None
     if variant == "trail":
         # 추종만 — 확정은 닿을 수 없는 발동선으로, 상한은 0(비활성)으로 끈다
-        return {"enabled": True, "trailing": True,
+        return {"enabled": True, "trailing": True, "trail_target": True,
                 "tighten_at": 99.0, "lock_gain_pct": 0.0, "max_gain_pct": 0.0}
-    return {"enabled": True, "trailing": True,
+    if variant.startswith("tgt"):      # 익절선까지 따라 올리는 옛 동작(대조군)
+        return {"enabled": True, "trailing": True, "trail_target": True,
+                "lock_gain_pct": float(variant.removeprefix("tgt"))}
+    return {"enabled": True, "trailing": True, "trail_target": False,
             "lock_gain_pct": float(variant.removeprefix("lock"))}
 
 
@@ -166,8 +172,9 @@ def replay(symbol: str, scanned, hold_limit: int, update: bool) -> list:
                     new_stop, new_target = _lines(
                         t.entry, t.stop, t.target, t.side, stop, target,
                         float(bar.close))
-                    if new_stop != stop:
-                        clock = bar.Index     # 손절선이 움직였다 → 시계 재시작
+                    if new_stop != stop and (new_stop > t.entry if t.side == "long"
+                                             else new_stop < t.entry):
+                        clock = bar.Index     # 이익 구간에서만 시계 재시작
                     stop, target = new_stop, new_target
                 continue
             for sig in by_bar.get(i, ()):
@@ -409,7 +416,9 @@ def _project(pos: dict, bars, update: bool, hold_limit: int) -> tuple[float, str
             new_stop, new_target = _lines(entry, float(pos["stop"]),
                                           float(pos["target"]), side,
                                           stop, target, float(bar.close))
-            if new_stop != stop:
+            # 손실 구간 리셋은 하지 않는다 — `ledger.set_lines` 와 같은 규약
+            if new_stop != stop and (new_stop > entry if side == "long"
+                                     else new_stop < entry):
                 clock = bar.Index
             stop, target = new_stop, new_target
     return (float(bars[-1].close), "eod") if bars else (
