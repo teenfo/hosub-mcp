@@ -235,9 +235,21 @@ export default {
 
     const brkEditing = () => brkBody.contains(document.activeElement);
 
+    /** 조회 실패를 화면에 남긴다.
+     *
+     * 종전에는 catch 하고 조용히 return 해서, 프록시 화이트리스트가 막혀
+     * 404 가 나는데도 카드가 그냥 **비어 보였다**. 목록이 없는 것인지 못
+     * 가져온 것인지 구분이 안 되면 원인을 찾는 데 시간이 걸린다. */
+    const failed = (body, what, e) => {
+      body.innerHTML = "";
+      body.appendChild(el("div", { class: "text-danger" },
+        `${what} 조회 실패: ${e.message}`));
+    };
+
     const loadBrokers = async () => {
       let d;
-      try { d = await fetchJSON("/api/tnm/brokers"); } catch (e) { return; }
+      try { d = await fetchJSON("/api/tnm/brokers"); }
+      catch (e) { failed(brkBody, "증권사 목록", e); return; }
       if (!changed("brokers", d)) return;
       if (brkEditing()) { changed.invalidate("brokers"); return; }
       brkBody.innerHTML = "";
@@ -305,7 +317,8 @@ export default {
                      economy: "경제", invest: "투자정보" };
     const loadReports = async () => {
       let d;
-      try { d = await fetchJSON("/api/tnm/reports?days=7&limit=60"); } catch (e) { return; }
+      try { d = await fetchJSON("/api/tnm/reports?days=7&limit=60"); }
+      catch (e) { failed(repBody, "리포트", e); return; }
       if (!changed("reports", d)) return;
       repBody.innerHTML = "";
       const rows = d.reports || [];

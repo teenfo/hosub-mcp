@@ -65,6 +65,26 @@ def test_tnm_proxy_allowed_paths_reach_backend():
             assert c.post(f"/api/tnm/{path}", json={}).status_code == 502, path
 
 
+def test_broker_proxy_paths():
+    """증권사 목록·리포트·리서치 수집이 프록시를 통과한다.
+
+    회귀: TNM 에 엔드포인트만 만들고 화이트리스트에 넣지 않아 화면에서
+    목록이 비고 [지금 수집]이 'not allowed' 로 떨어졌다. 인증 없이 확인하면
+    401 이 404 를 가리므로, 이 테스트는 **로그인한 뒤에** 본다.
+    """
+    with _client() as c:
+        _login(c)
+        for path in ("brokers", "reports"):
+            assert c.get(f"/api/tnm/{path}").status_code == 502, path
+        # 증권사명은 한글·공백이 섞인다 — 경로 파라미터로 그대로 통과해야 한다
+        for path in ("brokers", "brokers/SK증권", "brokers/유안타 리서치",
+                     "brokers/SK증권/delete", "research/run"):
+            assert c.post(f"/api/tnm/{path}", json={}).status_code == 502, path
+        for path in ("brokers/SK증권/purge", "brokers/a/b/delete", "research"):
+            assert c.post(f"/api/tnm/{path}", json={}).status_code == 404, path
+        assert c.get("/api/tnm/research/run").status_code == 404   # GET 불가
+
+
 def test_trading_proxy_unaffected():
     with _client() as c:
         _login(c)

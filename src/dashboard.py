@@ -93,12 +93,17 @@ TNM_URL = os.environ.get("HOSUB_TNM_URL", "http://127.0.0.1:8602")
 TNM_TOKEN = os.environ.get("HOSUB_TNM_TOKEN", "")
 
 _TNM_GET_RE = re.compile(
-    r"^(status|items|items/\d+|watch|settings|metrics)$"
+    r"^(status|items|items/\d+|watch|settings|metrics|brokers|reports)$"
 )
+# 증권사명은 한글·영문이 섞이고 공백도 들어간다(예: '유안타 리서치'). 화면이
+# encodeURIComponent 로 보내고 starlette 가 풀어 주므로 여기서는 '/' 만 막는다.
 _TNM_POST_RE = re.compile(
     r"^(items/\d+/label|watch|watch/sync|watch/\d{6}/(exclude|include|settings)"
-    r"|settings|collect/run|promote/run|notify/test|reclassify_failed)$"
+    r"|settings|collect/run|promote/run|notify/test|reclassify_failed"
+    r"|brokers|brokers/[^/]+|brokers/[^/]+/delete|research/run)$"
 )
+# 리서치 1회 수집은 목록 9콜 + 상세 최대 20콜 + 해외 24콜이라 기본 15초를 넘긴다.
+_TNM_SLOW_RE = re.compile(r"^(research/run|collect/run)$")
 
 
 def _is_authed(request) -> bool:
@@ -503,7 +508,8 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
                 headers["Content-Type"] = request.headers.get(
                     "content-type", "application/json"
                 )
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            timeout = 180.0 if _TNM_SLOW_RE.match(path) else 15.0
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.request(
                     request.method,
                     f"{TNM_URL}/api/{path}",
