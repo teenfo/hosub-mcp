@@ -58,8 +58,9 @@ def test_trail_은_좁히기와_상한이_없다(env):
     assert _lines_at("trail", 10_300) == (10_100.0, 10_700.0)
 
 
-def test_desk_는_좁히고_상한을_건다(env):
-    assert _lines_at("desk", 10_300) == (10_220.0, 10_300.0)
+def test_desk_는_상승분을_확정하고_상한을_건다(env):
+    """10,300 → 손절 10,000+300×0.9 = 10,270 · 목표 상한 10,300."""
+    assert _lines_at("desk", 10_300) == (10_270.0, 10_300.0)
 
 
 def test_세_정책이_서로_다르다(env):

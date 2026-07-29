@@ -72,7 +72,7 @@ def _desk_cfg(policy: str) -> dict:
     if policy == "trail":
         # 추종만 — 좁히기는 닿을 수 없는 값으로, 상한은 0(비활성)으로 끈다
         return {"enabled": True, "trailing": True,
-                "tighten_at": 99.0, "tighten_gap": 0.0, "max_gain_pct": 0.0}
+                "tighten_at": 99.0, "lock_gain_pct": 0.0, "max_gain_pct": 0.0}
     return {"enabled": True, "trailing": True}      # desk = 배포된 값 그대로
 
 
@@ -238,7 +238,7 @@ def analyze(symbols: list[str], min_bars: int = 600, limit_days: int = 60,
         "paired": {p: _stats([t for t in per_policy[p] if _key(t) in common])
                    for p in POLICIES},
         "params": {"tighten_at": desk._num("tighten_at"),
-                   "tighten_gap": desk._num("tighten_gap"),
+                   "lock_gain_pct": desk._num("lock_gain_pct"),
                    "max_gain_pct": desk._num("max_gain_pct"),
                    "max_hold_min": settings.RULES.get("max_hold_min", 0),
                    "sides": list(sides) if sides else None},

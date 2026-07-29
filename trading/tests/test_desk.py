@@ -277,12 +277,12 @@ async def test_추종을_끄면_진입_시_고정값_그대로다(env, monkeypat
 # --------------------------------------------------------------------------
 # 라인 추종 — 사용자 지침 2026-07-29 (+ 같은 날 보강)
 #   ① 오르면 같은 갭으로 따라 올리고, 내려도 그 자리에 둔다
-#   ② 목표까지 50% 를 오면 손절 간격을 목표갭의 20% 로 좁힌다
+#   ② 목표까지 50% 를 오면 **상승분의 90%** 를 손절선으로 확정한다
 #   ③ 익절선은 진입가 +3% 를 넘지 않는다 (이게 있어야 목표에 닿는다)
 # 실거래 손익이 여기서 갈린다. 규칙을 값으로 못박는다.
 #
 # 기준 포지션: 진입 10,000 · 손절 9,800(갭 200) · 목표 10,400(목표갭 400)
-#   → 좁히기 발동 10,200(50%) · 좁힌 간격 80(20%) · 익절 상한 10,300(+3%)
+#   → 발동 10,200(50%) · 익절 상한 10,300(+3%)
 # --------------------------------------------------------------------------
 def _lines(oid="p1"):
     with ledger._conn() as conn:
@@ -299,12 +299,42 @@ async def test_발동_전에는_원래_갭으로_따라_올린다(env):
     assert _lines() == (9_950.0, 10_300.0)      # 10,150−200 · 목표는 상한
 
 
-async def test_목표의_절반을_오면_손절_간격이_좁아진다(env):
-    """이익 구간에서는 되밀림을 덜 허용해 확정분을 키운다."""
+async def test_목표의_절반을_오면_상승분의_90퍼센트를_확정한다(env):
+    """진입 10,000 · 현재 10,200(상승 200) → 10,000 + 200×0.9 = 10,180."""
     _open()
     spy = _Spy(ws={"005930": 10_200})           # 정확히 50%
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert _lines()[0] == 10_120.0, "간격이 200 → 80 으로 좁아진다"
+    assert _lines()[0] == 10_180.0
+
+
+async def test_지침_예시_그대로_계산된다(env, monkeypatch):
+    """진입 1,000 · 목표 1,400 · 현재 1,200(상승 200) · x=90 → 1,180."""
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": True, "max_gain_pct": 0}})   # 상한 끄고 본다
+    pos = {"side": "long", "entry": 1_000.0, "stop": 950.0, "target": 1_400.0,
+           "stop_live": None, "target_live": None}
+    assert desk.update_lines(pos, 1_200)[0] == 1_180.0
+
+
+async def test_확정_비율은_설정으로_바뀐다(env, monkeypatch):
+    """x=50 이면 상승분의 절반만 확정한다 — 여유를 더 준다."""
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": True, "lock_gain_pct": 50}})
+    _open()
+    spy = _Spy(ws={"005930": 10_200})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines()[0] == 10_100.0              # 10,000 + 200×0.5
+
+
+async def test_확정선이_갭_추종보다_낮으면_갭_추종을_쓴다(env, monkeypatch):
+    """x 를 낮게 잡아도 앞 단계보다 나빠지지 않아야 한다."""
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": True, "lock_gain_pct": 5}})
+    _open()
+    spy = _Spy(ws={"005930": 10_290})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    # 확정선 10,014.5 vs 갭 추종 10,090 → 높은 쪽
+    assert _lines()[0] == 10_090.0
 
 
 async def test_가격이_내려도_라인은_그_자리에_남는다(env):
@@ -312,12 +342,12 @@ async def test_가격이_내려도_라인은_그_자리에_남는다(env):
     _open()
     spy = _Spy(ws={"005930": 10_250})
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert _lines()[0] == 10_170.0
+    assert _lines()[0] == 10_225.0              # 10,000 + 250×0.9
 
     spy.ws["005930"] = 10_150                   # 되밀림
     stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
     assert stat["lines"] == 0, "안 바뀌면 쓰지도 않는다"
-    assert _lines()[0] == 10_170.0
+    assert _lines()[0] == 10_225.0
 
 
 async def test_손절선은_한_번도_내려가지_않는다(env):
@@ -349,7 +379,7 @@ async def test_따라_올라간_손절선에_닿으면_청산한다(env):
 
     spy.ws["005930"] = 10_200
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert spy.exits == [("p1", "stop", 10_210.0)], "원래 손절 9,800 이 아니다"
+    assert spy.exits == [("p1", "stop", 10_261.0)], "원래 손절 9,800 이 아니다"
 
 
 async def test_익절선은_진입가_3퍼센트를_넘지_않는다(env):
@@ -396,20 +426,20 @@ async def test_숏은_방향을_뒤집는다(env):
     assert _lines("s1") == (10_050.0, 9_700.0)
 
 
-async def test_숏도_절반을_오면_간격이_좁아지고_상한이_걸린다(env):
+async def test_숏도_절반을_오면_하락분의_90퍼센트를_확정한다(env):
     ledger.open_position({"id": "s2", "symbol": "034220", "side": "short",
                           "entry": 10_000, "stop": 10_200, "target": 9_600,
                           "rule": "orb", "qty": 5, "name": "034220"}, fill=10_000)
     spy = _Spy(ws={"034220": 9_800})            # 정확히 50%
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert _lines("s2") == (9_880.0, 9_700.0)   # 9,800+80 · 상한 −3%
+    assert _lines("s2") == (9_820.0, 9_700.0)   # 10,000−200×0.9 · 상한 −3%
 
 
 def test_원본_손절선은_추종_뒤에도_남는다(env):
     """되돌릴 기준이자 일지·백테스트가 읽는 값이다."""
     _open()
     assert desk.update_lines(ledger.positions(status="open")[0], 10_250) \
-        == (10_170.0, 10_300.0)
+        == (10_225.0, 10_300.0)
     with ledger._conn() as conn:
         r = conn.execute("SELECT stop, target FROM positions").fetchone()
     assert (r["stop"], r["target"]) == (9_800, 10_400)
