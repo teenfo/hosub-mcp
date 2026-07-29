@@ -693,8 +693,9 @@ export default {
       if (!d.enabled) {
         deskBox.appendChild(el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
           deskSwitch(d),
-          el("span", { class: "text-secondary" },
-            `청산 감시·발주를 기존 30초 루프가 맡고 있습니다. 켜면 보유 ${d.max_symbols ? d.max_symbols + "종목까지" : "전 종목을"} ${d.interval_sec}초마다 보고 데스크가 직접 발주합니다.`),
+          el("span", { class: "text-secondary", html:
+            `손절·목표에 닿아도 <b>자동 발주하지 않고 승인 대기</b>로 올립니다 — 승인해야 매도됩니다. `
+            + `켜면 보유 ${d.max_symbols ? d.max_symbols + "종목까지" : "전 종목을"} ${d.interval_sec}초마다 보고 데스크가 그 자리에서 발주합니다.` }),
         ]));
         return;
       }
@@ -1017,7 +1018,8 @@ export default {
           if (!isExit && qty < 1) { alert("발주 수량은 1주 이상이어야 합니다"); return; }
           const amtStr = px ? ` (약 ${fmt(qty * px)}원)` : "";
           const msg = isExit
-            ? `[${o.symbol}] 목표 도달 — ${qty}주 시장가 매도(청산)할까요?`
+            // 사유는 서버가 reason 문구로 실어 보낸다 — 손절을 '목표 도달'로 읽으면 안 된다
+            ? `[${o.symbol}] ${o.reason || "청산"} — ${qty}주 시장가 매도(청산)할까요?`
             : `[${o.symbol}] ${o.rule} ${o.side} ${qty}주${amtStr} — 실제로 발주할까요?`;
           if (!confirm(msg)) return;
           approve.disabled = true;
