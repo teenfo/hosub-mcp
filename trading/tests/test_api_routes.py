@@ -267,3 +267,71 @@ def test_감시목록_응답이_소유권을_알린다(client, monkeypatch, tmp_
     assert _get(client, "/api/watchlist").json()["engine_owns"] is False
     scout_eng.set_state(mode="full")
     assert _get(client, "/api/watchlist").json()["engine_owns"] is True
+
+
+# --- 종목 기본정보 (화면 종목 클릭) ---
+
+def test_stock_basic_rejects_bad_code(client):
+    for code in ("12345", "abcdef", "0059300"):
+        r = _get(client, f"/api/stock/{code}")
+        assert r.status_code in (400, 404), code
+
+
+def test_stock_basic_unknown_code_is_not_ok(client, monkeypatch):
+    """키움은 없는 종목코드에도 return_code 0 · 빈 필드로 응답한다(실측 999999).
+
+    응답 코드만 보고 성공으로 넘기면 화면에 빈 모달이 뜬다.
+    """
+    from app.kiwoom import client as kw
+
+    async def fake(code):
+        return {"return_code": 0, "return_msg": "정상적으로 처리되었습니다",
+                "stk_cd": "", "stk_nm": ""}
+
+    monkeypatch.setattr(kw.client, "stock_basic", fake)
+    r = _get(client, "/api/stock/999999")
+    assert r.status_code == 404
+    assert r.json()["ok"] is False
+
+
+def test_stock_basic_returns_payload_and_holding(client, monkeypatch):
+    from app import main as main_mod
+    from app.kiwoom import client as kw
+
+    async def fake(code):
+        return {"stk_cd": code, "stk_nm": "삼성전자", "per": "31.77",
+                "cur_prc": "-208500", "return_code": 0}
+
+    async def holdings():
+        return {"005930": 12}
+
+    monkeypatch.setattr(kw.client, "stock_basic", fake)
+    monkeypatch.setattr(main_mod, "_holdings_map", holdings)
+    main_mod._basic_cache.clear()
+    d = _get(client, "/api/stock/005930").json()
+    assert d["ok"] is True and d["held"] == 12
+    assert d["basic"]["stk_nm"] == "삼성전자"
+    # 원본 payload 를 자르지 않는다 — 화면이 모르는 필드도 남아 있어야 한다
+    assert d["basic"]["cur_prc"] == "-208500"
+
+
+def test_stock_basic_is_cached(client, monkeypatch):
+    """같은 종목을 연달아 눌러도 키움을 다시 부르지 않는다."""
+    from app import main as main_mod
+    from app.kiwoom import client as kw
+
+    calls = []
+
+    async def fake(code):
+        calls.append(code)
+        return {"stk_cd": code, "stk_nm": "삼성전자", "return_code": 0}
+
+    async def holdings():
+        return {}
+
+    monkeypatch.setattr(kw.client, "stock_basic", fake)
+    monkeypatch.setattr(main_mod, "_holdings_map", holdings)
+    main_mod._basic_cache.clear()
+    assert _get(client, "/api/stock/005930").json()["cached"] is False
+    assert _get(client, "/api/stock/005930").json()["cached"] is True
+    assert len(calls) == 1

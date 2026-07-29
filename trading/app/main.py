@@ -540,6 +540,13 @@ async def api_stock_basic(code: str, _=Depends(require_auth)):
         except Exception as e:  # noqa: BLE001 — 조회 실패가 화면을 깨지 않는다
             log.warning("종목 기본정보 조회 실패 %s: %s", code, e)
             return JSONResponse({"ok": False, "code": code, "error": str(e)}, 502)
+        # 키움은 없는 종목코드에도 return_code 0 · 필드 전부 빈 값으로 응답한다
+        # (실측 999999). 그대로 통과시키면 화면에 빈 모달이 뜬다 — 조회에
+        # 성공했는지 여부를 응답 코드로만 판단하면 안 된다. 캐시에도 넣지 않는다.
+        if not str(data.get("stk_nm", "")).strip():
+            return JSONResponse(
+                {"ok": False, "code": code,
+                 "error": f"{code} 종목 정보를 찾을 수 없습니다"}, 404)
         _basic_cache[code] = (now, data)
         cached = False
     holdings = await _holdings_map()
