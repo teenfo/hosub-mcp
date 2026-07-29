@@ -4,6 +4,7 @@
 이 설계의 값이 거기서 나온다 — 주기를 15배 올리면서 API 콜은 안 늘리는 것.
 콜이 늘면 분리한 의미가 없고, 발굴 예산을 뺏어 원래 문제로 돌아간다.
 """
+import asyncio
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -19,6 +20,7 @@ NOW = datetime(2026, 7, 30, 10, 0, tzinfo=KST)
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "trading.db")
+    monkeypatch.setattr(desk, "STATE_FILE", tmp_path / "desk.json")
     monkeypatch.setattr(settings, "COSTS", {"commission_pct": 0.015,
                                             "sell_tax_pct": 0.20,
                                             "slippage_bp": 5})
@@ -199,6 +201,70 @@ def test_due_exits_도_갱신된_라인을_본다(env):
 def test_꺼져_있으면_비활성이다(env, monkeypatch):
     monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {"enabled": False}})
     assert desk.enabled() is False
+
+
+# --------------------------------------------------------------------------
+# 런타임 오버라이드 — 배포 없이 끌 수 있어야 한다
+# --------------------------------------------------------------------------
+def test_런타임_오버라이드가_config_를_이긴다(env):
+    """초 단위로 실거래 청산을 내는 루프다 — 배포를 기다려서 끌 수는 없다."""
+    assert desk.enabled() is True            # config 는 켜짐
+    desk.set_state(enabled=False)
+    assert desk.enabled() is False
+    desk.set_state(enabled=True)
+    assert desk.enabled() is True
+
+
+def test_오버라이드는_준_값만_바꾼다(env):
+    desk.set_state(interval_sec=3)
+    assert desk.enabled() is True, "건드리지 않은 값은 config 를 따른다"
+    assert desk._num("interval_sec") == 3.0
+
+
+def test_주기는_하한_아래로_못_내린다(env):
+    """0초 주기는 이벤트 루프를 굶긴다."""
+    desk.set_state(interval_sec=0)
+    assert desk._num("interval_sec") == 0.5
+
+
+def test_오버라이드_파일이_깨져도_기본값으로_돈다(env):
+    (env / "desk.json").write_text("{ 깨진 json")
+    assert desk.enabled() is True            # config 값으로 폴백
+
+
+async def test_끄고_켜는_것이_재시작_없이_먹힌다(env, monkeypatch):
+    """루프는 항상 떠 있고 **매 사이클 설정을 다시 읽는다** — 그래서 즉시 반영된다.
+
+    장중 여부는 고정한다. 실제 시각에 따라 결과가 달라지면 판정이 성립하지 않는다.
+    """
+    monkeypatch.setattr(desk, "in_session", lambda now=None: True)
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"desk": {"enabled": True, "interval_sec": 0.5}})
+    _open()
+    spy = _Spy(ws={"005930": 9_790})
+    task = asyncio.create_task(desk.loop(spy.fresh, spy.rest, spy.execute,
+                                         lambda: True))
+    try:
+        desk.set_state(enabled=False)
+        await asyncio.sleep(0.2)
+        assert spy.exits == [], "꺼진 동안에는 청산이 나가면 안 된다"
+
+        desk.set_state(enabled=True)
+        for _ in range(30):                      # 다음 사이클을 기다린다
+            await asyncio.sleep(0.05)
+            if spy.exits:
+                break
+        assert spy.exits, "다시 켜면 재시작 없이 돌아야 한다"
+    finally:
+        task.cancel()
+
+
+def test_status_가_오버라이드를_드러낸다(env):
+    """화면이 '설정값과 다르게 돌고 있다' 를 말할 수 있어야 한다."""
+    assert desk.status()["override"] == {}
+    desk.set_state(enabled=False)
+    assert desk.status()["override"] == {"enabled": False}
+    assert desk.status()["enabled"] is False
 
 
 async def test_계측이_쌓여_화면에_노출된다(env):

@@ -1057,6 +1057,30 @@ async def api_position_void(pos_id: str, payload: dict | None = Body(None),
     return {"ok": ok, "held_qty": held, "ledger_qty": pos.get("qty")}
 
 
+@app.post("/api/desk")
+async def api_desk_set(payload: dict | None = Body(None), _=Depends(require_auth)):
+    """매매 데스크를 **배포 없이** 켜고 끈다(런타임 오버라이드 → `desk.json`).
+
+    초 단위로 실거래 청산을 내는 루프이므로 이상이 보이면 그 자리에서 멈출 수
+    있어야 한다. 루프 자체는 항상 떠 있고 매 사이클 설정을 다시 읽으므로
+    재시작이 필요 없다 — 끄면 다음 사이클부터 아무것도 하지 않는다.
+
+    끈 동안 청산 감시가 비지 않는다. 기존 30초 `_ledger_loop` 가 그대로 맡는다.
+    """
+    from .trade import desk as _desk
+
+    p = payload or {}
+    try:
+        st = await asyncio.to_thread(
+            _desk.set_state,
+            enabled=p.get("enabled"), interval_sec=p.get("interval_sec"),
+            stale_sec=p.get("stale_sec"), max_symbols=p.get("max_symbols"),
+            degraded_interval_sec=p.get("degraded_interval_sec"))
+    except (TypeError, ValueError) as e:
+        return JSONResponse({"ok": False, "error": f"잘못된 값: {e}"}, 400)
+    return {"ok": True, "override": st, "desk": _desk.status()}
+
+
 @app.get("/api/scanner")
 async def api_scanner(_=Depends(require_auth)):
     return {"last_scan": scanner.last_scan, "results": scanner.results,

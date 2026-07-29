@@ -41,8 +41,10 @@
 지금은 항상 '변화 없음'을 돌려주므로 기존 손절·목표가 그대로 쓰인다.
 """
 import asyncio
+import json
 import logging
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import settings
@@ -51,6 +53,11 @@ from . import ledger
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 SESSION = ("09:00", "15:30")
+
+# 런타임 오버라이드. **배포 없이 끌 수 있어야 한다** — 초 단위로 실거래 청산을
+# 내는 루프이므로 이상이 보이면 그 자리에서 멈출 수 있어야 한다.
+# `scout/engine.py` 의 engine.json 과 같은 관례다(오버라이드 > config > 기본값).
+STATE_FILE = Path(settings.DATA_DIR) / "desk.json"
 
 DEFAULTS = {
     "enabled": False,        # 실거래 청산을 다루므로 배포와 활성화를 분리한다
@@ -72,16 +79,51 @@ def status() -> dict:
     c = cfg()
     return dict(STATE, enabled=bool(c.get("enabled", False)),
                 interval_sec=_num("interval_sec"), stale_sec=_num("stale_sec"),
-                max_symbols=int(_num("max_symbols")))
+                degraded_interval_sec=_num("degraded_interval_sec"),
+                max_symbols=int(_num("max_symbols")),
+                # 화면이 "설정값과 다르게 돌고 있다" 를 말할 수 있어야 한다
+                override=_override())
+
+
+def _override() -> dict:
+    if STATE_FILE.exists():
+        try:
+            v = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+            if isinstance(v, dict):
+                return v
+        except (OSError, ValueError):
+            log.warning("desk.json 을 읽을 수 없습니다 — config 기본값 사용")
+    return {}
 
 
 def cfg() -> dict:
+    """런타임 오버라이드 > config.yaml > 기본값."""
     c = (settings.CONFIG.get("execution", {}) or {}).get("desk", {})
-    return DEFAULTS | (c if isinstance(c, dict) else {})
+    return DEFAULTS | (c if isinstance(c, dict) else {}) | _override()
 
 
 def enabled() -> bool:
     return bool(cfg().get("enabled", False))
+
+
+def set_state(**patch) -> dict:
+    """데스크 설정을 런타임에 바꾼다. 다음 사이클(최대 `interval_sec`)부터 적용된다.
+
+    끄면 루프는 살아 있되 아무것도 하지 않고, 청산 감시는 기존 30초 `_ledger_loop`
+    가 그대로 맡는다 — **중간에 감시가 비는 구간이 없다.**
+    """
+    st = _override() | {k: v for k, v in patch.items() if v is not None}
+    if "enabled" in st:
+        st["enabled"] = bool(st["enabled"])
+    for k in ("interval_sec", "stale_sec", "degraded_interval_sec"):
+        if k in st:
+            st[k] = max(0.5, float(st[k]))
+    if "max_symbols" in st:
+        st["max_symbols"] = max(1, int(st["max_symbols"]))
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
+    log.warning("매매 데스크 설정 변경: %s", st)
+    return st
 
 
 def _num(key: str) -> float:
