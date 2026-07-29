@@ -51,19 +51,48 @@ feed.on_fill = _on_fill   # 주문체결 실시간 → 실측 체결 기록
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
 
 
+def _ws_symbols() -> list[str]:
+    """WS 로 구독할 종목 — 감시목록 **∪ 보유 포지션의 실제 체결 종목**.
+
+    감시목록만 구독하면 그 밖의 보유 종목은 틱이 오지 않는다. 그러면
+    `aggregator.fresh_price` 가 늘 None 이고 매매 데스크가 **매 사이클 REST 로
+    폴백**한다 — 2026-07-29 실측: 감시목록에 없던 코리아써키트 1종목에 2분 동안
+    51콜(분당 26콜)이 나갔다. "가격은 이미 실시간이라 추가 호출이 없다" 는 이
+    설계의 전제가 거기서 깨진다.
+
+    보유 종목은 **가장 감시가 필요한 종목**인데 하필 그쪽이 구멍이었다.
+    숏은 인버스 ETF 로 나가므로 `executed_symbol` 을 쓴다 — 원 종목을 구독해도
+    실제 오간 종목의 틱은 안 온다.
+    """
+    from .trade import ledger
+
+    syms = list(settings.WATCHLIST.keys())
+    try:
+        held = {ledger.executed_symbol(p)
+                for p in ledger.positions(status="open", limit=200)}
+    except Exception:  # noqa: BLE001 - 원장 조회 실패가 구독을 막지 않는다
+        log.exception("보유 종목 조회 실패 — 감시목록만 구독한다")
+        return syms
+    extra = sorted(held - set(syms))
+    if extra:
+        log.info("보유 종목 %s 를 WS 구독에 강제 편입(감시목록 밖)", extra)
+    return syms + extra
+
+
 async def _feed_starter() -> None:
     """API 키가 준비되는 즉시(설정 화면 입력 포함) 실시간 시세 구독 시작."""
     while not settings.KIWOOM_APP_KEY:
         await asyncio.sleep(10)
-    feed.start(list(settings.WATCHLIST.keys()))
-    log.info("실시간 시세 구독 시작: %s", list(settings.WATCHLIST.keys()))
+    syms = _ws_symbols()
+    feed.start(syms)
+    log.info("실시간 시세 구독 시작: %s", syms)
 TEMPLATE = (Path(__file__).parent.parent / "templates" / "dashboard.html").read_text(
     encoding="utf-8"
 )
 
 
 async def _resubscribe() -> None:
-    await feed.update(list(settings.WATCHLIST.keys()))
+    await feed.update(_ws_symbols())
 
 
 def scout_mod_owns() -> bool:
@@ -115,6 +144,11 @@ async def _ledger_loop() -> None:
                     # 체결되지 않은 주문이 손익으로 남지 않게 계좌와 대조해 회수한다.
                     # 청산 판정보다 **먼저** 돌려야 유령 포지션에 청산 주문이 나가지 않는다.
                     await _reap_unfilled(ledger)
+                    # 보유 종목이 WS 구독에 들어와 있는지 매 사이클 보정한다.
+                    # `watchlist.notify` 는 감시목록이 바뀔 때만 도는데, 포지션은
+                    # 감시목록과 무관하게 열린다(수동 매수·인버스 대체). 집합이
+                    # 같으면 `feed.update` 가 즉시 돌아오므로 비용이 없다.
+                    await _resubscribe()
                     # 본전 이동 shadow — 실제 청산 판정과 **같은 가격·같은 주기**로
                     # 관측한다. 기록 전용이라 아래 청산 로직에 관여하지 않는다.
                     await _breakeven_observe(breakeven)
