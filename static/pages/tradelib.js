@@ -12,7 +12,15 @@ export async function postJSON(path, body) {
     throw new Error("unauthorized");
   }
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "HTTP " + res.status);
+  if (!res.ok) {
+    // 본문을 오류에 붙여 둔다. 편입 게이트(409)처럼 **거절 사유와 측정값을
+    // 함께 주는** 응답이 있는데, 메시지 문자열만 남기면 화면이 '그래도 추가'
+    // 같은 다음 행동을 만들 수 없다.
+    const err = new Error(data.error || "HTTP " + res.status);
+    err.status = res.status;
+    err.data = data;
+    throw err;
+  }
   return data;
 }
 
