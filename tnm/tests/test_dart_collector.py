@@ -26,6 +26,7 @@ def test_parse_incremental_by_rcept_no():
     assert [d.source_uid for d in docs] == ["20260720000001", "20260722000005"]
     assert cursor == "20260722000005"
     assert docs[0].url.endswith("rcpNo=20260720000001")
+    # 과거 접수분은 그날 자정 그대로 (오늘분 처리는 아래 별도 테스트)
     assert docs[0].published_at == datetime(2026, 7, 20, tzinfo=KST)
     assert "공급계약" in docs[0].title and "비고: 유" in docs[0].body
 
@@ -69,3 +70,33 @@ def test_market_hours_branch():
     assert is_market_hours(datetime(2026, 7, 24, 10, 30, tzinfo=KST))      # 금 장중
     assert not is_market_hours(datetime(2026, 7, 24, 17, 0, tzinfo=KST))   # 금 장외
     assert not is_market_hours(datetime(2026, 7, 25, 10, 30, tzinfo=KST))  # 토
+
+
+# --- 접수 시각 추정 (list.json 은 날짜만 준다) ---
+
+def test_same_day_filing_uses_collection_time():
+    """자정으로 두면 15:00 거래정지 공시가 15시간 전 것으로 보인다.
+
+    신선도로 줄을 세우는 곳(분류 큐 우선순위·promote 의 window_hours)에서
+    공시가 구조적으로 뒤로 밀린다. 전종목 모드가 장중 10분 주기라 수집 시각은
+    실제 접수 시각의 상한이고 오차가 한 주기 안이다.
+    """
+    from app.collectors.dart import _published_at
+
+    now = datetime(2026, 7, 29, 15, 4, tzinfo=KST)
+    assert _published_at("20260729", now) == now
+
+
+def test_earlier_filing_keeps_its_own_date():
+    """소급 백필이 전부 '방금'이 되면 신선도 판정이 통째로 무너진다."""
+    from app.collectors.dart import _published_at
+
+    now = datetime(2026, 7, 29, 15, 4, tzinfo=KST)
+    assert _published_at("20260727", now) == datetime(2026, 7, 27, tzinfo=KST)
+
+
+def test_unparsable_date_falls_back_to_now():
+    from app.collectors.dart import _published_at
+
+    now = datetime(2026, 7, 29, 15, 4, tzinfo=KST)
+    assert _published_at("", now) == now
