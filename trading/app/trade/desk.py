@@ -63,7 +63,7 @@ DEFAULTS = {
     "enabled": False,        # 실거래 청산을 다루므로 배포와 활성화를 분리한다
     "interval_sec": 2.0,     # 현행 30초의 15배. 1초는 발주 왕복·SQLite 쓰기와 경합
     "stale_sec": 5.0,        # 이보다 오래된 WS 값은 못 믿는다 → REST 보충
-    "max_symbols": 5,        # max_positions 와 같게. 초과분은 기존 30초 루프가 맡는다
+    "max_symbols": 0,        # 0 = 보유 전량. 상한을 두면 그 초과분이 2초 감시 밖으로 나간다
     "degraded_interval_sec": 30.0,   # WS 미연결 시 강등 주기
 }
 
@@ -71,7 +71,8 @@ DEFAULTS = {
 # REST 가 늘고 있으면 분리한 의미가 사라지는 중이므로 눈에 보여야 한다.
 STATE: dict = {
     "cycles": 0, "ws": 0, "rest": 0, "no_price": 0, "exits": 0, "lines": 0,
-    "watched": 0, "degraded": False, "last_tick": None, "last_line": None,
+    "proposed": 0, "watched": 0, "degraded": False,
+    "last_tick": None, "last_line": None,
 }
 
 
@@ -138,6 +139,19 @@ def stale_sec() -> float:
     return _num("stale_sec")
 
 
+def owns(reason: str) -> bool:
+    """이 청산 사유를 데스크가 소유하는가 — 30초 루프는 소유하지 않은 것만 낸다.
+
+    소유권을 하나로 두는 이유는 이중 발주(그건 `exit_pending` 이 막는다)가 아니라
+    **어느 루프가 냈는지가 흐려지는 것**이다. 데스크를 켜고 껐을 때의 동작이
+    뒤섞이면 관찰 결과를 읽을 수 없다.
+
+    시간 손절(`timeout`)은 넘기지 않는다 — 시각 기준이라 2초 해상도가 필요 없고,
+    보유시간 규칙은 데스크가 들고 있지 않다.
+    """
+    return enabled() and reason in ("stop", "target")
+
+
 def in_session(now: datetime | None = None) -> bool:
     t = now or datetime.now(KST)
     return t.weekday() < 5 and SESSION[0] <= t.strftime("%H:%M") <= SESSION[1]
@@ -164,21 +178,41 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
 # --------------------------------------------------------------------------
 # 한 사이클
 # --------------------------------------------------------------------------
-async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = None) -> dict:
+def _auto(reason: str) -> bool:
+    """이 청산을 승인 없이 즉시 발주해도 되는가.
+
+    **기존 30초 루프와 같은 규약을 따라야 한다.** 데스크를 켜는 것은 판정 주기를
+    바꾸는 것이지 승인 규칙을 바꾸는 것이 아니다. 여기서 갈리면 데스크를 켜는
+    순간 목표 도달 청산이 조용히 자동 발주로 바뀐다.
+    """
+    ex = settings.CONFIG.get("execution", {}) or {}
+    if settings.RISK.get("auto_approve", False):
+        return True
+    # 손절·시간손절은 계좌 보호라 stop_mode 를 따르고, 목표는 항상 승인이다
+    return reason in ("stop", "timeout") and ex.get("stop_mode", "auto") == "auto"
+
+
+async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = None,
+               propose_exit=None) -> dict:
     """보유 포지션 1회 판정. 반환: 계측값(화면·로그용).
 
     fresh_price(symbol) -> float | None   : WS 값. 낡았으면 None (콜 0)
     rest_price(symbol)  -> float | None   : REST 보충 (async)
-    execute_exit(pos, reason, px)         : 청산 발주 (async)
+    execute_exit(pos, reason, px)         : 청산 **발주** (async). 데스크가 직접 낸다 —
+        판정만 하고 다른 루프에 넘기면 빨라진 의미가 없다
+    propose_exit(pos, reason, px)         : 승인 대기 등록(동기). 승인 모드일 때만 쓴다
 
     전부 주입받는 이유는 **WS 가 있을 때 REST 를 부르지 않는다**를 테스트로 고정하기
     위해서다. 이 설계의 값이 거기서 나온다 — 콜이 늘면 분리한 의미가 없다.
     """
     now = now or datetime.now(KST)
-    stat = {"watched": 0, "ws": 0, "rest": 0, "no_price": 0, "exits": 0, "lines": 0}
-    limit = int(_num("max_symbols"))
+    stat = {"watched": 0, "ws": 0, "rest": 0, "no_price": 0, "exits": 0,
+            "lines": 0, "proposed": 0}
     rows = [p for p in ledger.positions(status="open", limit=200)
-            if not p.get("exit_pending")][:limit]
+            if not p.get("exit_pending")]
+    limit = int(_num("max_symbols"))
+    if limit > 0:
+        rows = rows[:limit]      # 0 이면 보유 전량 — 감시 밖으로 나가는 종목이 없다
     stat["watched"] = len(rows)
 
     for pos in rows:
@@ -209,10 +243,25 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
         if not reason:
             continue
 
+        line_px = float(stop if reason == "stop" else target)
         # 발주 **전에** 잠근다. 2초 루프에서는 발주 왕복 안에 다음 사이클이 온다.
         ledger.set_exit_pending(pos["id"], 1)
+
+        if not _auto(reason) and propose_exit is not None:
+            # 승인 모드 — 기존 30초 루프와 같은 규약이다. 승인 대기에만 올린다
+            try:
+                await asyncio.to_thread(propose_exit, pos, reason, line_px)
+            except Exception:  # noqa: BLE001
+                log.exception("데스크 청산 승인 등록 오류 %s", pos.get("symbol"))
+                ledger.set_exit_pending(pos["id"], 0)
+                continue
+            stat["proposed"] += 1
+            log.info("데스크 청산 승인 대기 %s(%s) %s", pos.get("name"),
+                     pos.get("symbol"), reason)
+            continue
+
         try:
-            r = await execute_exit(pos, reason, float(stop if reason == "stop" else target))
+            r = await execute_exit(pos, reason, line_px)
         except Exception:  # noqa: BLE001
             log.exception("데스크 청산 발주 오류 %s", pos.get("symbol"))
             ledger.set_exit_pending(pos["id"], 0)
@@ -225,7 +274,7 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
             ledger.set_exit_pending(pos["id"], 0)   # 실패면 다음 사이클에 다시 본다
 
     STATE["cycles"] += 1
-    for k in ("ws", "rest", "no_price", "exits", "lines"):
+    for k in ("ws", "rest", "no_price", "exits", "lines", "proposed"):
         STATE[k] += stat[k]
     STATE["watched"] = stat["watched"]
     STATE["last_tick"] = now.strftime("%H:%M:%S")
@@ -235,7 +284,7 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
 # --------------------------------------------------------------------------
 # 루프
 # --------------------------------------------------------------------------
-async def loop(fresh_price, rest_price, execute_exit, ws_ok) -> None:
+async def loop(fresh_price, rest_price, execute_exit, ws_ok, propose_exit=None) -> None:
     """장중에만 돈다. `enabled: false` 면 아무것도 하지 않는다.
 
     ws_ok() -> bool : WS 연결 상태. 끊겼으면 주기를 강등해 REST 폭주를 막는다.
@@ -250,7 +299,8 @@ async def loop(fresh_price, rest_price, execute_exit, ws_ok) -> None:
                     interval = _num("degraded_interval_sec")
                     log.warning("WS 미연결 — 데스크 주기를 %.0f초로 강등", interval)
                 STATE["degraded"] = degraded
-                await tick(fresh_price, rest_price, execute_exit)
+                await tick(fresh_price, rest_price, execute_exit,
+                           propose_exit=propose_exit)
         except Exception:  # noqa: BLE001 - 데스크 오류가 서비스를 멈추지 않는다
             log.exception("매매 데스크 오류")
         await asyncio.sleep(max(0.5, interval))

@@ -111,7 +111,14 @@ async def _ledger_loop() -> None:
                     # 본전 이동 shadow — 실제 청산 판정과 **같은 가격·같은 주기**로
                     # 관측한다. 기록 전용이라 아래 청산 로직에 관여하지 않는다.
                     await _breakeven_observe(breakeven)
+                    # 데스크가 켜져 있으면 **손절·목표는 데스크가 소유한다.**
+                    # 여기서 또 보면 30초 뒤에 같은 판정이 한 번 더 나온다 —
+                    # 이중 발주는 exit_pending 이 막지만, 어느 루프가 냈는지가
+                    # 흐려지고 데스크를 껐을 때와 켰을 때의 동작이 뒤섞인다.
+                    # 시간 손절은 남긴다: 시각 기준이라 2초 해상도가 필요 없다.
                     for ex in await asyncio.to_thread(ledger.due_exits, _price_of):
+                        if desk.owns(ex["reason"]):
+                            continue
                         # 완전 자동 모드면 목표 도달 청산도 승인 없이 즉시 실행
                         # 시간 손절은 손절과 같은 성격(계좌 보호) — 같은 모드를 따른다
                         if (ex["reason"] in ("stop", "timeout") and stop_mode == "auto") \
@@ -163,6 +170,7 @@ async def _desk_loop() -> None:
         rest_price=_desk_rest_price,
         execute_exit=orders.execute_exit,
         ws_ok=lambda: feed.connected,
+        propose_exit=orders.propose_exit,
     )
 
 
