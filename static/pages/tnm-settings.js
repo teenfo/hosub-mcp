@@ -20,7 +20,7 @@ const ORIGIN_BADGE = {
 };
 // 파이프라인 단계 — /api/status 의 키 순서가 곧 데이터가 흐르는 순서다.
 const STAGES = [
-  ["collect", "수집", "DART 공시 · 뉴스 RSS"],
+  ["collect", "수집", "DART 공시 · 뉴스 RSS · 증권사 리포트"],
   ["embed", "임베딩", "본문 벡터화"],
   ["dedup", "중복제거", "같은 사건의 재탕 걸러내기"],
   ["classify", "분류", "LLM 카테고리·방향·점수"],
@@ -209,7 +209,161 @@ export default {
     };
 
     // ==================================================================
-    // ③ Shadow 지표 (주별 정밀도/재현율 — 실운영 전환 판정)
+    // ③ 증권사 리서치 — 수집 대상 관리 + 최근 리포트
+    // ==================================================================
+    const brkC = card("증권사 리서치", null, { wide: true, icon: "bi-file-earmark-bar-graph" });
+    brkC.col.className = "col-12";
+    row.appendChild(brkC.col);
+    const brkAddName = el("input", { class: "form-control form-control-sm", placeholder: "증권사명", style: "max-width:180px" });
+    const brkAddKind = el("select", { class: "form-select form-select-sm", style: "max-width:110px" }, [
+      el("option", { value: "domestic" }, "국내사"),
+      el("option", { value: "foreign" }, "해외사"),
+    ]);
+    const brkAddAlias = el("input", { class: "form-control form-control-sm", placeholder: "별칭 (쉼표 구분, 선택)", style: "max-width:230px" });
+    const brkAddBtn = el("button", { class: "btn btn-sm btn-primary", type: "button" }, "추가");
+    const brkRunBtn = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "지금 수집");
+    const brkBody = el("div", { class: "small mt-2" });
+    const repBody = el("div", { class: "small mt-3" });
+    brkC.body.append(
+      el("div", { class: "small text-secondary mb-2", html:
+        "국내사는 <b>네이버 금융 리서치 · 한경컨센서스</b>에서 리포트 목록(제목·목표주가·투자의견·PDF)을 그대로 받습니다. " +
+        "<b>해외사는 리포트 원문이 공개돼 있지 않아</b> 국내 언론이 인용한 기사만 모읍니다 — 원문이 아니라 2차 정보입니다. " +
+        "끈 증권사의 리포트는 적재하지 않고, 목록에 없는 이름은 <b>미등록</b>으로 표시됩니다." }),
+      el("div", { class: "d-flex gap-2 flex-wrap" },
+        [brkAddName, brkAddKind, brkAddAlias, brkAddBtn, brkRunBtn]),
+      brkBody, repBody);
+
+    const brkEditing = () => brkBody.contains(document.activeElement);
+
+    const loadBrokers = async () => {
+      let d;
+      try { d = await fetchJSON("/api/tnm/brokers"); } catch (e) { return; }
+      if (!changed("brokers", d)) return;
+      if (brkEditing()) { changed.invalidate("brokers"); return; }
+      brkBody.innerHTML = "";
+      const list = d.brokers || [];
+      const on = list.filter((b) => b.enabled);
+      const stats = d.stats || {};
+      brkBody.appendChild(el("div", { class: "text-secondary mb-1" },
+        `수집 ${on.length} / 등록 ${list.length}` +
+        ` — 국내 ${list.filter((b) => b.kind === "domestic").length}` +
+        ` · 해외 ${list.filter((b) => b.kind === "foreign").length}` +
+        (stats.total != null ? ` · 최근 7일 리포트 ${stats.total}건` : "")));
+      if (stats.unregistered && stats.unregistered.length) {
+        brkBody.appendChild(el("div", { class: "alert alert-warning py-1 px-2 mb-2 small" },
+          "미등록 증권사: " + stats.unregistered.join(", ") +
+          " — 위 입력칸으로 추가하면 이름이 통일됩니다"));
+      }
+      const counts = Object.fromEntries((stats.by_broker || []).map((b) => [b.broker, b.count]));
+      const t = el("table", { class: "table table-sm align-middle mb-0 small" });
+      t.appendChild(el("thead", { html: "<tr><th>증권사</th><th>구분</th><th>수집</th><th>최근 7일</th><th>누적</th><th>최종 관측</th><th></th></tr>" }));
+      const tb = el("tbody");
+      for (const b of list) {
+        const tr = el("tr", { class: b.enabled ? "" : "opacity-50" });
+        tr.appendChild(el("td", {}, [
+          el("div", {}, b.name),
+          b.aliases.length
+            ? el("div", { class: "text-secondary", style: "font-size:.72rem" }, b.aliases.join(" · "))
+            : null,
+          b.note ? el("div", { class: "text-warning", style: "font-size:.72rem" }, b.note) : null,
+        ]));
+        tr.appendChild(el("td", { html: b.kind === "foreign"
+          ? '<span class="badge text-bg-secondary">해외</span>'
+          : '<span class="badge text-bg-light text-dark">국내</span>' }));
+        const sw = el("input", { type: "checkbox", class: "form-check-input", role: "switch" });
+        sw.checked = !!b.enabled;
+        sw.onchange = async () => {
+          sw.disabled = true;
+          try {
+            await postJSON(`/api/tnm/brokers/${encodeURIComponent(b.name)}`,
+                           { enabled: sw.checked });
+            changed.invalidate("brokers"); await loadBrokers();
+          } catch (err) { sw.checked = !sw.checked; alert("실패: " + err.message); }
+          finally { sw.disabled = false; }
+        };
+        tr.appendChild(el("td", {}, el("div", { class: "form-check form-switch mb-0" }, sw)));
+        tr.appendChild(el("td", { class: "text-secondary" }, String(counts[b.name] ?? 0)));
+        tr.appendChild(el("td", { class: "text-secondary" }, String(b.reports ?? 0)));
+        tr.appendChild(el("td", { class: "text-secondary text-nowrap" },
+          b.last_seen_at ? String(b.last_seen_at).replace("T", " ").slice(5, 16) : "—"));
+        const del = el("button", { class: "btn btn-sm btn-outline-danger py-0", type: "button" }, "제거");
+        del.onclick = async () => {
+          if (!confirm(`${b.name} 을 목록에서 제거합니다. 이미 수집된 리포트는 남습니다.`)) return;
+          try {
+            await postJSON(`/api/tnm/brokers/${encodeURIComponent(b.name)}/delete`);
+            changed.invalidate("brokers"); await loadBrokers();
+          } catch (err) { alert("실패: " + err.message); }
+        };
+        tr.appendChild(el("td", {}, del));
+        tb.appendChild(tr);
+      }
+      t.appendChild(tb);
+      brkBody.appendChild(el("div", { class: "table-responsive", style: "max-height:420px; overflow-y:auto" }, t));
+    };
+
+    const CAT_KO = { company: "종목", industry: "산업", market: "시황",
+                     economy: "경제", invest: "투자정보" };
+    const loadReports = async () => {
+      let d;
+      try { d = await fetchJSON("/api/tnm/reports?days=7&limit=60"); } catch (e) { return; }
+      if (!changed("reports", d)) return;
+      repBody.innerHTML = "";
+      const rows = d.reports || [];
+      repBody.appendChild(el("div", { class: "fw-semibold mb-1" },
+        `최근 리포트 (7일 · ${rows.length}건)`));
+      if (!rows.length) {
+        repBody.appendChild(el("div", { class: "text-secondary" },
+          "아직 없음 — [지금 수집]을 누르거나 다음 주기(60분)를 기다리세요"));
+        return;
+      }
+      const t = el("table", { class: "table table-sm align-middle mb-0 small" });
+      t.appendChild(el("thead", { html: "<tr><th>날짜</th><th>분류</th><th>종목</th><th>제목</th><th>증권사</th><th>목표가</th><th>의견</th></tr>" }));
+      const tb = el("tbody");
+      for (const r of rows) {
+        const link = r.pdf_url || r.url;
+        tb.appendChild(el("tr", {}, [
+          el("td", { class: "text-secondary text-nowrap" }, String(r.published_at).slice(5, 10)),
+          el("td", { class: "text-secondary" }, CAT_KO[r.category] || r.category),
+          el("td", { class: "text-nowrap" }, r.stock_name ? `${r.stock_name}` : "—"),
+          el("td", { html: `<a href="${link}" target="_blank" rel="noopener">${
+            String(r.title).replace(/[<>&]/g, "")}</a>` +
+            (r.source === "news" ? ' <span class="badge text-bg-secondary">언론인용</span>' : "") }),
+          el("td", { class: "text-nowrap" }, r.broker),
+          el("td", { class: "text-end text-nowrap" },
+             r.target_price ? Number(r.target_price).toLocaleString() : "—"),
+          el("td", { class: "text-secondary" }, r.opinion || "—"),
+        ]));
+      }
+      t.appendChild(tb);
+      repBody.appendChild(el("div", { class: "table-responsive", style: "max-height:420px; overflow-y:auto" }, t));
+    };
+
+    brkAddBtn.onclick = async () => {
+      const name = brkAddName.value.trim();
+      if (!name) { alert("증권사명을 입력하세요"); return; }
+      const aliases = brkAddAlias.value.split(",").map((s) => s.trim()).filter(Boolean);
+      try {
+        await postJSON("/api/tnm/brokers",
+                       { name, kind: brkAddKind.value, aliases });
+        brkAddName.value = ""; brkAddAlias.value = "";
+        changed.invalidate("brokers"); await loadBrokers();
+      } catch (e) { alert("실패: " + e.message); }
+    };
+    brkRunBtn.onclick = async () => {
+      brkRunBtn.disabled = true;
+      brkRunBtn.textContent = "수집 중…";
+      try {
+        const r = await postJSON("/api/tnm/research/run");
+        changed.invalidate("brokers"); changed.invalidate("reports");
+        await Promise.all([loadBrokers(), loadReports()]);
+        alert(`수집 완료 — 조회 ${r.fetched ?? 0} · 저장 ${r.inserted ?? 0}` +
+              ` · 분석큐 ${r.raw_inserted ?? 0} · 제외(끔) ${r.disabled_skip ?? 0}`);
+      } catch (e) { alert("실패: " + e.message); }
+      finally { brkRunBtn.disabled = false; brkRunBtn.textContent = "지금 수집"; }
+    };
+
+    // ==================================================================
+    // ④ Shadow 지표 (주별 정밀도/재현율 — 실운영 전환 판정)
     // ==================================================================
     const metC = card("Shadow 검증 지표", null, { wide: true, icon: "bi-clipboard-check" });
     metC.col.className = "col-12";
@@ -351,7 +505,10 @@ export default {
       );
     };
 
-    await Promise.all([loadStatus(), loadWatch(), loadKeys(), loadMetrics()]);
-    ctx.addTimer(setInterval(() => { loadStatus(); loadWatch(); loadMetrics(); }, 60_000));
+    await Promise.all([loadStatus(), loadWatch(), loadBrokers(), loadReports(),
+                       loadKeys(), loadMetrics()]);
+    ctx.addTimer(setInterval(() => {
+      loadStatus(); loadWatch(); loadBrokers(); loadReports(); loadMetrics();
+    }, 60_000));
   },
 };

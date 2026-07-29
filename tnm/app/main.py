@@ -43,6 +43,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(watchsync.loop()),
         asyncio.create_task(collector.dart_loop()),
         asyncio.create_task(collector.news_loop()),
+        asyncio.create_task(collector.research_loop()),
         asyncio.create_task(embedder.loop()),
         asyncio.create_task(deduper.loop()),
         asyncio.create_task(classifier.loop()),
@@ -234,13 +235,88 @@ async def api_promote_run(_=Depends(require_auth)):
 
 @app.post("/api/collect/run")
 async def api_collect_run(_=Depends(require_auth)):
-    """공시·뉴스 수집 수동 트리거 — 백그라운드 시작 후 즉시 반환."""
+    """공시·뉴스·리서치 수집 수동 트리거 — 백그라운드 시작 후 즉시 반환."""
     _require_db()
     if collector.running:
         return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
-    asyncio.create_task(collector.run_once("dart"))
-    asyncio.create_task(collector.run_once("news"))
+    for kind in ("dart", "news", "research"):
+        asyncio.create_task(collector.run_once(kind))
     return {"ok": True, "message": "수집 시작 — /api/status 의 collect 로 결과 확인"}
+
+
+# ---------------- 증권사 · 리서치 리포트 ----------------
+
+@app.get("/api/brokers")
+async def api_brokers(_=Depends(require_auth)):
+    """증권사 목록 + 최근 수집 현황(미등록 이름 포함)."""
+    _require_db()
+    out: dict = {"brokers": await db.list_brokers()}
+    try:
+        out["stats"] = await db.report_stats(days=7)
+    except Exception as e:  # noqa: BLE001 — 통계 실패가 목록 조회를 막지 않는다
+        out["stats_error"] = str(e)
+    return out
+
+
+@app.post("/api/brokers")
+async def api_broker_add(payload: dict, _=Depends(require_auth)):
+    """증권사 추가(있으면 활성화 + 별칭 병합)."""
+    _require_db()
+    name = str(payload.get("name", "")).strip()
+    if not name:
+        return JSONResponse({"ok": False, "error": "증권사명이 필요합니다"}, 400)
+    kind = str(payload.get("kind", "domestic")).strip()
+    if kind not in ("domestic", "foreign"):
+        return JSONResponse({"ok": False, "error": "kind 는 domestic|foreign"}, 400)
+    aliases = [str(a).strip() for a in (payload.get("aliases") or []) if str(a).strip()]
+    row = await db.add_broker(name, kind, aliases, payload.get("note"))
+    return {"ok": True, "broker": row}
+
+
+@app.post("/api/brokers/{name}")
+async def api_broker_update(name: str, payload: dict, _=Depends(require_auth)):
+    """수집 토글·분류·별칭 수정."""
+    _require_db()
+    kind = payload.get("kind")
+    if kind is not None and kind not in ("domestic", "foreign"):
+        return JSONResponse({"ok": False, "error": "kind 는 domestic|foreign"}, 400)
+    enabled = payload.get("enabled")
+    aliases = payload.get("aliases")
+    if aliases is not None:
+        aliases = [str(a).strip() for a in aliases if str(a).strip()]
+    ok = await db.set_broker(
+        name, enabled=None if enabled is None else bool(enabled),
+        kind=kind, aliases=aliases)
+    if not ok:
+        return JSONResponse({"ok": False, "error": "증권사 없음 또는 변경 값 없음"}, 404)
+    return {"ok": True}
+
+
+@app.post("/api/brokers/{name}/delete")
+async def api_broker_delete(name: str, _=Depends(require_auth)):
+    """목록에서 제거. 이미 수집된 리포트는 남는다(원장은 지우지 않는다)."""
+    _require_db()
+    if not await db.delete_broker(name):
+        return JSONResponse({"ok": False, "error": "증권사 없음"}, 404)
+    return {"ok": True}
+
+
+@app.get("/api/reports")
+async def api_reports(broker: str | None = None, category: str | None = None,
+                      ticker: str | None = None, days: int = 7,
+                      limit: int = 100, offset: int = 0,
+                      _=Depends(require_auth)):
+    _require_db()
+    return {"reports": await db.list_reports(broker, category, ticker,
+                                             days, limit, offset)}
+
+
+@app.post("/api/research/run")
+async def api_research_run(_=Depends(require_auth)):
+    """리서치 리포트 수집 수동 트리거."""
+    _require_db()
+    result = await collector.run_once("research")
+    return {"ok": "skipped" not in result, **result}
 
 
 # ---------------- 설정 ----------------
