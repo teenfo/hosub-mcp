@@ -716,7 +716,7 @@ export default {
           `가격없음 ${fmt(d.no_price)}`) : null,
         el("span", { class: "badge text-bg-" + (d.trailing ? "info" : "light text-dark"),
           title: d.trailing
-            ? "가격이 오르면 진입 시 정한 갭만큼 손절·목표를 같이 올리고, 내려도 그 자리에 둡니다. 목표가가 늘 현재가 위로 달아나므로 청산은 따라 올라간 손절선이 맡습니다."
+            ? `가격이 오르면 같은 갭으로 손절·목표를 올리고 내려도 그 자리에 둡니다. 목표까지 ${((d.tighten_at ?? 0.5) * 100).toFixed(0)}% 오면 손절 간격을 목표갭의 ${((d.tighten_gap ?? 0.2) * 100).toFixed(0)}% 로 좁히고, 익절선은 진입가 +${d.max_gain_pct ?? 3}% 를 넘지 않습니다. 손절선이 움직이면 시간 손절을 다시 셉니다.`
             : "진입 시 정한 손절·목표를 그대로 씁니다" },
           d.trailing ? "라인 추종 ON" : "라인 추종 OFF"),
         el("span", { class: "text-secondary" },

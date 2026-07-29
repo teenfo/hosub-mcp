@@ -275,9 +275,14 @@ async def test_추종을_끄면_진입_시_고정값_그대로다(env, monkeypat
 
 
 # --------------------------------------------------------------------------
-# 라인 추종 — 사용자 지침 2026-07-29
-#   "오르면 같은 갭으로 따라 올리고, 내려도 그 자리에 둔다"
+# 라인 추종 — 사용자 지침 2026-07-29 (+ 같은 날 보강)
+#   ① 오르면 같은 갭으로 따라 올리고, 내려도 그 자리에 둔다
+#   ② 목표까지 50% 를 오면 손절 간격을 목표갭의 20% 로 좁힌다
+#   ③ 익절선은 진입가 +3% 를 넘지 않는다 (이게 있어야 목표에 닿는다)
 # 실거래 손익이 여기서 갈린다. 규칙을 값으로 못박는다.
+#
+# 기준 포지션: 진입 10,000 · 손절 9,800(갭 200) · 목표 10,400(목표갭 400)
+#   → 좁히기 발동 10,200(50%) · 좁힌 간격 80(20%) · 익절 상한 10,300(+3%)
 # --------------------------------------------------------------------------
 def _lines(oid="p1"):
     with ledger._conn() as conn:
@@ -286,66 +291,95 @@ def _lines(oid="p1"):
     return (r["stop_live"], r["target_live"])
 
 
-async def test_가격이_오르면_같은_갭으로_따라_올린다(env):
-    """진입 10,000 · 손절 9,800(갭 200) · 목표 10,400(갭 400)."""
+async def test_발동_전에는_원래_갭으로_따라_올린다(env):
     _open()
-    spy = _Spy(ws={"005930": 10_300})
+    spy = _Spy(ws={"005930": 10_150})           # 50% 미만
     stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
     assert stat["lines"] == 1
-    assert _lines() == (10_100.0, 10_700.0)     # 10,300∓갭
+    assert _lines() == (9_950.0, 10_300.0)      # 10,150−200 · 목표는 상한
+
+
+async def test_목표의_절반을_오면_손절_간격이_좁아진다(env):
+    """이익 구간에서는 되밀림을 덜 허용해 확정분을 키운다."""
+    _open()
+    spy = _Spy(ws={"005930": 10_200})           # 정확히 50%
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines()[0] == 10_120.0, "간격이 200 → 80 으로 좁아진다"
 
 
 async def test_가격이_내려도_라인은_그_자리에_남는다(env):
     """이 한 줄이 '이득 보전' 의 실체다."""
     _open()
-    spy = _Spy(ws={"005930": 10_300})
+    spy = _Spy(ws={"005930": 10_250})
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines()[0] == 10_170.0
 
     spy.ws["005930"] = 10_150                   # 되밀림
     stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
     assert stat["lines"] == 0, "안 바뀌면 쓰지도 않는다"
-    assert _lines() == (10_100.0, 10_700.0)
+    assert _lines()[0] == 10_170.0
 
 
 async def test_손절선은_한_번도_내려가지_않는다(env):
     _open()
-    spy = _Spy(ws={"005930": 10_600})
+    spy = _Spy(ws={"005930": 10_290})
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
     high = _lines()
-    for px in (10_500, 10_450, 10_405):         # 계속 밀려도
+    for px in (10_250, 10_230, 10_215):         # 계속 밀려도
         spy.ws["005930"] = px
         await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
         assert _lines() == high
 
 
-async def test_진입가_아래에서는_원래_손절선을_지킨다(env):
+async def test_진입가_아래에서는_손절선이_원래_자리에_있다(env):
     """물려 있는 동안 손절선이 따라 내려가면 손실이 커진다."""
     _open()
     spy = _Spy(ws={"005930": 9_900})
-    stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert stat["lines"] == 0 and _lines() == (None, None)
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines()[0] is None, "손절선은 안 움직인다(목표만 상한에 걸린다)"
     assert ledger.due_exits(lambda _s: 9_850) == [], "원래 손절 9,800 그대로다"
 
 
 async def test_따라_올라간_손절선에_닿으면_청산한다(env):
     """추종의 목적 — 되밀릴 때 반납분만 내주고 나온다."""
     _open()
-    spy = _Spy(ws={"005930": 10_600})
-    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)   # 손절선 10,400
+    spy = _Spy(ws={"005930": 10_290})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)   # 손절선 10,210
     assert spy.exits == []
 
-    spy.ws["005930"] = 10_390
+    spy.ws["005930"] = 10_200
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert spy.exits == [("p1", "stop", 10_400.0)], "원래 손절 9,800 이 아니다"
+    assert spy.exits == [("p1", "stop", 10_210.0)], "원래 손절 9,800 이 아니다"
 
 
-async def test_목표가는_늘_현재가_위로_달아난다(env):
-    """지침의 귀결 — 이익을 미리 확정하지 않는다. 청산은 손절선이 맡는다."""
+async def test_익절선은_진입가_3퍼센트를_넘지_않는다(env):
+    """상한이 없으면 목표가가 늘 달아나 **익절이 영원히 안 된다.**"""
     _open()
-    spy = _Spy(ws={"005930": 12_000})
+    spy = _Spy(ws={"005930": 10_299})
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert spy.exits == [], "목표 도달 청산은 일어나지 않는다"
-    assert _lines()[1] == 12_400.0
+    assert _lines()[1] == 10_300.0, "10,299+400 이 아니라 상한에서 멈춘다"
+
+
+async def test_상한에_닿으면_익절_청산이_일어난다(env):
+    """조정 지침의 목적 — 원래 룰에서는 이 청산이 불가능했다."""
+    _open()
+    spy = _Spy(ws={"005930": 10_300})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert spy.exits == [("p1", "target", 10_300.0)]
+
+
+async def test_상한은_원래_목표가보다_낮아도_적용된다(env):
+    """규칙에 따라 목표가 3% 를 넘게 잡힌다(target_r 1.5 × 손절 2.5% = 3.75%).
+
+    '하향은 없다' 는 추종 방향에 대한 것이고, 상한은 그와 별개로 걸어 둔
+    이익 확정선이다.
+    """
+    ledger.open_position({"id": "p9", "symbol": "000660", "side": "long",
+                          "entry": 10_000, "stop": 9_750, "target": 10_375,
+                          "rule": "orb", "qty": 3, "name": "000660"}, fill=10_000)
+    spy = _Spy(ws={"000660": 10_050})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines("p9")[1] == 10_300.0
 
 
 async def test_숏은_방향을_뒤집는다(env):
@@ -353,23 +387,74 @@ async def test_숏은_방향을_뒤집는다(env):
     ledger.open_position({"id": "s1", "symbol": "034220", "side": "short",
                           "entry": 10_000, "stop": 10_200, "target": 9_600,
                           "rule": "orb", "qty": 5, "name": "034220"}, fill=10_000)
-    spy = _Spy(ws={"034220": 9_700})
+    spy = _Spy(ws={"034220": 9_850})            # 50% 미발동(9,800 이 발동선)
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert _lines("s1") == (9_900.0, 9_300.0), "손절선이 내려와야 한다"
+    assert _lines("s1") == (10_050.0, 9_700.0), "손절선이 내려와야 한다"
 
-    spy.ws["034220"] = 9_800                    # 되밀림
+    spy.ws["034220"] = 9_900                    # 되밀림
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
-    assert _lines("s1") == (9_900.0, 9_300.0)
+    assert _lines("s1") == (10_050.0, 9_700.0)
+
+
+async def test_숏도_절반을_오면_간격이_좁아지고_상한이_걸린다(env):
+    ledger.open_position({"id": "s2", "symbol": "034220", "side": "short",
+                          "entry": 10_000, "stop": 10_200, "target": 9_600,
+                          "rule": "orb", "qty": 5, "name": "034220"}, fill=10_000)
+    spy = _Spy(ws={"034220": 9_800})            # 정확히 50%
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines("s2") == (9_880.0, 9_700.0)   # 9,800+80 · 상한 −3%
 
 
 def test_원본_손절선은_추종_뒤에도_남는다(env):
     """되돌릴 기준이자 일지·백테스트가 읽는 값이다."""
     _open()
-    assert desk.update_lines(ledger.positions(status="open")[0], 10_300) \
-        == (10_100.0, 10_700.0)
+    assert desk.update_lines(ledger.positions(status="open")[0], 10_250) \
+        == (10_170.0, 10_300.0)
     with ledger._conn() as conn:
         r = conn.execute("SELECT stop, target FROM positions").fetchone()
     assert (r["stop"], r["target"]) == (9_800, 10_400)
+
+
+# --------------------------------------------------------------------------
+# 시간 손절 — 손절선이 움직이면 다시 센다
+# --------------------------------------------------------------------------
+async def test_손절선이_움직이면_시간_손절_시계가_다시_돈다(env, monkeypatch):
+    """손절선이 올라갔다는 것은 방향이 아직 맞다는 실측이다.
+
+    그 자리를 진입 시각 기준 시계로 자르면 이기고 있는 자리를 닫는다.
+    """
+    monkeypatch.setitem(settings.RULES, "max_hold_min", 30)
+    _open()
+    with ledger._conn() as conn:                # 진입한 지 29분 됐다고 두고
+        conn.execute("UPDATE positions SET opened=?",
+                     ((NOW - timedelta(minutes=29)).isoformat(timespec="seconds"),))
+    later = NOW + timedelta(minutes=5)          # → 34분. 원래라면 시간 손절이다
+    assert ledger.due_exits(lambda _s: 10_100, now=later)[0]["reason"] == "timeout"
+
+    spy = _Spy(ws={"005930": 10_250})           # 손절선이 움직인다
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert ledger.due_exits(lambda _s: 10_250, now=later) == [], \
+        "손절선이 움직인 시각부터 다시 센다"
+
+
+def test_손절선이_안_움직이면_원래_시계_그대로다(env, monkeypatch):
+    """진입 후 값이 안 나온 자리는 자를 근거가 그대로 남아 있다."""
+    monkeypatch.setitem(settings.RULES, "max_hold_min", 30)
+    _open()
+    with ledger._conn() as conn:
+        conn.execute("UPDATE positions SET opened=?",
+                     ((NOW - timedelta(minutes=31)).isoformat(timespec="seconds"),))
+    assert ledger.due_exits(lambda _s: 10_000, now=NOW)[0]["reason"] == "timeout"
+
+
+def test_목표가만_바뀌면_시계는_그대로다(env):
+    """보유시간을 늘리는 근거는 손절선이 움직였다는 사실이다."""
+    _open()
+    ledger.set_lines("p1", None, 10_300.0, now=NOW)
+    with ledger._conn() as conn:
+        r = conn.execute("SELECT opened, stop_moved FROM positions").fetchone()
+    assert r["stop_moved"] is None
+    assert ledger.hold_since(r) == r["opened"]
 
 
 def test_갭이_없으면_건드리지_않는다(env):

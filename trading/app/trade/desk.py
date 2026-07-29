@@ -66,6 +66,9 @@ DEFAULTS = {
     "max_symbols": 0,        # 0 = 보유 전량. 상한을 두면 그 초과분이 2초 감시 밖으로 나간다
     "degraded_interval_sec": 30.0,   # WS 미연결 시 강등 주기
     "trailing": True,        # 손절·익절선 추종. 끄면 진입 시 고정값 그대로 쓴다
+    "tighten_at": 0.5,       # 목표까지 이만큼 왔으면 손절 간격을 좁힌다(목표갭 대비)
+    "tighten_gap": 0.2,      # 좁힌 뒤의 손절 간격(목표갭 대비)
+    "max_gain_pct": 3.0,     # 익절선 상한(진입가 대비 %). 이게 있어야 목표에 닿는다
 }
 
 # 화면이 읽는 계측. "WS 로 몇 건, REST 로 몇 건" 이 이 설계의 성적표다 —
@@ -80,7 +83,8 @@ STATE: dict = {
 def status() -> dict:
     c = cfg()
     return dict(STATE, enabled=bool(c.get("enabled", False)),
-                trailing=trailing(),
+                trailing=trailing(), tighten_at=_num("tighten_at"),
+                tighten_gap=_num("tighten_gap"), max_gain_pct=_num("max_gain_pct"),
                 interval_sec=_num("interval_sec"), stale_sec=_num("stale_sec"),
                 degraded_interval_sec=_num("degraded_interval_sec"),
                 max_symbols=int(_num("max_symbols")),
@@ -225,12 +229,24 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
     내려가고 목표가도 내려간다(`min`). 지침 문구를 롱 기준 그대로 적용하면
     숏의 손절선이 **멀어져 손실이 커진다** — 추종은 언제나 유리한 방향 한쪽이다.
 
-    ## 알아둘 것 — 목표가는 사실상 닿지 않게 된다
+    ## 목표까지 절반을 오면 손절 간격을 좁힌다 (지침 보강 2026-07-29)
 
-    목표가가 늘 `현재가 + 갭` 위로 달아나므로 목표 도달 청산은 발생하지 않는다.
-    청산은 **따라 올라간 손절선**(또는 시간 손절·마감 정리)이 맡는다. 그것이
-    "이득을 극대화" 지침의 귀결이다 — 이익을 미리 확정하지 않고 추세가 꺾일 때
-    반납분만 내주고 나온다.
+    > 가격이 진입가·익절가 갭의 50%를 넘으면 손절 라인을 그 갭의 20%로 변경한다
+
+    손절 **간격**이 원래 폭에서 `목표갭 × 20%` 로 줄어든다. 이익 구간에 들어선
+    뒤에는 되밀림을 덜 허용해 확정분을 키우는 것이다. 한 번 좁히면 다시 넓히지
+    않는다 — 손절선은 어차피 `max` 로만 움직이므로 자동으로 그렇게 된다.
+
+    ## 익절 상한 3% — 이게 있어야 목표에 닿는다
+
+    추종만 하면 목표가가 늘 `현재가 + 갭` 위로 달아나 **목표 도달이 영원히
+    일어나지 않는다.** 상한(`max_gain_pct`)을 두면 목표가가 그 선에서 멈추고
+    가격이 따라붙어 닿는다.
+
+    상한은 **원래 목표가보다 낮아도 적용한다.** 규칙에 따라 목표가 3%를 넘게
+    잡히는 경우가 있는데(`target_r` 1.5 × 손절폭 2.5% = 3.75%), 그때는 목표가가
+    내려온다. "하향은 없다" 는 추종 방향에 대한 것이고, 상한은 그와 별개로
+    걸어 둔 이익 확정선이다.
     """
     if not trailing():
         return None
@@ -242,20 +258,34 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
     if entry <= 0 or price <= 0:
         return None
 
+    at, tight = _num("tighten_at"), _num("tighten_gap")
+    cap_pct = _num("max_gain_pct") / 100.0
     cur_stop, cur_target = ledger.effective_lines(pos)
     if pos["side"] == "long":
         s_gap, t_gap = entry - stop0, target0 - entry
+        if t_gap > 0 and price >= entry + t_gap * at:
+            s_gap = t_gap * tight          # 절반을 왔으면 되밀림을 덜 허용한다
         new_stop = max(cur_stop, price - s_gap) if s_gap > 0 else cur_stop
         new_target = max(cur_target, price + t_gap) if t_gap > 0 else cur_target
+        if cap_pct > 0:
+            new_target = min(new_target, entry * (1 + cap_pct))
     else:
         s_gap, t_gap = stop0 - entry, entry - target0
+        if t_gap > 0 and price <= entry - t_gap * at:
+            s_gap = t_gap * tight
         new_stop = min(cur_stop, price + s_gap) if s_gap > 0 else cur_stop
         new_target = min(cur_target, price - t_gap) if t_gap > 0 else cur_target
+        if cap_pct > 0:
+            new_target = max(new_target, entry * (1 - cap_pct))
 
     new_stop, new_target = round(new_stop, 2), round(new_target, 2)
     if (new_stop, new_target) == (round(cur_stop, 2), round(cur_target, 2)):
         return None                      # 초 단위 루프다 — 안 바뀌면 쓰지 않는다
-    return new_stop, new_target
+    # 원본과 같은 값은 `live` 로 쓰지 않는다(None = 원본 사용). 같은 값을 써두면
+    # 화면이 '추종 중' 으로 보이고, 시간 손절 시계도 움직이지 않은 손절선 때문에
+    # 초기화된다.
+    return (None if new_stop == stop0 else new_stop,
+            None if new_target == target0 else new_target)
 
 
 # --------------------------------------------------------------------------

@@ -57,7 +57,11 @@ def _conn() -> sqlite3.Connection:
                      # 를 계속 읽어야 한다.
                      ("stop_live", "REAL"),
                      ("target_live", "REAL"),
-                     ("lines_updated", "TEXT")):
+                     ("lines_updated", "TEXT"),
+                     # 손절선이 **움직인** 시각. 시간 손절의 기준점이다 —
+                     # 손절선이 올라갔다는 것은 아직 방향이 맞다는 뜻이므로
+                     # 보유시간을 그 시점부터 다시 센다(사용자 지침 2026-07-29).
+                     ("stop_moved", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -443,6 +447,24 @@ def max_hold_min(rule: str) -> int:
         return 0
 
 
+def hold_since(row) -> str:
+    """시간 손절이 세는 시작점. 손절선이 움직였으면 **그 시각부터 다시 센다.**
+
+    사용자 지침(2026-07-29). 시간 손절의 근거는 "인트라데이 셋업은 첫 30분 안에
+    결판난다 — 오래 끌수록 원래 논리는 사라진다" 였다. 그런데 손절선이 따라
+    올라갔다는 것은 **방향이 아직 맞다**는 실측이다. 그 경우까지 진입 시각으로
+    자르면 이기고 있는 자리를 시계 때문에 닫는다.
+
+    반대로 손절선이 한 번도 안 움직였으면 원래 규칙 그대로다 — 진입 후 값이
+    나오지 않은 자리이므로 자를 근거가 그대로 남아 있다.
+    """
+    try:
+        moved = row["stop_moved"]
+    except (KeyError, IndexError):     # 구버전 행(컬럼 없음)
+        moved = None
+    return str(moved or row["opened"])
+
+
 def held_minutes(opened: str, now: datetime | None = None) -> float | None:
     try:
         t = datetime.fromisoformat(opened)
@@ -476,19 +498,25 @@ def set_lines(pos_id: str, stop: float | None, target: float | None,
 
     데스크가 초 단위로 도는데 매번 UPDATE 하면 SQLite 쓰기가 그만큼 잦아진다.
     """
+    ts = (now or datetime.now(KST)).isoformat(timespec="seconds")
     with _conn() as conn:
         row = conn.execute(
-            "SELECT stop_live, target_live FROM positions WHERE id=? AND status='open'",
-            (pos_id,)).fetchone()
+            "SELECT stop, stop_live, target_live, stop_moved FROM positions "
+            "WHERE id=? AND status='open'", (pos_id,)).fetchone()
         if row is None:
             return False
         if row["stop_live"] == stop and row["target_live"] == target:
             return False
+        # 손절선이 실제로 움직였을 때만 시간 손절 시계를 다시 돌린다. 목표가만
+        # 바뀐 것으로 보유시간을 늘리면 근거가 없다. **원본과 비교**하는 이유는
+        # 첫 갱신에서 live 가 None→원본값 으로 채워지는 경우가 있어서다 —
+        # 값은 그대로인데 시계만 초기화되면 안 된다.
+        prev_stop = row["stop_live"] if row["stop_live"] is not None else row["stop"]
+        moved = ts if (stop is not None and float(stop) != float(prev_stop)) \
+            else row["stop_moved"]
         conn.execute(
-            "UPDATE positions SET stop_live=?, target_live=?, lines_updated=? WHERE id=?",
-            (stop, target,
-             (now or datetime.now(KST)).isoformat(timespec="seconds"), pos_id),
-        )
+            "UPDATE positions SET stop_live=?, target_live=?, lines_updated=?, "
+            "stop_moved=? WHERE id=?", (stop, target, ts, moved, pos_id))
     return True
 
 
@@ -520,7 +548,7 @@ def due_exits(price_of, now: datetime | None = None) -> list[dict]:
             px = float(stop if reason == "stop" else target)
         else:
             limit = max_hold_min(row["rule"])
-            held = held_minutes(row["opened"], now) if limit else None
+            held = held_minutes(hold_since(row), now) if limit else None
             if limit and held is not None and held >= limit:
                 reason, px = "timeout", float(p)   # 시간 손절은 현재가로 정리
         if reason:
