@@ -73,11 +73,13 @@ LOCK_GRID = (30, 40, 50, 60, 70, 80, 90)
 BASELINES = ("fixed", "trail")
 # 익절선까지 따라 올리던 옛 동작 — 고정과의 차이를 보기 위한 대조군
 TGT_REF = (30, 90)
+# 발동 지점(목표갭 대비 %) 격자 — 확정 비율은 기본값 고정하고 이 축만 흔든다
+AT_GRID = (20, 30, 40, 50, 60, 70)
 
 
 def variants() -> list[str]:
     return [*BASELINES, *(f"lock{n}" for n in LOCK_GRID),
-            *(f"tgt{n}" for n in TGT_REF)]
+            *(f"tgt{n}" for n in TGT_REF), *(f"at{n}" for n in AT_GRID)]
 
 
 def _cfg_of(variant: str) -> dict | None:
@@ -88,6 +90,9 @@ def _cfg_of(variant: str) -> dict | None:
         # 추종만 — 확정은 닿을 수 없는 발동선으로, 상한은 0(비활성)으로 끈다
         return {"enabled": True, "trailing": True, "trail_target": True,
                 "tighten_at": 99.0, "lock_gain_pct": 0.0, "max_gain_pct": 0.0}
+    if variant.startswith("at"):       # 발동 지점만 흔든다(확정 비율은 기본값)
+        return {"enabled": True, "trailing": True, "trail_target": False,
+                "tighten_at": float(variant.removeprefix("at")) / 100.0}
     if variant.startswith("tgt"):      # 익절선까지 따라 올리는 옛 동작(대조군)
         return {"enabled": True, "trailing": True, "trail_target": True,
                 "lock_gain_pct": float(variant.removeprefix("tgt"))}

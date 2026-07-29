@@ -130,6 +130,16 @@ def set_state(**patch) -> dict:
             st[k] = max(0.5, float(st[k]))
     if "max_symbols" in st:
         st["max_symbols"] = max(1, int(st["max_symbols"]))
+    # 추종 파라미터. 범위를 강제한다 — 실거래 청산선을 정하는 값이라
+    # 오타 하나가 손절선을 엉뚱한 곳에 놓는다.
+    if "tighten_at" in st:
+        # 목표갭 대비 비율(0~1). 1 이면 목표에 닿아야 발동 = 사실상 미사용
+        st["tighten_at"] = min(1.0, max(0.0, float(st["tighten_at"])))
+    if "lock_gain_pct" in st:
+        # 상승분의 몇 %를 확정할지(0~100). 100 이면 손절선이 현재가에 붙는다
+        st["lock_gain_pct"] = min(100.0, max(0.0, float(st["lock_gain_pct"])))
+    if "max_gain_pct" in st:
+        st["max_gain_pct"] = max(0.0, float(st["max_gain_pct"]))
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(st, ensure_ascii=False), encoding="utf-8")
     log.warning("매매 데스크 설정 변경: %s", st)
