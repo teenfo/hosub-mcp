@@ -1,0 +1,314 @@
+"""라인 추종 룰 타당성 검증 — 같은 진입에 청산 정책만 바꿔 재생한다.
+
+## 무엇을 재는가
+
+사용자 지침(2026-07-29)으로 들어간 `desk.update_lines` 가 **고정 손절·목표보다
+나은가**, 그리고 `lock_gain_pct`(상승분의 몇 %를 손절선으로 확정할지)의 **적정값**이
+얼마인지를 축적된 1분봉으로 되돌려 잰다.
+
+    fixed      : 지금까지의 동작 — 진입 시 정한 손절·목표 고정
+    trail      : 추종만 (같은 갭으로 따라 올리고, 내려도 유지). 확정·상한 없음
+    lock{N}    : 추종 + 목표갭 50% 도달 시 **상승분의 N%** 확정 + 익절 상한 3%
+
+**청산 정책만 바꾼다.** 진입 신호·체결가·비용은 `backtest.runner` 와 같은 코드를
+쓰고 통계도 `runner.Result.stats` 를 그대로 쓴다. 차이가 정책에서 온 것임이
+분명해야 한다.
+
+## 스윕이 싸야 한다 — 신호는 한 번만 계산한다
+
+`rules.evaluate_all` 을 확장 창으로 도는 것이 전체 비용의 대부분이다(종목당
+4,500봉 × 규칙 수). 정책마다 다시 돌리면 N배가 되고, 실제로 그렇게 돌렸다가
+장중 서버를 먹었다(2026-07-29).
+
+그래서 **신호 스캔을 한 번 하고 그 결과로 정책별 재생만 반복**한다. 재생은
+산술 연산뿐이라 사실상 공짜다. 스윕 12개가 단일 재생 1회에 가까운 비용이 된다.
+
+## 모델링 — 어디서 낙관이 새는지 미리 못박는다
+
+1분봉으로 초 단위 루프를 재생할 수는 없다. 세 가지를 **불리한 쪽**으로 고정했다.
+
+- **라인 갱신은 봉 종가로만 한다.** 실제 데스크는 고가 부근에서도 갱신하지만,
+  봉 안의 순서를 모르는 채 고가로 갱신하면 "고점에서 끌어올린 손절선에 같은 봉
+  저가가 닿는" 불가능한 이익을 만든다. 종가 갱신은 추종을 **과소평가**한다.
+- **청산 판정이 갱신보다 먼저다.** 같은 봉에서 손절과 목표가 함께 닿으면 손절.
+- **틱이 아니라 분이다.** 데스크는 2초마다 보는데 여기서는 60초마다 본다.
+
+반대 방향의 낙관이 하나 있다: **봉 안에서 손절선을 스치고 되돌아온 경우를 잡지
+못한다.** 확정 비율이 높을수록(손절선이 가격에 붙을수록) 이 낙관이 커진다 —
+즉 **높은 N 의 성적은 과대평가된다.** 결과를 읽을 때 이걸 감안해야 한다.
+
+## 최적값을 고를 때의 함정
+
+12거래일 남짓한 표본에서 12개 값 중 최고를 고르면 그건 **표본에 맞춘 것**이다.
+1.5단계에서 이미 같은 실수를 피한 적이 있다(in-sample vs walk-forward).
+그래서 이 모듈은 최고값을 '정답'으로 내지 않는다 — **곡선의 모양**과 인접값과의
+차이를 함께 낸다. 이웃한 값들이 고르게 좋은 구간이 뾰족한 최고점보다 믿을 만하다.
+"""
+import json
+import logging
+from datetime import timedelta
+from pathlib import Path
+
+from .. import settings
+from ..backtest import runner
+from ..data import store
+from ..signals import rules
+from ..trade import desk
+
+log = logging.getLogger(__name__)
+
+# 스윕 값 — 사용자 지시(2026-07-29): 30 부터 올리며 본다
+LOCK_GRID = (30, 40, 50, 60, 70, 80, 90)
+BASELINES = ("fixed", "trail")
+
+
+def variants() -> list[str]:
+    return [*BASELINES, *(f"lock{n}" for n in LOCK_GRID)]
+
+
+def _cfg_of(variant: str) -> dict | None:
+    """정책별 `desk` 설정. None 이면 라인을 아예 갱신하지 않는다(fixed)."""
+    if variant == "fixed":
+        return None
+    if variant == "trail":
+        # 추종만 — 확정은 닿을 수 없는 발동선으로, 상한은 0(비활성)으로 끈다
+        return {"enabled": True, "trailing": True,
+                "tighten_at": 99.0, "lock_gain_pct": 0.0, "max_gain_pct": 0.0}
+    return {"enabled": True, "trailing": True,
+            "lock_gain_pct": float(variant.removeprefix("lock"))}
+
+
+# --------------------------------------------------------------------------
+# 1) 신호 스캔 — 종목당 한 번만
+# --------------------------------------------------------------------------
+def scan(symbol: str, df, rules_cfg: dict, sides: tuple[str, ...] | None):
+    """[(day, bars, [(진입봉 위치, sig), ...]), ...].
+
+    `runner.run` 과 같은 진입 규칙이되 **보유 여부를 보지 않는다.** 어느 신호를
+    실제로 잡을지는 정책마다 다르므로(청산이 빠르면 다음 신호를 잡는다) 여기서는
+    후보만 모으고 판단은 재생 쪽에 맡긴다.
+    """
+    out = []
+    days_idx = df.index.normalize()
+    for day, day_df in df.groupby(days_idx):
+        prev = df[days_idx < day]
+        prev_close = float(prev["close"].iloc[-1]) if not prev.empty else None
+        bars = list(day_df.itertuples())
+        sigs = []
+        for i in range(10, len(bars) - 1):
+            window = day_df.iloc[: i + 1]
+            for sig in rules.evaluate_all(window, rules_cfg, prev_close):
+                if sides and sig.side not in sides:
+                    continue
+                sigs.append((i, sig))
+        out.append((day, bars, sigs))
+    return out
+
+
+# --------------------------------------------------------------------------
+# 2) 재생 — 정책만 바꿔 반복 (싸다)
+# --------------------------------------------------------------------------
+def _lines(entry_price: float, stop0: float, target0: float, side: str,
+           stop: float, target: float, price: float):
+    pos = {"side": side, "entry": entry_price, "stop": stop0, "target": target0,
+           "stop_live": stop if stop != stop0 else None,
+           "target_live": target if target != target0 else None}
+    got = desk.update_lines(pos, price)
+    if got is None:
+        return stop, target
+    return (got[0] if got[0] is not None else stop0,
+            got[1] if got[1] is not None else target0)
+
+
+def replay(symbol: str, scanned, hold_limit: int, update: bool) -> list:
+    """스캔 결과를 현재 `desk` 설정으로 재생한다. `update=False` 면 fixed."""
+    slip = settings.COSTS.get("slippage_bp", 5) / 10000
+    trades = []
+    for _day, bars, sigs in scanned:
+        by_bar: dict[int, list] = {}
+        for i, sig in sigs:
+            by_bar.setdefault(i, []).append(sig)
+        fired: set[str] = set()
+        t = None
+        stop = target = 0.0
+        clock = None
+        for i in range(10, len(bars)):
+            bar = bars[i]
+            if t is not None:
+                if t.side == "long":
+                    hit_stop, hit_target = bar.low <= stop, bar.high >= target
+                else:
+                    hit_stop, hit_target = bar.high >= stop, bar.low <= target
+                if hit_stop:
+                    t.exit, t.exit_reason, t.exit_ts = stop, "stop", bar.Index
+                elif hit_target:
+                    t.exit, t.exit_reason, t.exit_ts = target, "target", bar.Index
+                elif hold_limit and clock is not None \
+                        and bar.Index - clock >= timedelta(minutes=hold_limit):
+                    t.exit, t.exit_reason, t.exit_ts = \
+                        float(bar.close), "timeout", bar.Index
+                if t.exit is not None:
+                    trades.append(t)
+                    t = None
+                    continue
+                if update:      # 청산이 없을 때만 갱신한다(판정이 갱신보다 먼저)
+                    new_stop, new_target = _lines(
+                        t.entry, t.stop, t.target, t.side, stop, target,
+                        float(bar.close))
+                    if new_stop != stop:
+                        clock = bar.Index     # 손절선이 움직였다 → 시계 재시작
+                    stop, target = new_stop, new_target
+                continue
+            for sig in by_bar.get(i, ()):
+                if sig.rule in fired:
+                    continue
+                fired.add(sig.rule)
+                nxt = bars[i + 1]
+                fill = nxt.open * (1 + slip if sig.side == "long" else 1 - slip)
+                t = runner.Trade(symbol, sig.rule, sig.side, nxt.Index,
+                                 fill, sig.stop, sig.target)
+                stop, target, clock = sig.stop, sig.target, nxt.Index
+                break
+        if t is not None and bars:
+            t.exit = float(bars[-1].close)
+            t.exit_reason, t.exit_ts = "eod", bars[-1].Index
+            trades.append(t)
+    return trades
+
+
+def run_symbol(symbol: str, df, rules_cfg: dict | None = None,
+               sides: tuple[str, ...] | None = ("long",),
+               names: list[str] | None = None) -> dict:
+    """한 종목을 모든 변종으로 재생. **신호 스캔은 한 번만 한다.**"""
+    rules_cfg = rules_cfg or settings.RULES
+    hold_limit = rules_cfg.get("max_hold_min", 0) or 0
+    scanned = scan(symbol, df, rules_cfg, sides)
+
+    out = {}
+    # 런타임 오버라이드(`data/desk.json`)를 무시한다 — 실서버에서 데스크를 꺼둔
+    # 채로 돌리면 전 변종이 fixed 가 되어 비교가 성립하지 않는다.
+    old_file, desk.STATE_FILE = desk.STATE_FILE, Path("/nonexistent/desk.json")
+    old = (settings.CONFIG.get("execution", {}) or {}).get("desk")
+    try:
+        for v in (names or variants()):
+            cfg = _cfg_of(v)
+            if cfg is None:
+                out[v] = replay(symbol, scanned, hold_limit, update=False)
+                continue
+            settings.CONFIG.setdefault("execution", {})["desk"] = cfg
+            out[v] = replay(symbol, scanned, hold_limit, update=True)
+    finally:
+        desk.STATE_FILE = old_file
+        if old is None:
+            settings.CONFIG.get("execution", {}).pop("desk", None)
+        else:
+            settings.CONFIG["execution"]["desk"] = old
+    return out
+
+
+# --------------------------------------------------------------------------
+# 3) 집계
+# --------------------------------------------------------------------------
+def _key(t) -> tuple:
+    return (t.symbol, t.rule, t.side, t.entry_ts)
+
+
+def _exit_mix(trades) -> dict:
+    mix: dict[str, int] = {}
+    for t in trades:
+        if t.exit is not None:
+            mix[t.exit_reason] = mix.get(t.exit_reason, 0) + 1
+    return dict(sorted(mix.items(), key=lambda kv: -kv[1]))
+
+
+def analyze(symbols: list[str], min_bars: int = 600, limit_days: int = 60,
+            sides: tuple[str, ...] | None = ("long",),
+            names: list[str] | None = None) -> dict:
+    """전 종목을 전 변종으로 재생하고 비교표를 낸다.
+
+    `paired` 는 **모든 변종이 같은 진입을 잡은 거래**만 모은 것이다. 청산이
+    빨라지면 다음 신호를 잡을 수 있어 진입 자체가 달라지는데, 그 차이까지 섞이면
+    청산 정책의 효과를 읽을 수 없다.
+    """
+    names = names or variants()
+    costs, risk = settings.COSTS, settings.RISK.get("risk_per_trade_pct", 0.5)
+    per = {v: [] for v in names}
+    used = skipped = 0
+
+    for sym in symbols:
+        df = store.load_bars(sym, "1m", limit=limit_days * 400)
+        if df.empty or len(df) < min_bars:
+            skipped += 1
+            continue
+        try:
+            got = run_symbol(sym, df, sides=sides, names=names)
+        except Exception:  # noqa: BLE001 - 한 종목 실패가 전체를 멈추지 않는다
+            log.exception("재생 실패 %s", sym)
+            skipped += 1
+            continue
+        used += 1
+        for v in names:
+            per[v].extend(got[v])
+
+    common = set.intersection(*({_key(t) for t in per[v]} for v in names)) \
+        if names else set()
+
+    def _stats(trades):
+        return runner.Result(trades=list(trades)).stats(costs, risk) | {
+            "exits": _exit_mix(trades)}
+
+    all_stats = {v: _stats(per[v]) for v in names}
+    paired = {v: _stats([t for t in per[v] if _key(t) in common]) for v in names}
+    locks = [v for v in names if v.startswith("lock")]
+    return {
+        "symbols_used": used, "symbols_skipped": skipped,
+        "paired_trades": len(common),
+        "all": all_stats, "paired": paired,
+        "best": _pick(paired, locks) if locks else None,
+        "params": {"grid": list(LOCK_GRID),
+                   "tighten_at": desk._num("tighten_at"),
+                   "max_gain_pct": desk._num("max_gain_pct"),
+                   "max_hold_min": settings.RULES.get("max_hold_min", 0),
+                   "sides": list(sides) if sides else None},
+    }
+
+
+def _pick(stats: dict, locks: list[str]) -> dict:
+    """최고값과 **이웃 평균**을 함께 낸다.
+
+    12거래일 표본에서 격자 중 최고를 고르면 그건 표본에 맞춘 것이다. 이웃한
+    값들이 고르게 좋은 구간이 뾰족한 최고점보다 믿을 만하므로, 인접 3점 평균이
+    가장 높은 값(`robust`)을 같이 내고 둘이 다르면 그 사실 자체를 경고로 읽는다.
+    """
+    r = {v: (stats[v].get("avg_r") or 0.0) for v in locks}
+    best = max(locks, key=lambda v: r[v])
+    win = {}
+    for i, v in enumerate(locks):
+        near = [r[locks[j]] for j in (i - 1, i, i + 1) if 0 <= j < len(locks)]
+        win[v] = sum(near) / len(near)
+    # 격자 양 끝은 한쪽에 이웃이 없어 근거가 약하다 — 안쪽에서만 고른다
+    inner = locks[1:-1] or locks
+    robust = max(inner, key=lambda v: win[v])
+    return {"by_avg_r": best, "avg_r": r[best],
+            "robust": robust, "robust_neighborhood_avg_r": round(win[robust], 4),
+            "agree": best == robust, "curve": {v: round(r[v], 4) for v in locks}}
+
+
+def run_once() -> dict:  # pragma: no cover - 자식 프로세스에서 호출
+    syms = [s for s, _ in store.minute_symbols(min_days=3)]
+    got = analyze(syms)
+    out = Path(settings.DATA_DIR) / "trailing.json"
+    out.write_text(json.dumps(got, ensure_ascii=False, default=str),
+                   encoding="utf-8")
+    return got
+
+
+def main() -> None:  # pragma: no cover - CLI
+    import sys
+
+    logging.basicConfig(level=logging.WARNING, stream=sys.stderr)
+    print(json.dumps(run_once(), ensure_ascii=False, indent=2, default=str))
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
