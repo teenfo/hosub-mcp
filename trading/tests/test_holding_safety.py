@@ -205,3 +205,59 @@ async def test_eod_backfill_no_duplicate_calls(monkeypatch):
     monkeypatch.setattr(engine_mod.collector, "backfill_minutes", fake)
     await SignalEngine().eod_backfill_once()
     assert sorted(called) == ["000001", "000002", "000003"]
+
+
+# --------------------------------------------------------------------------
+# WS 구독 — 보유 종목은 감시목록 밖에 있어도 구독한다 (2026-07-29 실측)
+# --------------------------------------------------------------------------
+def test_보유_종목이_감시목록_밖이면_구독에_추가한다(tmp_path, monkeypatch):
+    """감시목록만 구독하면 그 밖의 보유 종목은 틱이 오지 않는다.
+
+    실측: 감시목록에 없던 코리아써키트 1종목에 2분 동안 REST 51콜이 나갔다
+    (분당 26콜). "가격은 이미 실시간" 이라는 데스크 설계의 전제가 거기서 깨진다.
+    """
+    from app import main, settings
+    from app.trade import ledger
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    ledger.open_position({"id": "p1", "symbol": "007810", "side": "long", "qty": 2,
+                          "entry": 42_700, "stop": 41_000, "target": 44_000,
+                          "rule": "orb"}, fill=42_700)
+    assert main._ws_symbols() == ["005930", "007810"]
+
+
+def test_숏은_실제_체결_종목을_구독한다(tmp_path, monkeypatch):
+    """원 종목을 구독해도 인버스 ETF 의 틱은 오지 않는다."""
+    from app import main, settings
+    from app.trade import ledger
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    ledger.open_position({"id": "p1", "symbol": "034220", "side": "short", "qty": 11,
+                          "entry": 9_020, "stop": 9_200, "target": 8_700,
+                          "rule": "orb", "exec_symbol": "114800"}, fill=9_020)
+    assert main._ws_symbols() == ["005930", "114800"]
+
+
+def test_감시목록_안이면_중복_추가하지_않는다(tmp_path, monkeypatch):
+    from app import main, settings
+    from app.trade import ledger
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    ledger.open_position({"id": "p1", "symbol": "005930", "side": "long", "qty": 1,
+                          "entry": 70_000, "stop": 69_000, "target": 72_000,
+                          "rule": "orb"}, fill=70_000)
+    assert main._ws_symbols() == ["005930"]
+
+
+def test_원장_조회가_실패해도_감시목록은_구독한다(monkeypatch):
+    """구독이 통째로 멈추는 것이 더 나쁘다."""
+    from app import main, settings
+    from app.trade import ledger
+
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    monkeypatch.setattr(ledger, "positions",
+                        lambda *a, **k: (_ for _ in ()).throw(OSError("DB")))
+    assert main._ws_symbols() == ["005930"]

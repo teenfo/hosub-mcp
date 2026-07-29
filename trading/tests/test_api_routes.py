@@ -256,3 +256,14 @@ def test_계좌_조회_실패면_청산을_막지_않는다(client, monkeypatch,
     r = client.post(f"/api/positions/{pid}/close",
                     headers={"X-Internal-Token": TOKEN}).json()
     assert r["ok"] is True
+
+
+def test_감시목록_응답이_소유권을_알린다(client, monkeypatch, tmp_path):
+    """TNM 이 직접 편입하기 전에 이 값을 본다 — 서비스 경계 너머의 소유권 전달."""
+    from app.scout import engine as scout_eng
+
+    monkeypatch.setattr(scout_eng, "STATE_FILE", tmp_path / "e.json")
+    scout_eng.set_state(mode="shadow")
+    assert _get(client, "/api/watchlist").json()["engine_owns"] is False
+    scout_eng.set_state(mode="full")
+    assert _get(client, "/api/watchlist").json()["engine_owns"] is True

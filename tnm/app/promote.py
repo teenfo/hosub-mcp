@@ -102,6 +102,11 @@ class Promoter:
 
         추가와 tier 지정이 두 호출로 나뉘므로, tier 지정이 실패하면 매매 대상으로
         남는다. 그건 허용할 수 없다 — 실패 시 되돌린다.
+
+        **발굴 엔진이 감시목록을 소유하면(`full`) 편입하지 않는다.** 그 경우
+        엔진의 `news` 어댑터가 같은 TNM 항목을 읽어 단일 통로로 올린다 — 여기서
+        또 쓰면 둘이 서로를 덮어쓴다. 소유 여부는 감시목록 응답이 알려주므로
+        추가 호출이 없다(중복 확인 때문에 어차피 부르던 자리다).
         """
         out = {"added": 0, "already": 0, "errors": 0, "tickers": []}
         headers = {"X-Internal-Token": settings.TRADING_TOKEN}
@@ -110,9 +115,14 @@ class Promoter:
             try:
                 r = await client.get(f"{base}/api/watchlist", headers=headers)
                 r.raise_for_status()
-                existing = {str(e.get("code")) for e in r.json().get("entries", [])}
+                body = r.json()
+                existing = {str(e.get("code")) for e in body.get("entries", [])}
             except Exception as e:  # noqa: BLE001 — 목록을 모르면 중복 편입 위험
                 raise RuntimeError(f"감시목록 조회 실패: {e}") from e
+            if body.get("engine_owns"):
+                log.info("뉴스 편입 보류 — 감시목록은 발굴 엔진이 소유 "
+                         "(엔진 news 어댑터가 같은 항목을 읽는다)")
+                return out | {"skipped": "엔진 소유"}
             for p in picks:
                 ticker = p["ticker"]
                 if ticker in existing:

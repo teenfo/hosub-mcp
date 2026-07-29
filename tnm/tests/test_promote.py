@@ -59,9 +59,10 @@ def test_eligible_allows_neutral_and_unknown():
 class _FakeClient:
     """트레이딩 API 대역 — 호출 순서를 그대로 기록한다."""
 
-    def __init__(self, existing=(), fail_on=None):
+    def __init__(self, existing=(), fail_on=None, engine_owns=False):
         self.existing = list(existing)
         self.fail_on = fail_on or set()
+        self.engine_owns = engine_owns
         self.calls = []
 
     async def __aenter__(self):
@@ -82,7 +83,8 @@ class _FakeClient:
 
     async def get(self, url, headers=None):
         self.calls.append(("GET", url))
-        return self._R({"entries": [{"code": c} for c in self.existing]})
+        return self._R({"entries": [{"code": c} for c in self.existing],
+                        "engine_owns": self.engine_owns})
 
     async def post(self, url, headers=None, json=None):
         path = url.split("/api/")[-1]
@@ -198,3 +200,25 @@ def test_config_promote_is_stricter_than_alerts():
 def test_status_exposes_enabled():
     st = Promoter().status()
     assert "enabled" in st and "last_run" in st
+
+
+# --- ③ 발굴 엔진 흡수 — 소유권이 넘어가면 물러난다 ---
+
+def test_엔진이_소유하면_편입하지_않는다(monkeypatch):
+    """`full` 전환 후에는 엔진의 news 어댑터가 같은 TNM 항목을 읽어 올린다.
+
+    여기서 또 쓰면 둘이 서로를 덮어쓴다. 소유 여부는 감시목록 응답이 알려주므로
+    추가 호출이 없다 — 중복 확인 때문에 어차피 부르던 자리다.
+    """
+    client = _FakeClient(engine_owns=True)
+    p = _promoter(monkeypatch, [_row("000001", 90)], client)
+    out = asyncio.run(p.run_once())
+    assert out["added"] == 0 and out.get("skipped") == "엔진 소유"
+    assert not [c for c in client.calls if c[0] == "POST"], "쓰기가 나가면 안 된다"
+
+
+def test_엔진이_소유하지_않으면_그대로_편입한다(monkeypatch):
+    """전환 전에 물러나면 뉴스 종목이 아무 경로로도 안 들어온다."""
+    client = _FakeClient(engine_owns=False)
+    p = _promoter(monkeypatch, [_row("000001", 90)], client)
+    assert asyncio.run(p.run_once())["added"] == 1
