@@ -399,6 +399,8 @@ class _FakeDB:
         self._watch = watch or {}
         self.reports: list[dict] = []
         self.raw: list[tuple[int, str, list[dict]]] = []
+        self.ingested: set[str] = set()
+        self.discovered: list[dict] = []
         self.bumped: dict[str, int] = {}
         self.linked = 0
         self.state: dict[str, str] = {}
@@ -414,6 +416,26 @@ class _FakeDB:
         have = {(r["source"], r["source_uid"]) for r in self.reports}
         return {k for k in keys if k in have}
 
+    async def pending_report_ingest(self, days=7, limit=200, max_attempts=3):
+        """적재 대기 = 종목이 붙었는데 아직 raw_items 로 안 간 것."""
+        return [dict(r, id=i) for i, r in enumerate(self.reports)
+                if r.get("ticker") and r["source_uid"] not in self.ingested]
+
+    async def bump_report_attempts(self, ids):
+        return len(ids)
+
+    async def known_tickers(self):
+        return set(self._watch)
+
+    async def count_origin(self, origin):
+        return 0
+
+    async def add_discovered(self, rows, tier="other", origin="dart"):
+        for i, r in enumerate(rows):
+            self._watch[r["ticker"]] = 500 + i
+        self.discovered.extend(rows)
+        return len(rows)
+
     async def insert_reports(self, rows):
         self.reports.extend(rows)
         return len(rows)
@@ -423,6 +445,7 @@ class _FakeDB:
 
     async def insert_raw_items(self, wid, source, rows):
         self.raw.append((wid, source, rows))
+        self.ingested.update(r["source_uid"].split(":", 1)[1] for r in rows)
         return len(rows)
 
     async def link_report_items(self):
@@ -438,6 +461,15 @@ class _FakeDB:
 
     async def set_state(self, key, value):
         self.state[key] = value
+
+
+def _use_db(monkeypatch, fake):
+    """collect 와 ingest 둘 다 db 를 모듈 전역으로 잡는다 — 한쪽만 갈면 진짜 DB 를 친다."""
+    from app import collect as collect_mod
+    from app import ingest as ingest_mod
+
+    monkeypatch.setattr(collect_mod, "db", fake)
+    monkeypatch.setattr(ingest_mod, "db", fake)
 
 
 def _report(broker, uid="1", ticker=None, cat="company"):
@@ -459,13 +491,11 @@ def runner(monkeypatch):
 
 def test_disabled_broker_reports_are_not_stored(runner, monkeypatch):
     """토글이 실제로 수집을 막는가 — 이 기능의 핵심."""
-    from app import collect as collect_mod
-
     fake = _FakeDB([
         {"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []},
         {"name": "한화투자증권", "kind": "domestic", "enabled": False, "aliases": []},
     ])
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
     monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(
         0, result=[_report("SK증권", "1"), _report("한화투자증권", "2")]))
 
@@ -476,10 +506,8 @@ def test_disabled_broker_reports_are_not_stored(runner, monkeypatch):
 
 def test_unregistered_broker_is_kept_and_counted(runner, monkeypatch):
     """미등록 이름은 버리지 않는다 — 놓친 이름이 있다는 사실이 정보다."""
-    from app import collect as collect_mod
-
     fake = _FakeDB([{"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []}])
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
     monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(
         0, result=[_report("처음보는증권", "9")]))
 
@@ -490,11 +518,9 @@ def test_unregistered_broker_is_kept_and_counted(runner, monkeypatch):
 
 def test_alias_name_is_normalized_before_storing(runner, monkeypatch):
     """'유안타 리서치'로 들어와도 '유안타증권'으로 저장돼야 집계가 갈리지 않는다."""
-    from app import collect as collect_mod
-
     fake = _FakeDB([{"name": "유안타증권", "kind": "domestic", "enabled": True,
                      "aliases": ["유안타 리서치"]}])
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
     monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(
         0, result=[_report("유안타 리서치", "3")]))
 
@@ -503,44 +529,81 @@ def test_alias_name_is_normalized_before_storing(runner, monkeypatch):
     assert fake.bumped == {"유안타증권": 1}
 
 
-def test_watchlist_report_also_enters_analysis_pipeline(runner, monkeypatch):
-    """관심종목 리포트는 raw_items 로도 들어가 기존 분류·알림을 탄다."""
-    from app import collect as collect_mod
+def test_every_stock_report_enters_analysis_pipeline(runner, monkeypatch):
+    """종목이 붙은 리포트는 **관심종목 밖이어도** 분석을 탄다.
 
+    종전에는 이미 감시 중인 종목만 태워, 268건 중 2건만 파이프라인에 들어갔다.
+    DART 가 미매칭 공시로 신규 종목을 발굴하는 것과 같은 판단을 적용한다.
+    """
     fake = _FakeDB([{"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []}],
                    watch={"000660": 7})
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
     monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(0, result=[
-        _report("SK증권", "1", ticker="000660"),
-        _report("SK증권", "2", ticker="999999"),      # 관심종목 아님
-        _report("SK증권", "3", cat="industry"),        # 종목 없음
+        _report("SK증권", "1", ticker="000660"),      # 이미 관심종목
+        _report("SK증권", "2", ticker="999999"),      # 관심종목 밖 → 등록 후 적재
+        _report("SK증권", "3", cat="industry"),        # 종목 없음 → 원장에만
     ]))
 
     out = asyncio.run(runner.run_once("research"))
     assert out["inserted"] == 3, "원장에는 셋 다 남는다"
-    assert out["raw_inserted"] == 1, "분석 큐에는 관심종목 것만"
-    wid, source, rows = fake.raw[0]
-    assert wid == 7 and source == "research"
-    assert rows[0]["source_uid"] == "naver:1"
+    assert out["ingest_inserted"] == 2, "종목이 붙은 둘 다 분석 큐로"
+    assert out["ingest_registered"] == 1, "관심종목 밖 종목은 등록하고 태운다"
+    assert [d["ticker"] for d in fake.discovered] == ["999999"]
     assert fake.linked == 1
+    uids = {r["source_uid"] for _, _, rows in fake.raw for r in rows}
+    assert uids == {"naver:1", "naver:2"}
 
 
-def test_raw_body_carries_target_price(runner, monkeypatch):
+def test_industry_report_has_no_stock_to_attach(runner, monkeypatch):
+    """산업·시황 리포트는 종목이 없어 raw_items 에 들어갈 수 없다(원장에만 남는다)."""
+    fake = _FakeDB([{"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []}])
+    _use_db(monkeypatch, fake)
+    monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(
+        0, result=[_report("SK증권", "9", cat="market")]))
+
+    out = asyncio.run(runner.run_once("research"))
+    assert out["inserted"] == 1
+    assert out.get("ingest_inserted", 0) == 0
+    assert fake.raw == []
+
+
+def test_ingest_runs_even_when_nothing_new_was_collected(runner, monkeypatch):
+    """수집 신규가 0건이어도 지난 사이클에 밀린 적재분은 처리돼야 한다.
+
+    수집과 적재를 붙여 두면 상한에 걸린 리포트가 영영 큐에 못 들어간다.
+    """
+    fake = _FakeDB([{"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []}],
+                   watch={"000660": 7})
+    fake.reports.append({"source": "naver", "source_uid": "old", "broker": "SK증권",
+                         "category": "company", "ticker": "000660",
+                         "stock_name": "SK하이닉스", "title": "지난 사이클 리포트",
+                         "summary": None, "url": "https://x/old", "pdf_url": None,
+                         "analyst": None, "target_price": None, "opinion": None,
+                         "published_at": datetime(2026, 7, 29, tzinfo=KST)})
+    _use_db(monkeypatch, fake)
+    monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(0, result=[]))
+
+    out = asyncio.run(runner.run_once("research"))
+    assert out["kept"] == 0 and out["inserted"] == 0
+    assert out["ingest_inserted"] == 1
+
+
+def test_raw_body_carries_target_price():
     """목표가가 칼럼에만 있으면 분류 LLM 이 못 읽는다 — 본문에 옮겨야 한다."""
-    r = _report("SK증권", "1", ticker="000660")
-    r.target_price = 320_000
-    r.opinion = "매수"
-    row = CollectRunner()._report_to_raw(r)
-    assert "320,000원" in row["body"] and "매수" in row["body"]
+    row = CollectRunner()._report_to_raw({
+        "source": "naver", "source_uid": "1", "broker": "SK증권",
+        "title": "목표가 상향", "summary": "실적 호조", "url": "https://x/1",
+        "target_price": 320_000, "opinion": "매수", "analyst": "홍길동",
+        "published_at": datetime(2026, 7, 29, tzinfo=KST)})
+    assert "320,000원" in row["body"] and "투자의견 매수" in row["body"]
+    assert row["source_uid"] == "naver:1"      # link_report_items 의 결합 규약
     assert row["content_hash"]
 
 
 def test_already_collected_reports_are_not_reprocessed(runner, monkeypatch):
     """목록은 매 사이클 같은 건을 다시 준다 — 두 번째 사이클은 아무 일도 없어야."""
-    from app import collect as collect_mod
-
     fake = _FakeDB([{"name": "SK증권", "kind": "domestic", "enabled": True, "aliases": []}])
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
     monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(
         0, result=[_report("SK증권", "1"), _report("SK증권", "2")]))
 
@@ -562,10 +625,8 @@ def test_already_collected_reports_are_not_reprocessed(runner, monkeypatch):
 
 def test_source_failure_is_isolated(runner, monkeypatch):
     """한 소스가 죽어도 나머지 소스로 사이클이 성립해야 한다."""
-    from app import collect as collect_mod
-
     fake = _FakeDB([{"name": "LS증권", "kind": "domestic", "enabled": True, "aliases": []}])
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
 
     async def _boom(**kw):
         raise RuntimeError("표 구조 변경")
@@ -581,11 +642,9 @@ def test_source_failure_is_isolated(runner, monkeypatch):
 
 def test_foreign_cursor_advances(runner, monkeypatch):
     """해외 인용은 커서로 증분 수집한다 — 매 사이클 같은 기사를 다시 받지 않게."""
-    from app import collect as collect_mod
-
     fake = _FakeDB([{"name": "골드만삭스", "kind": "foreign", "enabled": True,
                      "aliases": ["Goldman Sachs"]}])
-    monkeypatch.setattr(collect_mod, "db", fake)
+    _use_db(monkeypatch, fake)
     monkeypatch.setattr(research, "fetch_naver", lambda **kw: asyncio.sleep(0, result=[]))
 
     seen = datetime(2026, 7, 29, 10, tzinfo=timezone.utc)
