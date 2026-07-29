@@ -68,7 +68,8 @@ DEFAULTS = {
     "trailing": True,        # 손절·익절선 추종. 끄면 진입 시 고정값 그대로 쓴다
     "tighten_at": 0.5,       # 목표까지 이만큼 왔으면 손절 계산을 바꾼다(목표갭 대비)
     "lock_gain_pct": 30.0,   # 그 뒤로는 **상승분의 이만큼**을 손절선으로 확정한다(%)
-    "max_gain_pct": 3.0,     # 익절선 상한(진입가 대비 %). 이게 있어야 목표에 닿는다
+    "trail_target": False,   # 익절선도 따라 올릴 것인가. **기본은 고정**(아래 실측)
+    "max_gain_pct": 3.0,     # 익절선 상한(진입가 대비 %). 0이면 상한 없음
 }
 
 # 화면이 읽는 계측. "WS 로 몇 건, REST 로 몇 건" 이 이 설계의 성적표다 —
@@ -83,7 +84,8 @@ STATE: dict = {
 def status() -> dict:
     c = cfg()
     return dict(STATE, enabled=bool(c.get("enabled", False)),
-                trailing=trailing(), tighten_at=_num("tighten_at"),
+                trailing=trailing(), trail_target=bool(cfg().get("trail_target", False)),
+                tighten_at=_num("tighten_at"),
                 lock_gain_pct=_num("lock_gain_pct"), max_gain_pct=_num("max_gain_pct"),
                 interval_sec=_num("interval_sec"), stale_sec=_num("stale_sec"),
                 degraded_interval_sec=_num("degraded_interval_sec"),
@@ -120,7 +122,7 @@ def set_state(**patch) -> dict:
     가 그대로 맡는다 — **중간에 감시가 비는 구간이 없다.**
     """
     st = _override() | {k: v for k, v in patch.items() if v is not None}
-    for k in ("enabled", "trailing"):
+    for k in ("enabled", "trailing", "trail_target"):
         if k in st:
             st[k] = bool(st[k])
     for k in ("interval_sec", "stale_sec", "degraded_interval_sec"):
@@ -246,16 +248,21 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
     두 계산 중 **높은 쪽**을 쓴다(`max`). 그래야 x 를 낮게 잡아도 갭 추종보다
     나빠지지 않는다.
 
-    ## 익절 상한 3% — 이게 있어야 목표에 닿는다
+    ## 익절선은 기본적으로 **고정**이다 (`trail_target: false`)
 
-    추종만 하면 목표가가 늘 `현재가 + 갭` 위로 달아나 **목표 도달이 영원히
-    일어나지 않는다.** 상한(`max_gain_pct`)을 두면 목표가가 그 선에서 멈추고
-    가격이 따라붙어 닿는다.
+    익절선까지 따라 올리면 목표가가 늘 달아나 도달이 안 된다. 상한(3%)으로
+    막아도 실측에서 손해였다 — 실거래 57건 투사에서 **고정이면 목표에 닿아
+    익절했을 7건이 되밀려 손절선에서 나왔다(−6,593원).** 손절선이 목표보다
+    먼저 따라붙기 때문이다.
 
-    상한은 **원래 목표가보다 낮아도 적용한다.** 규칙에 따라 목표가 3%를 넘게
-    잡히는 경우가 있는데(`target_r` 1.5 × 손절폭 2.5% = 3.75%), 그때는 목표가가
-    내려온다. "하향은 없다" 는 추종 방향에 대한 것이고, 상한은 그와 별개로
-    걸어 둔 이익 확정선이다.
+    그래서 기본은 손절선만 추종하고 익절선은 진입 시 값을 지킨다. 예전 동작이
+    필요하면 `trail_target: true` 로 되돌린다 — 설정으로 남겨 둔 이유다.
+
+    ## 익절 상한 (`max_gain_pct`)
+
+    익절선의 천장이다. 규칙에 따라 목표가 3%를 넘게 잡히는 경우가 있는데
+    (`target_r` 1.5 × 손절폭 2.5% = 3.75%) 그때는 목표가가 내려온다.
+    0으로 두면 상한이 없다.
     """
     if not trailing():
         return None
@@ -269,6 +276,7 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
 
     at, lock = _num("tighten_at"), _num("lock_gain_pct") / 100.0
     cap_pct = _num("max_gain_pct") / 100.0
+    tgt = bool(cfg().get("trail_target", False))
     cur_stop, cur_target = ledger.effective_lines(pos)
     if pos["side"] == "long":
         s_gap, t_gap = entry - stop0, target0 - entry
@@ -276,7 +284,8 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
         if t_gap > 0 and lock > 0 and price >= entry + t_gap * at:
             cand = max(cand, entry + (price - entry) * lock)   # 상승분의 x% 확정
         new_stop = max(cur_stop, cand)
-        new_target = max(cur_target, price + t_gap) if t_gap > 0 else cur_target
+        new_target = (max(cur_target, price + t_gap)
+                      if (tgt and t_gap > 0) else cur_target)
         if cap_pct > 0:
             new_target = min(new_target, entry * (1 + cap_pct))
     else:
@@ -285,7 +294,8 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
         if t_gap > 0 and lock > 0 and price <= entry - t_gap * at:
             cand = min(cand, entry - (entry - price) * lock)
         new_stop = min(cur_stop, cand)
-        new_target = min(cur_target, price - t_gap) if t_gap > 0 else cur_target
+        new_target = (min(cur_target, price - t_gap)
+                      if (tgt and t_gap > 0) else cur_target)
         if cap_pct > 0:
             new_target = max(new_target, entry * (1 - cap_pct))
 
