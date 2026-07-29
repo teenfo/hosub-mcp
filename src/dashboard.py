@@ -71,14 +71,14 @@ _TRADING_GET_RE = re.compile(
     r"|prices|rules|performance|risk|journal|journal/history"
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
-    r"|research/(event-study|ranking|news-impact)|scout|regime/history)$"
+    r"|research/(event-study|ranking|news-impact|trailing)|scout|regime/history)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
     r"|rules/[a-z_]{1,30}/toggle"
     r"|discovery/run|symbols/refresh|backtest/report/run|backtest/sweep/run|risk"
     r"|journal/run|guard/override(/clear)?"
-    r"|research/(event-study|ranking|news-impact)/run"
+    r"|research/(event-study|ranking|news-impact|trailing)/run"
     r"|scout/(mode|run)|account/reconcile"
     r"|positions/[0-9a-f]{12}/(close|void)|desk)$"
 )
@@ -86,7 +86,7 @@ _TRADING_POST_RE = re.compile(
 # 스윕과 겹칠수록 수 초~수십 초) — 이 경로들만 프록시 타임아웃을 늘린다.
 _TRADING_SLOW_RE = re.compile(
     r"^(backtest/(report/run|\d{6})|journal/run"
-    r"|research/(event-study|ranking|news-impact)/run)$")
+    r"|research/(event-study|ranking|news-impact|trailing)/run)$")
 
 # TNM(뉴스·공시 모니터링) 서비스 프록시 — trading 과 동일 패턴.
 TNM_URL = os.environ.get("HOSUB_TNM_URL", "http://127.0.0.1:8602")
