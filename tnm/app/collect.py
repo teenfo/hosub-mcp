@@ -196,25 +196,41 @@ class CollectRunner:
         족족 뉴스 수집 대상이 늘어 RSS 호출이 선형으로 증가하기 때문이다.
           max_per_cycle  한 사이클에 새로 넣을 수 있는 종목 수
           max_total      dart 출처 관심종목 총량 — 넘으면 아무것도 안 넣는다
+
+        **제외**된 종목만 손대지 않는다. 비활성은 매매 감시목록에서 빠질 때
+        자동으로 된 것이라, 관심 카테고리 공시가 다시 나오면 되살린다
+        (ingest.attach_docs 와 같은 규약 — 되살리기는 신규와 같은 예산을 쓴다).
         """
         cfg = (settings.COLLECT.get("dart", {}) or {}).get("discover", {}) or {}
         if not cfg.get("enabled", True) or not unmatched:
             return {}
-        cands = discover.candidates(unmatched, known, await db.known_tickers())
+        cands = discover.candidates(unmatched, known, await db.excluded_tickers())
         # discovered 를 항상 실어 보낸다 — 어느 경로로 끝나든 호출자가 같은 키를
         # 읽을 수 있어야 "0건인가 키가 없는가" 를 헷갈리지 않는다.
-        out = {"candidates": len(cands), "discovered": 0}
+        out = {"candidates": len(cands), "discovered": 0, "revived": 0}
         if not cands:
             return out
         room = int(cfg.get("max_total", 300)) - await db.count_origin("dart")
         if room <= 0:
             log.info("dart 발굴 상한 도달 — 후보 %d건 보류", len(cands))
             return out | {"discover_capped": True}
-        take = cands[:max(0, min(int(cfg.get("max_per_cycle", 10)), room))]
-        added = await db.add_discovered(take, tier=str(cfg.get("tier", "other")))
+        budget = max(0, min(int(cfg.get("max_per_cycle", 10)), room))
+        tier = str(cfg.get("tier", "other"))
+        registered = await db.known_tickers()
+        # 이미 아는 종목(비활성)이 신규보다 먼저 자리를 받는다 — 한 번 들어왔다
+        # 나간 종목에 관심 공시가 또 나온 것이라 근거가 더 두껍다.
+        revive = [c for c in cands if c["ticker"] in registered][:budget]
+        fresh = [c for c in cands if c["ticker"] not in registered][
+            :max(0, budget - len(revive))]
+        if revive:
+            out["revived"] = await db.revive_for_source(
+                [c["ticker"] for c in revive], tier, "dart")
+            log.info("dart 비활성 종목 되살림: %d건 (%s)", out["revived"],
+                     ", ".join(f"{c['ticker']} {c['reason']}" for c in revive[:5]))
+        added = await db.add_discovered(fresh, tier=tier) if fresh else 0
         if added:
             log.info("dart 신규 종목 발굴: %d건 등록 (%s)", added,
-                     ", ".join(f"{c['ticker']} {c['reason']}" for c in take[:5]))
+                     ", ".join(f"{c['ticker']} {c['reason']}" for c in fresh[:5]))
         return out | {"discovered": added}
 
     # ---------------- 증권사 리서치 리포트 ----------------
