@@ -714,6 +714,11 @@ export default {
           `WS ${fmt(d.ws || 0)} · REST ${fmt(d.rest || 0)} (${restPct.toFixed(0)}%)`),
         d.no_price ? el("span", { class: "badge text-bg-secondary", title: "가격을 모르면 판정하지 않습니다" },
           `가격없음 ${fmt(d.no_price)}`) : null,
+        el("span", { class: "badge text-bg-" + (d.trailing ? "info" : "light text-dark"),
+          title: d.trailing
+            ? "가격이 오르면 진입 시 정한 갭만큼 손절·목표를 같이 올리고, 내려도 그 자리에 둡니다. 목표가가 늘 현재가 위로 달아나므로 청산은 따라 올라간 손절선이 맡습니다."
+            : "진입 시 정한 손절·목표를 그대로 씁니다" },
+          d.trailing ? "라인 추종 ON" : "라인 추종 OFF"),
         el("span", { class: "text-secondary" },
           `사이클 ${fmt(d.cycles || 0)} · 청산 ${fmt(d.exits || 0)}건`
           + (d.proposed ? ` · 승인대기 ${fmt(d.proposed)}건` : "")
@@ -728,6 +733,15 @@ export default {
         d.last_line
           ? `라인 갱신 ${fmt(d.lines || 0)}회 · 최근 ${d.last_line.at} ${d.last_line.name || d.last_line.symbol} 손절 ${d.last_line.stop == null ? "—" : fmt(d.last_line.stop)} / 목표 ${d.last_line.target == null ? "—" : fmt(d.last_line.target)}`
           : "손절·익절 라인 실시간 갱신 규칙은 아직 없습니다 — 진입 시 정한 값을 그대로 씁니다."));
+    };
+
+    /** 손절/목표 셀 — 데스크가 끌어올린 값이 있으면 **그 값이 실제 판정선**이다.
+     *  원본을 그대로 보여주면 화면이 거짓말을 한다. 움직인 건 화살표로 알린다. */
+    const lineCell = (p) => {
+      const s = p.stop_live ?? p.stop, t = p.target_live ?? p.target;
+      const moved = p.stop_live != null || p.target_live != null;
+      const orig = moved ? ` title="진입 시 ${fmt(p.stop)} / ${fmt(p.target)}${p.lines_updated ? " · 갱신 " + String(p.lines_updated).slice(11, 19) : ""}"` : "";
+      return `<span${orig}>${fmt(s)} / ${fmt(t)}${moved ? ' <span class="text-info">↑추종</span>' : ""}</span>`;
     };
 
     const loadPositions = async () => {
@@ -773,7 +787,7 @@ export default {
             `<td>${h.name || h.code}</td><td>${fmt(h.qty)}</td><td>${fmt(h.avg_price)}</td>` +
             `<td>${fmt(h.cur_price)}</td>` +
             `<td class="${tone}">${won(h.pl_amt)} (${(h.pl_rt ?? 0).toFixed(2)}%)</td>` +
-            `<td>${p ? `${fmt(p.stop)} / ${fmt(p.target)}` : '<span class="text-warning">감시 없음</span>'}</td>` });
+            `<td>${p ? lineCell(p) : '<span class="text-warning">감시 없음</span>'}</td>` });
           const td = el("td");
           if (p) {
             const b = el("button", { class: "btn btn-sm btn-outline-secondary py-0", type: "button" }, "청산");
@@ -796,12 +810,12 @@ export default {
         posBody.appendChild(el("div", { class: "text-secondary mb-1" },
           "계좌에 없는 장부 항목입니다 — 미체결이거나 계좌 밖에서 정리된 건. 제외하면 실현손익·일지·가드 집계에서 빠지고 기록은 남습니다."));
         const t = el("table", { class: "table table-sm align-middle mb-0 small" });
-        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>진입</th><th>손절</th><th>목표</th><th></th></tr>" }));
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>진입</th><th colspan=\"2\">손절 / 목표</th><th></th></tr>" }));
         const tb = el("tbody");
         for (const p of ghost) {
           const tr = el("tr", { class: "table-warning", html:
             `<td>${p.name || p.symbol}</td><td>${p.rule}</td><td>${fmt(p.entry)}</td>` +
-            `<td>${fmt(p.stop)}</td><td>${fmt(p.target)}</td>` });
+            `<td colspan="2">${lineCell(p)}</td>` });
           const td = el("td", { class: "text-nowrap" });
           const b = el("button", { class: "btn btn-sm btn-outline-danger py-0", type: "button",
             title: "주문 없이 장부에서만 제외합니다" }, "제외");
