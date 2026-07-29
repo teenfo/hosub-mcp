@@ -2,7 +2,7 @@ import { fetchJSON, el, card, badge } from "../app.js";
 import { mdToHtml, renderIframe } from "./briefing.js";
 import { makeLayoutEditable } from "../layout.js";
 import { createProChart, MA_DEFS } from "../chart.js";
-import { postJSON, fmt, makeChanged, priceCellHTML } from "./tradelib.js";
+import { postJSON, fmt, makeChanged, priceCellHTML, stockHTML } from "./tradelib.js";
 
 // 발굴·감시 페이지 (트레이딩 그룹) — 종목이 '어디서 와서 어디로 가는가' 를 따라간다.
 //
@@ -115,14 +115,16 @@ export default {
     };
 
     /** 종목명 셀 — 누르면 일봉 차트 모달. */
+    // 종목명은 기본정보 모달(공통), 차트 아이콘은 이 화면 전용 동작.
+    // 클릭 하나에 둘을 묶으면 어느 쪽이 뜰지 예측할 수 없다.
     const nameCell = (code, name) => {
-      const b = el("button", {
+      const chart = el("button", {
         type: "button", title: "일봉 차트 보기",
-        class: "btn btn-link p-0 border-0 align-baseline text-start link-body-emphasis",
-        style: "text-decoration: underline dotted; text-underline-offset: 2px",
-      }, `${name} (${code})`);
-      b.onclick = () => openStockChart(code, name);
-      return el("td", {}, b);
+        class: "btn btn-link p-0 border-0 ms-1 align-baseline text-secondary",
+      }, el("i", { class: "bi bi-bar-chart-line" }));
+      chart.onclick = () => openStockChart(code, name);
+      return el("td", { class: "text-nowrap" },
+                [el("span", { html: stockHTML(code, name) }), chart]);
     };
 
     const reportModalTitle = el("h5", { class: "modal-title" });
@@ -392,8 +394,10 @@ export default {
           wMsg.className = "small mt-1 text-secondary";
           wMsg.textContent = msgOnMulti || `여러 종목이 검색됨 — 선택하세요 (${r.candidates.length})`;
           for (const c of r.candidates) {
+            // 이 칩 자체가 '이 종목을 고른다' 는 동작이다 — 안에 링크를 넣으면
+            // 클릭이 기본정보 모달로 가로채여 선택이 안 된다.
             const chip = el("button", { class: "btn btn-sm btn-outline-primary py-0" },
-              `${c.name} (${c.code})`);
+              el("span", { html: stockHTML(c.code, c.name, { plain: true }) }));
             chip.onclick = () => addByQuery({ code: c.code, name: c.name });
             wCands.appendChild(chip);
           }

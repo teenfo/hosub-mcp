@@ -1,5 +1,5 @@
 import { fetchJSON, el, card } from "../app.js";
-import { postJSON, fmt, won, pct, makeChanged } from "./tradelib.js";
+import { postJSON, fmt, won, pct, makeChanged, stockHTML } from "./tradelib.js";
 
 // 매매일지 (트레이딩 그룹): 하루치 매매 경과를 누적 보관하고 성공·실패 요인을 정리.
 // 수치·요인은 서버가 결정론으로 계산하고, LLM 은 그 사실을 문장으로 엮기만 한다.
@@ -172,7 +172,7 @@ export default {
           tb.appendChild(el("tr", {}, [
             el("td", { class: "small text-secondary text-nowrap" },
               String(p.opened || "").slice(11, 16) + "→" + String(p.closed || "").slice(11, 16)),
-            el("td", {}, `${p.name || p.symbol}`),
+            el("td", { class: "text-nowrap", html: stockHTML(p.symbol, p.name) }),
             el("td", {}, p.rule),
             el("td", { class: "text-end" }, fmt(p.qty)),
             el("td", { class: "text-end small",
@@ -225,7 +225,7 @@ export default {
         for (const s of [...rows].sort((a, b) => (b.priority || 0) - (a.priority || 0))) {
           tb.appendChild(el("tr", { class: s.actionable ? "" : "text-secondary" }, [
             el("td", { class: "small text-nowrap" }, String(s.ts || "").slice(11, 16)),
-            el("td", {}, `${s.name || s.symbol}`),
+            el("td", { class: "text-nowrap", html: stockHTML(s.symbol, s.name) }),
             el("td", {}, s.rule),
             el("td", { class: "text-end" }, s.priority != null ? Math.round(s.priority) : "—"),
             el("td", { class: "text-end" }, s.qty ? `${s.qty}주` : "—"),

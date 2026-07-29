@@ -1,7 +1,7 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
 import { createProChart, MA_DEFS } from "../chart.js";
-import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge } from "./tradelib.js";
+import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge, stockHTML } from "./tradelib.js";
 
 // 매매 데스크 (트레이딩 그룹): 장중 실행에 필요한 것만 — 상태·가드·승인대기·신호·1분봉.
 // 종목 소싱은 '발굴·감시', 리뷰는 '성과·백테스트' 페이지가 담당한다.
@@ -612,18 +612,17 @@ export default {
 
     /** 표의 '종목명 (코드)' 셀 — 클릭하면 1분봉 차트로 이동.
      *  a[href="#"] 는 해시 라우터(#/페이지)를 건드리므로 button 을 쓴다. */
+    // 종목명은 기본정보 모달(공통), 차트 아이콘은 이 화면 전용 동작.
+    // 클릭 하나에 둘을 묶으면 어느 쪽이 뜰지 예측할 수 없다 — 눌러야 할 것을
+    // 눈에 보이게 나눈다.
     const symbolCell = (symbol, name) => {
-      const label = name && name !== symbol ? `${name} (${symbol})` : symbol;
-      // 색은 본문색 유지 — 이 화면에서 빨강/파랑은 손익을 뜻하므로 링크색을 쓰면
-      // 종목명이 손실처럼 읽힌다. 점선 밑줄로만 '누를 수 있음'을 표시한다.
-      const b = el("button", {
-        type: "button",
-        class: "btn btn-link p-0 border-0 align-baseline text-start link-body-emphasis",
-        style: "text-decoration: underline dotted; text-underline-offset: 2px",
-        title: "클릭하면 1분봉 차트에서 이 종목을 봅니다",
-      }, label);
-      b.onclick = () => showOnChart(symbol, name);
-      return el("td", {}, b);
+      const chart = el("button", {
+        type: "button", class: "btn btn-link p-0 border-0 ms-1 align-baseline text-secondary",
+        title: "1분봉 차트에서 보기",
+      }, el("i", { class: "bi bi-graph-up" }));
+      chart.onclick = () => showOnChart(symbol, name);
+      return el("td", { class: "text-nowrap" },
+                [el("span", { html: stockHTML(symbol, name) }), chart]);
     };
 
     // --- 보유 포지션 · 청산 관리 ---
@@ -836,7 +835,7 @@ export default {
           const p = trackBy[h.code];
           const tone = h.pl_amt >= 0 ? "text-danger" : "text-primary";   // 한국식
           const tr = el("tr", { html:
-            `<td>${h.name || h.code}</td><td>${fmt(h.qty)}</td><td>${fmt(h.avg_price)}</td>` +
+            `<td>${stockHTML(h.code, h.name)}</td><td>${fmt(h.qty)}</td><td>${fmt(h.avg_price)}</td>` +
             `<td>${fmt(h.cur_price)}</td>` +
             `<td class="${tone}">${won(h.pl_amt)} (${(h.pl_rt ?? 0).toFixed(2)}%)</td>` +
             `<td>${p ? lineCell(p) : '<span class="text-warning">감시 없음</span>'}</td>` });
@@ -866,7 +865,7 @@ export default {
         const tb = el("tbody");
         for (const p of ghost) {
           const tr = el("tr", { class: "table-warning", html:
-            `<td>${p.name || p.symbol}</td><td>${p.rule}</td><td>${fmt(p.entry)}</td>` +
+            `<td>${stockHTML(p.symbol, p.name)}</td><td>${p.rule}</td><td>${fmt(p.entry)}</td>` +
             `<td colspan="2">${lineCell(p)}</td>` });
           const td = el("td", { class: "text-nowrap" });
           const b = el("button", { class: "btn btn-sm btn-outline-danger py-0", type: "button",
@@ -998,7 +997,7 @@ export default {
             const tb = el("tbody");
             for (const h of a.holdings) {
               tb.appendChild(el("tr", {}, [
-                el("td", {}, h.name || h.code),
+                el("td", { html: stockHTML(h.code, h.name) }),
                 el("td", {}, fmt(h.qty)),
                 el("td", {}, fmt(h.avg_price)),
                 el("td", {}, fmt(h.cur_price)),

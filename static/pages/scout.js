@@ -1,6 +1,6 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
-import { postJSON, fmt, makeChanged, makeTabs } from "./tradelib.js";
+import { postJSON, fmt, makeChanged, makeTabs, stockHTML } from "./tradelib.js";
 
 // 발굴 엔진 (트레이딩 그룹) — 여섯 갈래로 흩어진 종목 발굴을 한 통로로 모은다.
 //
@@ -225,7 +225,7 @@ export default {
           return el("tr", {}, [
             el("td", { class: "text-secondary" }, String(i + 1)),
             el("td", {}, [
-              el("div", {}, `${c.name} (${c.code})`),
+              el("div", { html: stockHTML(c.code, c.name) }),
               el("div", { class: "mt-1" }, srcBadges(c.sources)),
             ]),
             el("td", { class: "text-end fw-semibold" }, c.score.toFixed(3)),
@@ -354,7 +354,7 @@ export default {
             rows.slice(0, 40).map((r, i) => el("tr", {}, [
               el("td", { class: "text-secondary" }, String(i + 1)),
               el("td", {}, [
-                el("div", {}, `${r.name} (${r.code})`),
+                el("div", { html: stockHTML(r.code, r.name) }),
                 r.kind && r.kind !== t.id
                   ? el("div", { class: "text-secondary", style: "font-size:.72rem" }, r.kind)
                   : null,
@@ -408,7 +408,7 @@ export default {
       diffTabs.set("actual", wl.length ? tableOf(
         "<th>종목</th><th>tier</th><th>보호</th><th></th>",
         wl.map((w) => el("tr", {}, [
-          el("td", {}, `${w.name} (${w.code})`),
+          el("td", { class: "text-nowrap", html: stockHTML(w.code, w.name) }),
           el("td", {}, badge(TIER_KO[w.tier] || w.tier, TIER_TONE[w.tier] || "light")),
           el("td", {}, w.protected
             ? el("span", { class: "badge text-bg-light text-dark",

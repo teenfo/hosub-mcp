@@ -1,5 +1,5 @@
 import { fetchJSON, el, card } from "../app.js";
-import { postJSON, makeChanged } from "./tradelib.js";
+import { postJSON, makeChanged, stockHTML } from "./tradelib.js";
 
 // 뉴스 모니터 (TNM): 수집·분석 현황 + 판정 목록 + 상세/라벨링(Shadow 검증).
 // 점수·판정은 룰 기반(결정론) — LLM 은 분류·요약만 담당 (매매판단 아님).
@@ -144,7 +144,8 @@ export default {
       detailBody.innerHTML = "";
       const sd = it.score_detail || {};
       detailBody.append(
-        el("div", { class: "fw-semibold mb-1" }, `${it.name} (${it.ticker}) · ${it.title}`),
+        el("div", { class: "fw-semibold mb-1",
+                    html: `${stockHTML(it.ticker, it.name)} · ${it.title}` }),
         el("div", { class: "mb-2", html:
           `${sourceBadge(it.source)} ${scoreBadge(it.score)} ` +
           `<span class="badge text-bg-light">${it.category || it.status}</span> ` +
@@ -223,7 +224,8 @@ export default {
         const tr = el("tr", { style: "cursor:pointer", html:
           `<td class="text-secondary text-nowrap">${(it.published_at || "").slice(5, 16).replace("T", " ")}</td>` +
           `<td>${sourceBadge(it.source)}</td>` +
-          `<td>${it.name}</td><td>${scoreBadge(it.score)}</td>` +
+          `<td class="text-nowrap">${stockHTML(it.ticker, it.name)}</td>` +
+          `<td>${scoreBadge(it.score)}</td>` +
           `<td>${it.status === "ok" ? (it.category || "-") : (it.status === "llm_failed" ? "실패" : "재탕")}</td>` +
           `<td>${it.title}</td>` +
           `<td>${it.human_verdict === "important" ? "🔴 중요" : it.human_verdict === "noise" ? "⚪ 불필요" : ""}</td>` });

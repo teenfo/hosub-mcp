@@ -1,5 +1,5 @@
 import { fetchJSON, el, card, badge } from "../app.js";
-import { postJSON, makeChanged, makeGearModal } from "./tradelib.js";
+import { postJSON, makeChanged, makeGearModal, stockHTML } from "./tradelib.js";
 
 // TNM 설정 — 파이프라인 상태 · 관심종목 · Shadow 지표. API 키는 기어 모달로 뺐다.
 //
@@ -157,7 +157,7 @@ export default {
       const tb = el("tbody");
       for (const e of entries) {
         const tr = el("tr", { class: e.is_active ? "" : "opacity-50" });
-        tr.appendChild(el("td", {}, `${e.name} (${e.ticker})`));
+        tr.appendChild(el("td", { class: "text-nowrap", html: stockHTML(e.ticker, e.name) }));
         tr.appendChild(el("td", { html: ORIGIN_BADGE[e.origin] || e.origin }));
         tr.appendChild(el("td", { class: "text-secondary text-nowrap" },
                                 TIER_KO[e.tier] || e.tier || "—"));

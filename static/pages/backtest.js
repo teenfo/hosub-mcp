@@ -1,6 +1,6 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
-import { postJSON, fmt, won, pct, makeChanged, makeTabs, sideBadge } from "./tradelib.js";
+import { postJSON, fmt, won, pct, makeChanged, makeTabs, sideBadge, stockHTML } from "./tradelib.js";
 
 // 성과·백테스트 페이지 (트레이딩 그룹) — '실제로 번 돈' 과 '규칙이 벌었을 돈' 을
 // 나란히 놓고 본다. 발굴·감시 페이지와 같은 방식으로 성격별 카드 + 탭 구성.
@@ -194,7 +194,7 @@ export default {
           const b = el("button", { class: "btn btn-sm btn-outline-secondary py-0", type: "button" }, "청산");
           b.onclick = () => closePosition(p.id);
           return el("tr", {}, [
-            el("td", {}, `${p.name || p.symbol}`),
+            el("td", { class: "text-nowrap", html: stockHTML(p.symbol, p.name) }),
             el("td", {}, p.rule),
             el("td", {}, sideBadge(p.side)),
             el("td", { class: "text-end" }, fmt(p.entry)),
@@ -213,7 +213,7 @@ export default {
         closed.map((p) => {
           const cls = p.pnl_pct >= 0 ? "text-danger" : "text-primary";
           return el("tr", {}, [
-            el("td", {}, `${p.name || p.symbol}`),
+            el("td", { class: "text-nowrap", html: stockHTML(p.symbol, p.name) }),
             el("td", {}, p.rule),
             el("td", {}, sideBadge(p.side)),
             el("td", { class: "text-end text-nowrap" }, `${fmt(p.entry)} → ${fmt(p.exit)}`),
@@ -265,7 +265,7 @@ export default {
           return;
         }
         btOut.append(
-          el("div", { class: "text-secondary mb-1" }, `${r.name ? r.name + " (" + r.symbol + ")" : r.symbol} · ${r.days}일치 · 총 ${s.trades}건`),
+          el("div", { class: "text-secondary mb-1" }, `${stockHTML(r.symbol, r.name)} · ${r.days}일치 · 총 ${s.trades}건`),
           el("div", { class: "row g-2" }, [
             stat("승률", s.win_rate + "%"),
             stat("건당 손익(계좌)", s.avg_pnl_pct + "%"),
@@ -316,7 +316,7 @@ export default {
         "<th class='text-end'>승률</th><th class='text-end'>건당손익%(계좌)</th>" +
         "<th class='text-end'>PF</th><th class='text-end'>누적%</th><th class='text-end'>MDD%</th>",
         d.symbols.map((r) => el("tr", {
-          html: `<td>${r.name ? r.name + " (" + r.symbol + ")" : r.symbol}</td>` +
+          html: `<td class="text-nowrap">${stockHTML(r.symbol, r.name)}</td>` +
             `<td class="text-end">${r.days}</td><td class="text-end">${r.trades || 0}</td>` +
             `<td class="text-end">${r.win_rate ?? "-"}</td><td class="text-end">${r.avg_pnl_pct ?? "-"}</td>` +
             `<td class="text-end">${r.trades ? (r.profit_factor == null ? "∞" : r.profit_factor) : "-"}</td>` +
@@ -926,7 +926,7 @@ export default {
           const run = el("button", { class: "btn btn-sm btn-outline-secondary py-0" }, "백테스트");
           run.onclick = () => { btInput.value = r.code; btTf.value = "1m"; runBacktest(); };
           return el("tr", {}, [
-            el("td", {}, `${r.name} (${r.code})`),
+            el("td", { class: "text-nowrap", html: stockHTML(r.code, r.name) }),
             el("td", { class: "text-end " + (r.days >= 3 ? "text-success fw-semibold" : "text-secondary") }, `${r.days}일`),
             el("td", { class: r.deep ? "text-success" : "text-secondary",
                        html: r.deep ? '<i class="bi bi-check-lg"></i>' : "대기" }),
