@@ -65,6 +65,7 @@ DEFAULTS = {
     "stale_sec": 5.0,        # 이보다 오래된 WS 값은 못 믿는다 → REST 보충
     "max_symbols": 0,        # 0 = 보유 전량. 상한을 두면 그 초과분이 2초 감시 밖으로 나간다
     "degraded_interval_sec": 30.0,   # WS 미연결 시 강등 주기
+    "trailing": True,        # 손절·익절선 추종. 끄면 진입 시 고정값 그대로 쓴다
 }
 
 # 화면이 읽는 계측. "WS 로 몇 건, REST 로 몇 건" 이 이 설계의 성적표다 —
@@ -79,6 +80,7 @@ STATE: dict = {
 def status() -> dict:
     c = cfg()
     return dict(STATE, enabled=bool(c.get("enabled", False)),
+                trailing=trailing(),
                 interval_sec=_num("interval_sec"), stale_sec=_num("stale_sec"),
                 degraded_interval_sec=_num("degraded_interval_sec"),
                 max_symbols=int(_num("max_symbols")),
@@ -114,8 +116,9 @@ def set_state(**patch) -> dict:
     가 그대로 맡는다 — **중간에 감시가 비는 구간이 없다.**
     """
     st = _override() | {k: v for k, v in patch.items() if v is not None}
-    if "enabled" in st:
-        st["enabled"] = bool(st["enabled"])
+    for k in ("enabled", "trailing"):
+        if k in st:
+            st[k] = bool(st[k])
     for k in ("interval_sec", "stale_sec", "degraded_interval_sec"):
         if k in st:
             st[k] = max(0.5, float(st[k]))
@@ -194,19 +197,65 @@ def in_session(now: datetime | None = None) -> bool:
 # --------------------------------------------------------------------------
 # 라인 갱신 훅 — 규칙은 아직 없다
 # --------------------------------------------------------------------------
+def trailing() -> bool:
+    """라인 추종을 쓰는가. 데스크가 꺼져 있으면 라인도 움직이지 않는다."""
+    return enabled() and bool(cfg().get("trailing", True))
+
+
 def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] | None:
-    """손절·익절선을 다시 계산한다. None 이면 '변화 없음'.
+    """손절·익절선을 현재가에 맞춰 끌어올린다. None 이면 '변화 없음'.
 
-    **아직 규칙이 정해지지 않았다.** 사용자가 지침을 주면 여기에 들어온다.
-    지금은 항상 None 을 돌려주므로 진입 시 고정된 손절·목표가 그대로 쓰인다 —
-    즉 이 훅이 켜져 있어도 매매 동작은 지금과 같다.
+    사용자 지침(2026-07-29):
+    > 손절: 하향은 없다. 현재 가격이 상승할 때마다 **동일한 갭**으로 상향한다.
+    >       가격이 하락해도 손절라인을 유지해 이득을 보전한다.
+    > 익절: 하향은 없다. 같은 방식으로 상향해 이득을 극대화한다.
 
-    규칙을 넣을 때 지켜야 할 것:
-    - `pos["stop"]`/`pos["target"]` 은 **원본**이다. 되돌릴 기준이므로 읽기만 한다
-    - 롱에서 손절선을 **내리지 않는다**(트레일링은 한 방향이다). 내리면 손실이 커진다
-    - 계산 재료는 `breakeven.observe` 가 이미 추적 중인 MFE·도달률을 쓴다
+    **갭은 진입 시 정한 폭**이다 — `entry - stop` / `target - entry`. 원본
+    `pos["stop"]`/`pos["target"]` 은 되돌릴 기준이라 읽기만 하고, 갱신값은
+    `stop_live`/`target_live` 에 따로 쌓인다.
+
+        롱:  새 손절 = max(지금 손절, 현재가 − 손절갭)
+             새 목표 = max(지금 목표, 현재가 + 목표갭)
+
+    `max` 하나가 규칙 전체를 만든다 — 오르면 따라 올라가고 내리면 그 자리에
+    남는다. 조건문으로 "상승했는가"를 따로 보지 않는 이유는, 틱이 튀거나 REST
+    폴백으로 값이 한 번 건너뛰어도 결과가 같아야 하기 때문이다.
+
+    **숏은 방향을 뒤집는다.** 숏에서 유리한 움직임은 하락이므로 손절선은
+    내려가고 목표가도 내려간다(`min`). 지침 문구를 롱 기준 그대로 적용하면
+    숏의 손절선이 **멀어져 손실이 커진다** — 추종은 언제나 유리한 방향 한쪽이다.
+
+    ## 알아둘 것 — 목표가는 사실상 닿지 않게 된다
+
+    목표가가 늘 `현재가 + 갭` 위로 달아나므로 목표 도달 청산은 발생하지 않는다.
+    청산은 **따라 올라간 손절선**(또는 시간 손절·마감 정리)이 맡는다. 그것이
+    "이득을 극대화" 지침의 귀결이다 — 이익을 미리 확정하지 않고 추세가 꺾일 때
+    반납분만 내주고 나온다.
     """
-    return None
+    if not trailing():
+        return None
+    try:
+        entry = float(pos["entry"])
+        stop0, target0 = float(pos["stop"]), float(pos["target"])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    if entry <= 0 or price <= 0:
+        return None
+
+    cur_stop, cur_target = ledger.effective_lines(pos)
+    if pos["side"] == "long":
+        s_gap, t_gap = entry - stop0, target0 - entry
+        new_stop = max(cur_stop, price - s_gap) if s_gap > 0 else cur_stop
+        new_target = max(cur_target, price + t_gap) if t_gap > 0 else cur_target
+    else:
+        s_gap, t_gap = stop0 - entry, entry - target0
+        new_stop = min(cur_stop, price + s_gap) if s_gap > 0 else cur_stop
+        new_target = min(cur_target, price - t_gap) if t_gap > 0 else cur_target
+
+    new_stop, new_target = round(new_stop, 2), round(new_target, 2)
+    if (new_stop, new_target) == (round(cur_stop, 2), round(cur_target, 2)):
+        return None                      # 초 단위 루프다 — 안 바뀌면 쓰지 않는다
+    return new_stop, new_target
 
 
 # --------------------------------------------------------------------------

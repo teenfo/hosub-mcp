@@ -1096,7 +1096,8 @@ async def api_desk_set(payload: dict | None = Body(None), _=Depends(require_auth
             _desk.set_state,
             enabled=p.get("enabled"), interval_sec=p.get("interval_sec"),
             stale_sec=p.get("stale_sec"), max_symbols=p.get("max_symbols"),
-            degraded_interval_sec=p.get("degraded_interval_sec"))
+            degraded_interval_sec=p.get("degraded_interval_sec"),
+            trailing=p.get("trailing"))
     except (TypeError, ValueError) as e:
         return JSONResponse({"ok": False, "error": f"잘못된 값: {e}"}, 400)
     return {"ok": True, "override": st, "desk": _desk.status()}

@@ -121,7 +121,11 @@ async def test_손절선에_닿으면_청산한다(env):
     assert spy.exits == [("p1", "stop", 9_800.0)]
 
 
-async def test_목표가에_닿으면_청산한다(env):
+async def test_목표가에_닿으면_청산한다(env, monkeypatch):
+    """추종을 끈 경우다. **켜져 있으면 목표가가 늘 달아나 닿지 않는다** —
+    아래 `test_목표가는_늘_현재가_위로_달아난다` 참조."""
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"desk": {"enabled": True, "trailing": False}})
     _open()
     spy = _Spy(ws={"005930": 10_450})
     await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
@@ -220,6 +224,8 @@ async def test_데스크가_직접_발주한다(env):
 async def test_승인_모드에서는_목표_청산을_승인_대기로_올린다(env, monkeypatch):
     """이게 갈리면 데스크를 켜는 순간 목표 청산이 조용히 자동 발주로 바뀐다."""
     monkeypatch.setitem(settings.RISK, "auto_approve", False)
+    monkeypatch.setitem(settings.CONFIG, "execution",     # 추종 켜면 목표가 달아난다
+                        {"desk": {"enabled": True, "trailing": False}})
     _open()
     proposed = []
     spy = _Spy(ws={"005930": 10_450})          # 목표 도달
@@ -256,8 +262,9 @@ async def test_stop_mode_가_approve_면_손절도_승인_대기다(env, monkeyp
 # --------------------------------------------------------------------------
 # 라인 갱신 — 훅은 있고 규칙은 아직 없다
 # --------------------------------------------------------------------------
-async def test_기본_훅은_라인을_바꾸지_않는다(env):
-    """규칙이 없는 동안 매매 동작은 지금과 같아야 한다."""
+async def test_추종을_끄면_진입_시_고정값_그대로다(env, monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"desk": {"enabled": True, "trailing": False}})
     _open()
     spy = _Spy(ws={"005930": 10_100})
     stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
@@ -265,6 +272,111 @@ async def test_기본_훅은_라인을_바꾸지_않는다(env):
     with ledger._conn() as conn:
         r = conn.execute("SELECT stop_live, target_live FROM positions").fetchone()
     assert r["stop_live"] is None and r["target_live"] is None
+
+
+# --------------------------------------------------------------------------
+# 라인 추종 — 사용자 지침 2026-07-29
+#   "오르면 같은 갭으로 따라 올리고, 내려도 그 자리에 둔다"
+# 실거래 손익이 여기서 갈린다. 규칙을 값으로 못박는다.
+# --------------------------------------------------------------------------
+def _lines(oid="p1"):
+    with ledger._conn() as conn:
+        r = conn.execute("SELECT stop_live, target_live FROM positions WHERE id=?",
+                         (oid,)).fetchone()
+    return (r["stop_live"], r["target_live"])
+
+
+async def test_가격이_오르면_같은_갭으로_따라_올린다(env):
+    """진입 10,000 · 손절 9,800(갭 200) · 목표 10,400(갭 400)."""
+    _open()
+    spy = _Spy(ws={"005930": 10_300})
+    stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert stat["lines"] == 1
+    assert _lines() == (10_100.0, 10_700.0)     # 10,300∓갭
+
+
+async def test_가격이_내려도_라인은_그_자리에_남는다(env):
+    """이 한 줄이 '이득 보전' 의 실체다."""
+    _open()
+    spy = _Spy(ws={"005930": 10_300})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+
+    spy.ws["005930"] = 10_150                   # 되밀림
+    stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert stat["lines"] == 0, "안 바뀌면 쓰지도 않는다"
+    assert _lines() == (10_100.0, 10_700.0)
+
+
+async def test_손절선은_한_번도_내려가지_않는다(env):
+    _open()
+    spy = _Spy(ws={"005930": 10_600})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    high = _lines()
+    for px in (10_500, 10_450, 10_405):         # 계속 밀려도
+        spy.ws["005930"] = px
+        await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+        assert _lines() == high
+
+
+async def test_진입가_아래에서는_원래_손절선을_지킨다(env):
+    """물려 있는 동안 손절선이 따라 내려가면 손실이 커진다."""
+    _open()
+    spy = _Spy(ws={"005930": 9_900})
+    stat = await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert stat["lines"] == 0 and _lines() == (None, None)
+    assert ledger.due_exits(lambda _s: 9_850) == [], "원래 손절 9,800 그대로다"
+
+
+async def test_따라_올라간_손절선에_닿으면_청산한다(env):
+    """추종의 목적 — 되밀릴 때 반납분만 내주고 나온다."""
+    _open()
+    spy = _Spy(ws={"005930": 10_600})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)   # 손절선 10,400
+    assert spy.exits == []
+
+    spy.ws["005930"] = 10_390
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert spy.exits == [("p1", "stop", 10_400.0)], "원래 손절 9,800 이 아니다"
+
+
+async def test_목표가는_늘_현재가_위로_달아난다(env):
+    """지침의 귀결 — 이익을 미리 확정하지 않는다. 청산은 손절선이 맡는다."""
+    _open()
+    spy = _Spy(ws={"005930": 12_000})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert spy.exits == [], "목표 도달 청산은 일어나지 않는다"
+    assert _lines()[1] == 12_400.0
+
+
+async def test_숏은_방향을_뒤집는다(env):
+    """숏에서 유리한 움직임은 하락이다. 문구대로 올리면 손실이 커진다."""
+    ledger.open_position({"id": "s1", "symbol": "034220", "side": "short",
+                          "entry": 10_000, "stop": 10_200, "target": 9_600,
+                          "rule": "orb", "qty": 5, "name": "034220"}, fill=10_000)
+    spy = _Spy(ws={"034220": 9_700})
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines("s1") == (9_900.0, 9_300.0), "손절선이 내려와야 한다"
+
+    spy.ws["034220"] = 9_800                    # 되밀림
+    await desk.tick(spy.fresh, spy.rest, spy.execute, now=NOW)
+    assert _lines("s1") == (9_900.0, 9_300.0)
+
+
+def test_원본_손절선은_추종_뒤에도_남는다(env):
+    """되돌릴 기준이자 일지·백테스트가 읽는 값이다."""
+    _open()
+    assert desk.update_lines(ledger.positions(status="open")[0], 10_300) \
+        == (10_100.0, 10_700.0)
+    with ledger._conn() as conn:
+        r = conn.execute("SELECT stop, target FROM positions").fetchone()
+    assert (r["stop"], r["target"]) == (9_800, 10_400)
+
+
+def test_갭이_없으면_건드리지_않는다(env):
+    """손절선이 진입가와 같은 이상한 행에서 라인을 0으로 밀지 않는다."""
+    pos = {"side": "long", "entry": 10_000, "stop": 10_000, "target": 10_000,
+           "stop_live": None, "target_live": None}
+    assert desk.update_lines(pos, 10_500) is None
 
 
 async def test_갱신된_라인으로_판정한다(env, monkeypatch):
