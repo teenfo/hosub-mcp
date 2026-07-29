@@ -22,6 +22,12 @@ import re
 # 국내 증권사 — 이름은 리서치 목록에 적히는 표기를 기본으로 한다.
 # aliases 는 소스마다 다른 표기·과거 사명. 매칭이 실패하면 '미등록'으로 남고,
 # 그 사실이 화면에 보이므로 여기 목록이 완벽할 필요는 없다.
+#
+# 실측 전수조사(2026-07-29, 네이버 5분류×5p + 한경 4종×30일): 두 소스에 실제로
+# 나타나는 이름은 **21개**다. 아래 국내 시드가 그중 19개를 덮고, 나머지 둘은
+# 증권사가 아니라 리서치 포털에 리포트를 올리는 기관이라 _PUBLISHERS 로 뺐다.
+# 시드에 있으나 한 번도 안 나타난 곳(NH·한국투자·삼성 등)은 공개 포털에 리포트를
+# 올리지 않는 것이지 오류가 아니다 — 올리기 시작하면 그날부터 바로 매칭된다.
 SEED_DOMESTIC: list[tuple[str, tuple[str, ...]]] = [
     ("NH투자증권", ("NH투자", "우리투자증권")),
     ("한국투자증권", ("한국투자",)),
@@ -55,6 +61,15 @@ SEED_DOMESTIC: list[tuple[str, tuple[str, ...]]] = [
     ("코리아에셋투자증권", ()),
 ]
 
+_PUBLISHER_NOTE = "증권사가 아님 — 리서치 포털에 리포트를 올리는 발행기관"
+
+# 증권사는 아니지만 같은 포털에 리포트를 싣는 곳. 등록해 두지 않으면 매 사이클
+# '미등록'으로 뜨는데, 그 경고는 **진짜로 놓친 증권사**를 위해 비워 둬야 한다.
+SEED_PUBLISHERS: list[tuple[str, tuple[str, ...]]] = [
+    ("한국IR협의회", ("한국IR협의회 기업리서치센터", "IR협의회")),
+    ("우리은행", ("우리금융경영연구소",)),
+]
+
 _FOREIGN_NOTE = "원문 비공개 — 국내 언론 인용 기사만 수집한다"
 
 # 해외 증권사 — 이름은 국내 기사에 실리는 한글 표기를 정본으로 삼는다.
@@ -85,6 +100,8 @@ def seed_rows() -> list[dict]:
     """시드 전체 — db.seed_brokers 가 소비한다."""
     rows = [{"name": n, "kind": "domestic", "aliases": list(a), "note": None}
             for n, a in SEED_DOMESTIC]
+    rows += [{"name": n, "kind": "domestic", "aliases": list(a),
+              "note": _PUBLISHER_NOTE} for n, a in SEED_PUBLISHERS]
     rows += [{"name": n, "kind": "foreign", "aliases": list(a), "note": _FOREIGN_NOTE}
              for n, a in SEED_FOREIGN]
     return rows
