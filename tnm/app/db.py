@@ -695,13 +695,35 @@ async def mark_embed_retry(item_ids: list[int], delay_sec: int) -> None:
             " where id = any(%s)", (delay_sec, item_ids))
 
 
+# 분류 큐 우선순위. LLM 처리량이 파이프라인의 병목이라(실측: 발행→분석 p50
+# 110분 중 85분이 이 큐) **순서가 곧 장중 반응 속도**다.
+#
+#   0  매매 대상 · 최근 발행  — 장중에 지금 벌어지는 일
+#   1  매매 대상              — 늦게 들어온 기사라도 매매 대상이 먼저
+#   2  그 외                  — 수집전용·관측 종목, 소급 백필
+#
+# 버킷 안에서는 수집 순(FIFO)이라 같은 급끼리는 공정하다. 백필이 2번에 모여
+# 있어도 0·1이 비면 그대로 소화된다 — 굶지 않는다.
+_FRESH_HOURS = 6
+
+_CLASSIFY_PRIORITY = (
+    " case when w.tier = 'trade' and r.published_at >= now() - interval '%d hours'"
+    "        then 0"
+    "      when w.tier = 'trade' then 1 else 2 end" % _FRESH_HOURS)
+
+
 async def pending_dedup(limit: int = 50) -> list[int]:
-    """임베딩 완료·novelty 미판정 항목 id (수집 순)."""
+    """임베딩 완료·novelty 미판정 항목 id.
+
+    분류와 같은 우선순위를 쓴다. 여기는 LLM 을 안 써서 병목이 아니지만, 순서가
+    다르면 장중 기사가 분류 큐에 **늦게 도착**해 앞의 우선순위가 무의미해진다.
+    """
     async with _pool.connection() as conn:
         cur = await conn.execute(
-            "select id from tnm_raw_items"
-            " where embedding is not null and novelty is null"
-            " order by collected_at limit %s", (limit,))
+            "select r.id from tnm_raw_items r"
+            " join tnm_watchlist w on w.id = r.watchlist_id"
+            " where r.embedding is not null and r.novelty is null"
+            f" order by {_CLASSIFY_PRIORITY}, r.collected_at limit %s", (limit,))
         return [r[0] for r in await cur.fetchall()]
 
 
@@ -744,7 +766,11 @@ async def insert_skipped_duplicate(item_id: int, similarity: float | None) -> No
 # ---------------- LLM 분류 (M5) ----------------
 
 async def pending_classify(limit: int = 2) -> list[dict]:
-    """분류 대기: 신규성 판정 완료(new/follow_up)·분석 미존재 (수집 순)."""
+    """분류 대기: 신규성 판정 완료(new/follow_up)·분석 미존재.
+
+    수집 순이 아니라 **우선순위 순**이다. 종전에는 collected_at FIFO 라, 장중에
+    매매 대상 종목의 기사가 들어와도 소급 백필 100여 건 뒤에 줄을 섰다.
+    """
     async with _pool.connection() as conn:
         cur = await conn.execute(
             "select r.id, r.source, r.title, r.body, r.norm_body, r.published_at,"
@@ -752,7 +778,7 @@ async def pending_classify(limit: int = 2) -> list[dict]:
             " from tnm_raw_items r join tnm_watchlist w on w.id = r.watchlist_id"
             " where r.novelty in ('new','follow_up')"
             "  and not exists (select 1 from tnm_analyses a where a.raw_item_id = r.id)"
-            " order by r.collected_at limit %s", (limit,))
+            f" order by {_CLASSIFY_PRIORITY}, r.collected_at limit %s", (limit,))
         return [{"id": r[0], "source": r[1], "title": r[2], "body": r[3],
                  "norm_body": r[4], "published_at": r[5].isoformat(), "novelty": r[6],
                  "stock_name": r[7]} for r in await cur.fetchall()]
