@@ -456,6 +456,7 @@ def force_close_eod(price_of) -> int:
 
 
 def positions(status: str | None = None, limit: int = 100) -> list[dict]:
+    """status 미지정이면 **void 를 뺀** 전체. void 를 보려면 명시해야 한다."""
     with _conn() as conn:
         if status:
             rows = conn.execute(
@@ -463,8 +464,73 @@ def positions(status: str | None = None, limit: int = 100) -> list[dict]:
                 (status, limit)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM positions ORDER BY opened DESC LIMIT ?", (limit,)).fetchall()
+                "SELECT * FROM positions WHERE status!='void' "
+                "ORDER BY opened DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# 미체결 회수 — 체결되지 않은 주문이 손익으로 남지 않게 한다
+# --------------------------------------------------------------------------
+def void_position(pos_id: str, note: str = "") -> bool:
+    """포지션을 무효 처리한다(status='void'). 삭제하지 않는다 — 감사 흔적을 남긴다.
+
+    `void` 는 `status='open'`/`'closed'` 어느 조회에도 걸리지 않으므로
+    실현손익·가드·일지·성과 집계에서 자동으로 빠진다.
+    """
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE positions SET status='void', exit_reason=? WHERE id=? "
+            "AND status!='void'",
+            (f"void:{note}" if note else "void", pos_id),
+        )
+        return cur.rowcount > 0
+
+
+def reap_unfilled(holdings: dict[str, int] | None, now: datetime | None = None,
+                  grace_min: float = 5.0) -> list[dict]:
+    """체결이 확인되지 않은 오픈 포지션을 **계좌 잔고와 대조해** 회수한다.
+
+    2026-07-29 실측이 이유다. `orders.approve_and_send` 는 키움 REST 가 주문번호를
+    반환하면(`status == "sent"`) 곧바로 `open_position()` 을 부른다. 거래소가 그
+    뒤에 주문을 거부해도 되돌리는 경로가 없다. 그날 현물 계좌에서 개별주 공매도
+    2건이 주문번호만 받고 체결되지 않았는데, 원장에는 포지션이 열리고 수동 청산으로
+    **−1,025원이 실현손익에 들어갔다**. 그 값을 일일 손실 가드가 그대로 썼다.
+
+    **판별 기준은 원장이 아니라 계좌 잔고다.** `fill_confirmed=0` 만으로는 유령을
+    가릴 수 없다 — 같은 날 고려산업은 `fill_confirmed=0` 이었지만 계좌에 52주가
+    실재했다(실시간 체결 이벤트만 놓친 경우). 원장만 보고 지웠으면 실제 보유
+    종목의 청산 감시가 사라졌을 것이다.
+
+    holdings: {종목코드: 보유수량}. **None 이면 아무것도 하지 않는다** —
+        조회 실패로 전 포지션을 지우는 것이 유령을 남기는 것보다 훨씬 위험하다
+        (`engine._held_symbols` 의 '과차단보다 통과' 와 같은 판단).
+    반환: 회수한 포지션 목록.
+    """
+    if holdings is None:
+        return []
+    now = now or datetime.now(KST)
+    reaped: list[dict] = []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE status='open' "
+            "AND (fill_confirmed IS NULL OR fill_confirmed=0)"
+        ).fetchall()
+        for r in rows:
+            held = held_minutes(r["opened"], now)
+            if held is None or held < grace_min:
+                continue                      # 아직 체결이 도착할 시간이다
+            if int(holdings.get(r["symbol"], 0) or 0) > 0:
+                continue                      # 계좌에 실재한다 — 유령이 아니다
+            conn.execute(
+                "UPDATE positions SET status='void', exit_reason=? WHERE id=?",
+                (f"void:미체결 {held:.0f}분", r["id"]),
+            )
+            reaped.append(dict(r))
+    for r in reaped:
+        log.warning("미체결 포지션 회수: %s(%s) %s주 — 주문번호 %s, 계좌 보유 없음",
+                    r.get("name"), r.get("symbol"), r.get("qty"), r.get("ord_no"))
+    return reaped
 
 
 def _agg(rows: list[sqlite3.Row]) -> dict:
@@ -516,7 +582,7 @@ def marks_for(symbol: str, day: str) -> dict:
     """
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM positions WHERE symbol=? "
+            "SELECT * FROM positions WHERE symbol=? AND status!='void' "
             "AND (substr(opened,1,10)=? OR substr(closed,1,10)=?) ORDER BY opened",
             (symbol, day, day),
         ).fetchall()

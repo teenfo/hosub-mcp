@@ -40,8 +40,14 @@ def _feed(prices, oid="p1"):
         breakeven.observe(lambda _s, _p=p: _p, now=t + timedelta(seconds=30 * i))
 
 
+def _day() -> str:
+    """관측 행의 day 는 포지션 `opened`(실제 시각)에서 나온다 — 고정 날짜를 쓰면
+    다음 날 전부 깨진다(2026-07-29 실제로 깨졌다)."""
+    return datetime.now(KST).date().isoformat()
+
+
 def _row(oid="p1"):
-    rows = [r for r in breakeven.rows_on("2026-07-28") if r["pos_id"] == oid]
+    rows = [r for r in breakeven.rows_on(_day()) if r["pos_id"] == oid]
     return rows[0] if rows else None
 
 
@@ -154,7 +160,7 @@ def test_report_는_유리_불리를_함께_센다(env):
     _feed([10_250, 9_990], "p2")
     ledger.close_position("p2", 10_400, "target")
     breakeven.settle()
-    rep = breakeven.report("2026-07-28")
+    rep = breakeven.report(_day())
     assert rep["trades"] == 2
     assert rep["triggered"] == 2
     assert rep["helped"] == 1 and rep["hurt"] == 1
@@ -163,9 +169,9 @@ def test_report_는_유리_불리를_함께_센다(env):
 def test_reset_은_관측치를_지운다(env):
     _open()
     _feed([10_250])
-    assert breakeven.rows_on("2026-07-28")
+    assert breakeven.rows_on(_day())
     assert breakeven.reset() == 1
-    assert breakeven.rows_on("2026-07-28") == []
+    assert breakeven.rows_on(_day()) == []
 
 
 # --------------------------------------------------------------------------
@@ -192,7 +198,7 @@ def test_꺼져_있으면_아무것도_쓰지_않는다(env, monkeypatch):
                         {"breakeven_shadow": {"enabled": False}})
     _open()
     assert breakeven.observe(lambda _s: 10_300) == 0
-    assert breakeven.rows_on("2026-07-28") == []
+    assert breakeven.rows_on(_day()) == []
 
 
 def test_일지_집계에_섞이지_않는다(env, monkeypatch, tmp_path):

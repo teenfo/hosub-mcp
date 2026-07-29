@@ -105,6 +105,9 @@ async def _ledger_loop() -> None:
                 stop_mode = cfg.get("stop_mode", "auto")   # auto(B) / approve(A)
                 if "09:00" <= hhmm <= "15:30":
                     auto_all = settings.RISK.get("auto_approve", False)
+                    # 체결되지 않은 주문이 손익으로 남지 않게 계좌와 대조해 회수한다.
+                    # 청산 판정보다 **먼저** 돌려야 유령 포지션에 청산 주문이 나가지 않는다.
+                    await _reap_unfilled(ledger)
                     # 본전 이동 shadow — 실제 청산 판정과 **같은 가격·같은 주기**로
                     # 관측한다. 기록 전용이라 아래 청산 로직에 관여하지 않는다.
                     await _breakeven_observe(breakeven)
@@ -135,6 +138,51 @@ async def _ledger_loop() -> None:
         # 감시를 멈추지 않도록 위 블록과 분리한다.
         await _breakeven_settle()
         await asyncio.sleep(30)
+
+
+async def _holdings_map() -> dict[str, int] | None:
+    """{종목코드: 보유수량}. 조회 실패·미설정이면 **None** — 호출자는 아무것도 하지 않는다.
+
+    `/api/account` 의 30초 캐시를 그대로 쓴다(신규 호출을 늘리지 않는다).
+    """
+    import time
+
+    from .kiwoom.account import parse_balance
+    from .kiwoom.client import client
+
+    if not settings.KIWOOM_APP_KEY:
+        return None
+    now = time.monotonic()
+    data = _account_cache["data"] if (
+        _account_cache["data"] and now - _account_cache["ts"] < 30) else None
+    if data is None:
+        try:
+            data = parse_balance(await client.balance())
+        except Exception:  # noqa: BLE001 - 조회 실패는 '모름'이지 '없음'이 아니다
+            log.warning("계좌 조회 실패 — 미체결 회수 이번 주기 생략")
+            return None
+        if data.get("ok"):
+            _account_cache.update(ts=now, data=data)
+    if not data.get("ok"):
+        return None
+    out: dict[str, int] = {}
+    for h in data.get("holdings") or []:
+        try:
+            out[str(h.get("code"))] = int(h.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def _reap_unfilled(ledger) -> None:
+    """미체결 포지션 회수. 실패해도 청산 감시를 막지 않는다."""
+    try:
+        holdings = await _holdings_map()
+        if holdings is None:
+            return
+        await asyncio.to_thread(ledger.reap_unfilled, holdings)
+    except Exception:  # noqa: BLE001
+        log.exception("미체결 포지션 회수 오류")
 
 
 async def _breakeven_observe(breakeven) -> None:
