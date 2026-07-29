@@ -5,8 +5,25 @@ import { postJSON, makeChanged } from "./tradelib.js";
 // 점수·판정은 룰 기반(결정론) — LLM 은 분류·요약만 담당 (매매판단 아님).
 
 const DIR_LABEL = { positive: "긍정", negative: "부정", neutral: "중립", unclear: "불명" };
-const HORIZON_LABEL = { immediate: "즉시", short: "단기", long: "장기" };
+const HORIZON_LABEL = { immediate: "즉시", short: "단기", long: "장기", unclear: "불명" };
 const NOVELTY_LABEL = { new: "신규", follow_up: "후속", duplicate: "재탕" };
+
+// 소스 배지 — 같은 목록에 공시·뉴스·리포트가 섞여 있어 구분이 없으면 무엇을
+// 보고 있는지 알 수 없다. 성격이 다르므로 색도 다르게 준다.
+//   공시   사실 확정 (DART 원문)          → 가장 무겁다
+//   리포트 애널리스트 분석 (목표가·의견)
+//   뉴스   보도 (구글 RSS · 네이버)
+const SOURCE_BADGE = {
+  dart: ["공시", "text-bg-danger", "DART 전자공시 원문"],
+  research: ["리포트", "text-bg-primary", "증권사 리서치 (네이버 금융·한경컨센서스)"],
+  rss: ["뉴스", "text-bg-secondary", "구글 뉴스 RSS"],
+  naver: ["뉴스", "text-bg-secondary", "네이버 뉴스 API"],
+};
+
+function sourceBadge(src) {
+  const [label, cls, hint] = SOURCE_BADGE[src] || [src || "-", "text-bg-light", ""];
+  return `<span class="badge ${cls}" title="${hint}">${label}</span>`;
+}
 
 function scoreBadge(score) {
   const s = score ?? 0;
@@ -91,10 +108,17 @@ export default {
       el("option", { value: "llm_failed" }, "분류 실패"),
       el("option", { value: "skipped_duplicate" }, "재탕"),
     ]);
+    const fSource = el("select", { class: "form-select form-select-sm", style: "max-width:130px" }, [
+      el("option", { value: "" }, "전체 소스"),
+      el("option", { value: "dart" }, "공시 (DART)"),
+      el("option", { value: "news" }, "뉴스"),
+      el("option", { value: "research" }, "증권사 리포트"),
+    ]);
     const fBtn = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "조회");
     const listBody = el("div", { class: "small mt-2" });
     listC.body.append(
-      el("div", { class: "d-flex gap-2 flex-wrap" }, [fDate, fTicker, fScore, fStatus, fBtn]),
+      el("div", { class: "d-flex gap-2 flex-wrap" },
+        [fDate, fTicker, fScore, fStatus, fSource, fBtn]),
       listBody);
 
     const detailBody = el("div", { class: "small" },
@@ -110,7 +134,8 @@ export default {
       detailBody.append(
         el("div", { class: "fw-semibold mb-1" }, `${it.name} (${it.ticker}) · ${it.title}`),
         el("div", { class: "mb-2", html:
-          `${scoreBadge(it.score)} <span class="badge text-bg-light">${it.category || it.status}</span> ` +
+          `${sourceBadge(it.source)} ${scoreBadge(it.score)} ` +
+          `<span class="badge text-bg-light">${it.category || it.status}</span> ` +
           `<span class="badge text-bg-light">${DIR_LABEL[it.impact_direction] || "-"}(${HORIZON_LABEL[it.impact_horizon] || "-"})</span> ` +
           `<span class="badge text-bg-light">${NOVELTY_LABEL[it.novelty] || it.novelty || "-"}</span>` +
           (it.warn_hallucination ? ' <span class="badge text-bg-warning">수치 검증 필요</span>' : "") +
@@ -152,6 +177,7 @@ export default {
       if (fTicker.value.trim()) params.set("ticker", fTicker.value.trim());
       if (fScore.value) params.set("min_score", fScore.value);
       if (fStatus.value) params.set("status", fStatus.value);
+      if (fSource.value) params.set("source", fSource.value);
       params.set("limit", "100");
       let d;
       try { d = await fetchJSON("/api/tnm/items?" + params.toString()); } catch (e) { return; }
@@ -163,12 +189,24 @@ export default {
           "판정 항목 없음 — 분류는 Mac(Ollama) 연결 후 자동으로 쌓입니다"));
         return;
       }
+      // 소스 구성을 목록 위에 먼저 보여준다 — 지금 무엇을 보고 있는지가
+      // 표를 훑기 전에 드러나야 한다(리포트가 섞이면서 특히).
+      const mix = items.reduce((a, it) => {
+        const key = it.source === "naver" ? "rss" : it.source;
+        a[key] = (a[key] || 0) + 1;
+        return a;
+      }, {});
+      listBody.appendChild(el("div", { class: "mb-2", html:
+        Object.entries(mix).sort((a, b) => b[1] - a[1])
+          .map(([s, n]) => `${sourceBadge(s)} <span class="text-secondary me-2">${n}</span>`)
+          .join(" ") }));
       const t = el("table", { class: "table table-sm table-hover align-middle mb-0 small" });
-      t.appendChild(el("thead", { html: "<tr><th>발행</th><th>종목</th><th>점수</th><th>분류</th><th>제목</th><th>라벨</th></tr>" }));
+      t.appendChild(el("thead", { html: "<tr><th>발행</th><th>소스</th><th>종목</th><th>점수</th><th>분류</th><th>제목</th><th>라벨</th></tr>" }));
       const tb = el("tbody");
       for (const it of items) {
         const tr = el("tr", { style: "cursor:pointer", html:
-          `<td class="text-secondary">${(it.published_at || "").slice(5, 16).replace("T", " ")}</td>` +
+          `<td class="text-secondary text-nowrap">${(it.published_at || "").slice(5, 16).replace("T", " ")}</td>` +
+          `<td>${sourceBadge(it.source)}</td>` +
           `<td>${it.name}</td><td>${scoreBadge(it.score)}</td>` +
           `<td>${it.status === "ok" ? (it.category || "-") : (it.status === "llm_failed" ? "실패" : "재탕")}</td>` +
           `<td>${it.title}</td>` +

@@ -18,9 +18,11 @@ AUTH = {"X-Internal-Token": "test-token"}
 def test_items_filters_passed_through(client, monkeypatch):
     captured = {}
 
-    async def fake_list(date, ticker, min_score, status, novelty, limit, offset):
+    async def fake_list(date, ticker, min_score, status, novelty, limit, offset,
+                        source=None):
         captured.update(date=date, ticker=ticker, min_score=min_score,
-                        status=status, novelty=novelty, limit=limit, offset=offset)
+                        status=status, novelty=novelty, limit=limit, offset=offset,
+                        source=source)
         return [{"id": 1, "title": "t"}]
 
     monkeypatch.setattr(db, "list_items", fake_list)
@@ -28,14 +30,16 @@ def test_items_filters_passed_through(client, monkeypatch):
                    "&status=ok&limit=50", headers=AUTH)
     assert r.status_code == 200 and len(r.json()["items"]) == 1
     assert captured == {"date": "2026-07-26", "ticker": "005930", "min_score": 60,
-                        "status": "ok", "novelty": None, "limit": 50, "offset": 0}
+                        "status": "ok", "novelty": None, "limit": 50, "offset": 0,
+                        "source": None}
 
 
 def test_items_offset_is_passed_through(client, monkeypatch):
     """소급 측정이 전량을 읽으려면 페이지를 넘겨야 한다 — limit 상한이 500이다."""
     captured = {}
 
-    async def fake_list(date, ticker, min_score, status, novelty, limit, offset):
+    async def fake_list(date, ticker, min_score, status, novelty, limit, offset,
+                        source=None):
         captured.update(limit=limit, offset=offset)
         return []
 
@@ -80,3 +84,17 @@ def test_label_missing_item_404(client, monkeypatch):
 
 def test_items_require_auth(client):
     assert client.get("/api/items").status_code == 401
+
+
+def test_source_filter_is_passed_through(client, monkeypatch):
+    """목록에 공시·뉴스·리포트가 섞여 있어 소스로 좁혀 볼 수 있어야 한다."""
+    captured = {}
+
+    async def fake_list(date, ticker, min_score, status, novelty, limit, offset,
+                        source=None):
+        captured["source"] = source
+        return []
+
+    monkeypatch.setattr(db, "list_items", fake_list)
+    assert client.get("/api/items?source=research", headers=AUTH).status_code == 200
+    assert captured["source"] == "research"
