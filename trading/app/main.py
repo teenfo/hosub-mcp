@@ -66,6 +66,13 @@ async def _resubscribe() -> None:
     await feed.update(list(settings.WATCHLIST.keys()))
 
 
+def scout_mod_owns() -> bool:
+    """엔진(full)이 감시목록을 소유하는가 — 외부 서비스에 알리는 값."""
+    from .scout import engine as scout_mod
+
+    return scout_mod.owns_watchlist()
+
+
 def _api_usage() -> dict:
     """키움 REST 호출 계측 스냅샷 (클라이언트 미초기화·구버전 대비 방어)."""
     from .kiwoom.client import client
@@ -1219,7 +1226,10 @@ async def api_watchlist(_=Depends(require_auth)):
     entries = watchlist.entries()
     for e in entries:                       # 실시간 현재가 덧붙임
         e["cur_price"] = _price_of(e.get("code", ""))
-    return {"entries": entries}
+    # 감시목록을 누가 소유하는가. TNM 이 직접 편입하기 전에 이 값을 본다 —
+    # 서비스 경계 너머로 `scout.owns_watchlist()` 를 전하는 자리다.
+    # TNM 은 이미 중복 확인을 위해 이 엔드포인트를 부르므로 추가 호출이 없다.
+    return {"entries": entries, "engine_owns": scout_mod_owns()}
 
 
 @app.post("/api/watchlist")
