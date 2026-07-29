@@ -19,7 +19,55 @@ CATEGORIES = ("실적", "공급계약", "증설투자", "지배구조", "자금�
               "소송규제", "인사", "거래정지", "정정공시",
               "시황해설", "단순재탕", "기타")
 DIRECTIONS = ("positive", "negative", "neutral", "unclear")
-HORIZONS = ("immediate", "short", "long")
+# 'unclear' 를 넣는다. 실측(2026-07-29) 분류 실패 원인 1위가 `impact_horizon
+# 위반: 'unclear'` 247건이었다 — impact_direction 에는 '모르겠다' 가 있는데
+# horizon 에는 없어서, 모델이 같은 말을 쓰면 항목이 통째로 버려졌다.
+# 게다가 impact_horizon 은 1년치 소급 측정에서 **1일 초과수익이 0과 구분되는
+# 버킷이 0/3**(t=0.89/1.39/−0.96)으로 예측력이 확인되지 않은 필드다. 예측력이
+# 없는 칸의 enum 이 좁아서 분석 자체를 버리는 것은 손해만 있다.
+HORIZONS = ("immediate", "short", "long", "unclear")
+
+# 모델이 실제로 내놓은 값 → 정본. 프롬프트에 "그대로 쓰라"고 적어도 계속
+# 벗어나므로(실측 175건/7일) 결정론적으로 흡수한다.
+#
+# 애매한 것은 전부 '기타'(w_category 0.2)로 보낸다. '기술개발'을 '증설투자'
+# (1.0)로 올리면 일반 산업 기사가 공급계약과 같은 무게를 갖는다 — 과대평가는
+# 누락보다 비싸다. 프롬프트도 "애매하면 기타"라고 이미 지시하고 있고, 여기서
+# 하는 일은 그 지시를 강제하는 것뿐이다.
+CATEGORY_ALIASES = {
+    "규제": "소송규제", "소송": "소송규제", "제재": "소송규제",
+    "상장폐지": "거래정지", "매매거래정지": "거래정지",
+    "기재정정": "정정공시", "정정": "정정공시",
+    "실적발표": "실적", "잠정실적": "실적",
+    "수주": "공급계약", "계약": "공급계약",
+    "증자": "자금조달", "유상증자": "자금조달", "자기주식취득": "자금조달",
+    "임원변경": "인사", "인사이동": "인사",
+    # 아래는 정본에 대응이 없다 — 보수적으로 기타
+    "기술개발": "기타", "연구개발": "기타", "기술혁신": "기타",
+    "신제품": "기타", "신제품출시": "기타", "기술·서비스": "기타",
+    "투자": "기타", "사업확장": "기타", "ESG": "기타", "esg": "기타",
+}
+DIRECTION_ALIASES = {"mixed": "unclear", "혼재": "unclear", "unknown": "unclear",
+                     "positive/negative": "unclear"}
+HORIZON_ALIASES = {"medium": "short", "mid": "short", "unknown": "unclear",
+                   "n/a": "unclear", "none": "unclear"}
+
+
+def _coerce(value, allowed: tuple[str, ...], aliases: dict[str, str]) -> str | None:
+    """모델 출력 → 정본 값. 못 맞추면 None (호출자가 SchemaError 를 낸다).
+
+    모델이 'A | B' 처럼 둘을 내놓는 경우가 있다(실측 11건). 첫 번째가 주된
+    판단이므로 앞에서부터 훑어 처음 맞는 것을 쓴다.
+    """
+    if not isinstance(value, str):
+        return None
+    for tok in (t.strip() for t in re.split(r"[|/,]", value)):
+        if tok in allowed:
+            return tok
+        mapped = aliases.get(tok) or aliases.get(tok.lower())
+        if mapped:
+            return mapped
+    return None
 
 SYSTEM_PROMPT = (
     "너는 금융 뉴스·공시를 분류하는 분석 보조다.\n"
@@ -73,21 +121,23 @@ def extract_json(content: str) -> dict:
 def validate(payload: dict) -> dict:
     """필수 키·enum·타입 검증 (요청서 5.4). 위반 시 SchemaError → 재시도."""
     out: dict = {}
-    cat = payload.get("category")
-    if cat not in CATEGORIES:
-        raise SchemaError(f"category 위반: {cat!r}")
+    cat = _coerce(payload.get("category"), CATEGORIES, CATEGORY_ALIASES)
+    if cat is None:
+        # 별칭에도 없는 값은 그대로 실패시킨다 — 재시도 힌트가 붙고, 계속
+        # 나오면 tnm_llm_calls 에 남아 별칭에 추가할 근거가 된다.
+        raise SchemaError(f"category 위반: {payload.get('category')!r}")
     out["category"] = cat
     im = payload.get("is_material")
     if not isinstance(im, bool):
         raise SchemaError(f"is_material 위반: {im!r}")
     out["is_material"] = im
-    d = payload.get("impact_direction")
-    if d not in DIRECTIONS:
-        raise SchemaError(f"impact_direction 위반: {d!r}")
+    d = _coerce(payload.get("impact_direction"), DIRECTIONS, DIRECTION_ALIASES)
+    if d is None:
+        raise SchemaError(f"impact_direction 위반: {payload.get('impact_direction')!r}")
     out["impact_direction"] = d
-    h = payload.get("impact_horizon")
-    if h not in HORIZONS:
-        raise SchemaError(f"impact_horizon 위반: {h!r}")
+    h = _coerce(payload.get("impact_horizon"), HORIZONS, HORIZON_ALIASES)
+    if h is None:
+        raise SchemaError(f"impact_horizon 위반: {payload.get('impact_horizon')!r}")
     out["impact_horizon"] = h
     try:
         conf = float(payload.get("confidence"))
