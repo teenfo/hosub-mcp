@@ -264,23 +264,64 @@ def parse_consensus_list(html: str, category: str) -> list[Report]:
 
 # ---------------- 해외 증권사 — 국내 언론 인용 ----------------
 
-def foreign_query(broker: dict) -> str:
+_VOCAB = "(목표주가 OR 투자의견 OR 리포트 OR 보고서)"
+# 국내 시장 자체를 가리키는 말. 이 말이 제목에 있으면 종목명이 없어도 국내 얘기다.
+KR_MARKET_TOKENS = ("코스피", "코스닥", "KOSPI", "KOSDAQ", "국내증시", "국내 증시",
+                    "한국증시", "한국 증시", "한국 주식", "한국 주식시장", "서울 증시",
+                    "한국물", "원화", "韓증시", "韓 증시", "韓주식")
+# 국내 언론이 즐겨 쓰는 축약. DART 정식명으로는 절대 안 잡히는데, 정작
+# "노무라, 삼전 목표가 67만원" 같은 가장 값진 제목이 이 형태로 온다.
+KR_NICKNAMES = {
+    "삼전": "삼성전자", "하닉": "SK하이닉스", "현차": "현대차",
+    "전자·하이닉스": "삼성전자", "만전자": "삼성전자", "만닉스": "SK하이닉스",
+}
+# 두 글자 상장사명('대한'·'삼양' 등)은 일상어와 충돌해 오탐을 만든다.
+_MIN_NAME_LEN = 3
+
+
+def foreign_query(broker: dict, *, market: bool = False) -> str:
     """해외 증권사 인용 기사 검색어.
 
-    회사명만 넣으면 '골드만삭스 채용' 같은 기사가 섞인다. 목표주가·투자의견
-    같은 리포트 어휘를 함께 걸어 리서치 인용만 남긴다.
+    **두 갈래로 나눈다.** 실측(2026-07-29)에서 하나로는 안 됐다.
+
+      market=True   … + (코스피 OR 코스닥 …)  — 국내 시장 전망. 전부 채택한다
+      market=False  … 넓게 — 개별 종목 콜. 제목에 국내 상장사가 있을 때만 채택
+
+    시장 조건만 걸면 "맥쿼리, SK하이닉스 목표주가 290만원" 처럼 코스피를 언급
+    하지 않는 개별 종목 콜을 통째로 잃는다. 반대로 넓게만 걸면 Investing.com
+    이 번역한 미국 종목 기사가 대부분을 차지한다 — 둘 다 실측으로 확인했다.
     """
     names = [broker["name"], *(broker.get("aliases") or [])][:3]
     who = " OR ".join(f'"{n}"' for n in names)
-    return f"({who}) (목표주가 OR 투자의견 OR 리포트 OR 보고서)"
+    q = f"({who}) {_VOCAB}"
+    return f"{q} ({' OR '.join(KR_MARKET_TOKENS[:5])})" if market else q
 
 
-def parse_foreign_feed(xml_text: str, broker: dict, since: datetime | None) -> list[Report]:
+def is_korea_related(title: str, names: set[str]) -> bool:
+    """제목이 국내 시장·국내 상장사 얘기인가.
+
+    `names` 가 비어 있으면(DART 캐시 없음) 시장 용어만으로 판정한다 — 모르는
+    것을 통과시키는 대신 좁게 잡는다. 해외사 항목은 어차피 2차 정보라
+    누락보다 오염이 비싸다.
+    """
+    t = title or ""
+    if any(tok in t for tok in KR_MARKET_TOKENS):
+        return True
+    if any(nick in t for nick in KR_NICKNAMES):
+        return True
+    return any(n in t for n in names if len(n) >= _MIN_NAME_LEN)
+
+
+def parse_foreign_feed(xml_text: str, broker: dict, since: datetime | None,
+                       names: set[str] | None = None,
+                       require_korea: bool = False) -> list[Report]:
     """구글 뉴스 RSS → Report(category='company', source='news').
 
     본문을 따라가지 않는다. 해외사 항목은 '원문'이 아니라 인용이므로, 링크와
     제목까지가 우리가 정직하게 주장할 수 있는 전부다.
     """
+    import hashlib
+
     from .rss import parse_feed  # 기존 파서 재사용 (형식이 같다)
 
     out: list[Report] = []
@@ -288,8 +329,8 @@ def parse_foreign_feed(xml_text: str, broker: dict, since: datetime | None) -> l
         pub = it["published"]
         if since and pub <= since:
             continue
-        import hashlib
-
+        if require_korea and not is_korea_related(it["title"], names or set()):
+            continue
         uid = hashlib.sha256(it["link"].encode()).hexdigest()[:32]
         out.append(Report(
             source="news", source_uid=uid, broker=broker["name"],
@@ -387,11 +428,30 @@ async def fill_naver_targets(reports: list[Report], limit: int = 20) -> int:
 
 
 async def fetch_foreign(broker: dict, since: datetime | None,
-                        initial_days: int = 3) -> list[Report]:
-    """해외 증권사 1곳의 인용 기사. since 는 마지막 수집 시각(커서)."""
+                        initial_days: int = 3,
+                        names: set[str] | None = None) -> list[Report]:
+    """해외 증권사 1곳의 인용 기사 — 시장 질의 + 종목 질의 (증권사당 2콜).
+
+    종목 질의는 국내 상장사·시장 용어가 제목에 있을 때만 채택한다. 그렇지
+    않으면 Investing.com 이 번역한 미국 종목 기사가 결과를 덮는다(실측).
+    """
     if since is None:
         since = datetime.now(timezone.utc) - timedelta(days=max(1, initial_days))
+    out: list[Report] = []
+    seen: set[str] = set()
     async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
-        xml = await _get(client, GOOGLE_RSS, params={
-            "q": foreign_query(broker), "hl": "ko", "gl": "KR", "ceid": "KR:ko"})
-    return parse_foreign_feed(xml, broker, since)
+        for market in (True, False):
+            try:
+                xml = await _get(client, GOOGLE_RSS, params={
+                    "q": foreign_query(broker, market=market),
+                    "hl": "ko", "gl": "KR", "ceid": "KR:ko"})
+            except Exception as e:  # noqa: BLE001 — 질의 단위 격리
+                log.warning("해외 인용 조회 실패 %s(market=%s): %s",
+                            broker.get("name"), market, e)
+                continue
+            for r in parse_foreign_feed(xml, broker, since, names,
+                                        require_korea=not market):
+                if r.source_uid not in seen:
+                    seen.add(r.source_uid)
+                    out.append(r)
+    return out

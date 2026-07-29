@@ -13,7 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from . import brokers as broker_reg
-from . import db, discover, settings
+from . import corp_codes, db, discover, settings
 from .collectors import research
 from .collectors.base import Collector, RawDoc
 from .collectors.dart import DartCollector
@@ -262,6 +262,15 @@ class CollectRunner:
             cursors = json.loads(raw) if raw else {}
         except ValueError:
             cursors = {}
+        # 국내 상장사명 — 종목 질의 결과가 국내 얘기인지 가르는 기준.
+        # 없으면(캐시 미생성) 시장 용어만으로 좁게 판정한다.
+        try:
+            names = await corp_codes.ensure_names()
+        except Exception as e:  # noqa: BLE001 — 캐시 실패가 수집을 막지 않는다
+            log.warning("상장사명 조회 실패: %s", e)
+            names = set()
+        if not names:
+            log.info("상장사명 캐시 없음 — 해외 인용은 시장 용어만으로 거른다")
         out: list[research.Report] = []
         for b in targets[:int(cfg.get("foreign_max_per_cycle", 12))]:
             prev = cursors.get(b["name"])
@@ -273,7 +282,8 @@ class CollectRunner:
                     since = None
             try:
                 rows = await research.fetch_foreign(
-                    b, since, initial_days=int(cfg.get("initial_days", 3)))
+                    b, since, initial_days=int(cfg.get("initial_days", 3)),
+                    names=names)
             except Exception as e:  # noqa: BLE001 — 증권사 단위 격리
                 counts["errors"] += 1
                 log.warning("해외 리서치 수집 실패 %s: %s", b["name"], e)

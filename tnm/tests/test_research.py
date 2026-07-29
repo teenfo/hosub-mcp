@@ -279,7 +279,40 @@ def test_seed_covers_both_kinds_and_marks_foreign_limit():
     assert len(names) == len(rows), "시드에 중복 이름이 없어야 한다"
 
 
+# 실측 전수조사(2026-07-29, 네이버 5분류×5p + 한경 4종×30일)에서 소스에 실제로
+# 나타난 21개. 시드가 이걸 전부 덮지 못하면 '미등록' 경고가 상시로 떠서,
+# 정작 진짜로 놓친 증권사를 가린다.
+_OBSERVED = [
+    "DS투자증권", "IBK투자증권", "KB증권", "LS증권", "SK증권", "iM증권", "교보증권",
+    "다올투자증권", "대신증권", "메리츠증권", "미래에셋증권", "상상인증권",
+    "신한투자증권", "우리은행", "유안타증권", "유진투자증권", "키움증권", "하나증권",
+    "한국IR협의회", "한화투자증권", "현대차증권",
+]
+
+
+@pytest.mark.parametrize("name", _OBSERVED)
+def test_seed_covers_every_observed_publisher(name):
+    idx = broker_reg.build_index(broker_reg.seed_rows())
+    assert broker_reg.match(name, idx) is not None, f"{name} 이 미등록으로 남는다"
+
+
+def test_non_broker_publishers_are_labelled():
+    """증권사가 아닌 발행기관은 note 로 구분한다 — 목록에서 성격이 보여야 한다."""
+    rows = {r["name"]: r for r in broker_reg.seed_rows()}
+    assert "증권사가 아님" in (rows["한국IR협의회"]["note"] or "")
+    assert "증권사가 아님" in (rows["우리은행"]["note"] or "")
+
+
 # ---------------- 해외 인용 ----------------
+
+def _rss(*titles: str) -> str:
+    items = "".join(
+        f"<item><title>{t}</title><link>https://n.example/{i}</link>"
+        f"<description>본문</description>"
+        f"<pubDate>Wed, 29 Jul 2026 01:00:00 GMT</pubDate>"
+        f"<source>연합뉴스</source></item>" for i, t in enumerate(titles))
+    return f'<?xml version="1.0"?><rss><channel>{items}</channel></rss>'
+
 
 RSS = """<?xml version="1.0"?><rss><channel>
 <item><title>골드만삭스, 삼성전자 목표가 상향</title>
@@ -299,13 +332,63 @@ def test_foreign_feed_respects_cursor_and_marks_quote():
     r = rows[0]
     assert r.broker == "골드만삭스" and r.source == "news"
     assert r.evidence.get("quoted") is True, "원문이 아니라 인용임을 표시해야 한다"
-    assert research.parse_foreign_feed(RSS, b, None) or True
 
 
-def test_foreign_query_narrows_to_research_vocabulary():
-    q = research.foreign_query({"name": "골드만삭스", "aliases": ["Goldman Sachs"]})
-    assert "골드만삭스" in q and "Goldman Sachs" in q
-    assert "목표주가" in q, "회사명만 넣으면 채용·실적 기사가 섞인다"
+def test_foreign_query_has_two_forms():
+    b = {"name": "골드만삭스", "aliases": ["Goldman Sachs"]}
+    stock = research.foreign_query(b)
+    market = research.foreign_query(b, market=True)
+    assert "골드만삭스" in stock and "Goldman Sachs" in stock
+    assert "목표주가" in stock, "회사명만 넣으면 채용·실적 기사가 섞인다"
+    assert "코스피" in market and "코스피" not in stock
+
+
+# 실측 표본(2026-07-29). 앞 넷은 버려야 할 것, 뒤 넷은 살려야 할 것이다.
+_NOISE = [
+    "골드만삭스, 제미니 스페이스 스테이션 투자의견 ’매도’ 하향 조정",
+    "모건 스탠리, 치즈케이크 팩토리 주식 투자의견 상향... 매출 호조",
+    "JP모건, 라이너보드 가격 상승 속 인터내셔널 페이퍼 투자의견 상향",
+    "골드만삭스, AMD 목표주가 450→640달러로 대폭 상향",
+]
+_KEEP = [
+    "골드만삭스 \"코스피 목표치 9,000→12,000…강한 실적 모멘텀\"",       # 시장 용어
+    "맥쿼리 SK하이닉스 목표주가 290만 원으로 상향",                      # 상장사명
+    "노무라 \"삼전 목표가 59만원→67만원…2분기 실적 호조 전망\"",          # 축약
+    "JP모건, 한국 증시 ’비중 확대’ 의견 유지",                           # 시장 용어
+]
+_NAMES = {"삼성전자", "SK하이닉스", "현대차", "NAVER", "대한항공"}
+
+
+@pytest.mark.parametrize("title", _NOISE)
+def test_us_stock_quotes_are_filtered_out(title):
+    """Investing.com 이 번역한 미국 종목 기사 — 국내 매매에 쓸 값이 아니다."""
+    assert not research.is_korea_related(title, _NAMES)
+
+
+@pytest.mark.parametrize("title", _KEEP)
+def test_korea_related_quotes_survive(title):
+    assert research.is_korea_related(title, _NAMES)
+
+
+def test_two_char_names_do_not_match():
+    """'대한'·'삼양' 같은 두 글자 상장사명은 일상어와 충돌해 오탐을 만든다."""
+    assert not research.is_korea_related("골드만삭스, 대한 전망을 밝게 봤다",
+                                         {"대한", "삼양"})
+
+
+def test_no_name_cache_falls_back_to_market_terms_only():
+    """캐시가 없으면 모르는 것을 통과시키지 않고 좁게 잡는다."""
+    assert research.is_korea_related("골드만삭스, 코스피 목표치 상향", set())
+    assert not research.is_korea_related("맥쿼리 SK하이닉스 목표주가 상향", set())
+
+
+def test_stock_query_requires_korea_but_market_query_does_not():
+    b = {"name": "골드만삭스", "aliases": []}
+    xml = _rss(*_NOISE[:1], *_KEEP[1:2])
+    wide = research.parse_foreign_feed(xml, b, None, _NAMES, require_korea=False)
+    narrow = research.parse_foreign_feed(xml, b, None, _NAMES, require_korea=True)
+    assert len(wide) == 2
+    assert [r.title for r in narrow] == [_KEEP[1]]
 
 
 # ---------------- 러너 ----------------
@@ -507,7 +590,7 @@ def test_foreign_cursor_advances(runner, monkeypatch):
 
     seen = datetime(2026, 7, 29, 10, tzinfo=timezone.utc)
 
-    async def _foreign(b, since, initial_days=3):
+    async def _foreign(b, since, initial_days=3, names=None):
         r = _report("골드만삭스", "f1")
         r.source, r.published_at = "news", seen
         return [r]
