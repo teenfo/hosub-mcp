@@ -122,3 +122,13 @@ def test_trade_marks_proxy_path():
         assert c.get("/api/trading/trades/005930?date=2026-07-27").status_code == 502
         for path in ("trades", "trades/12345", "trades/abcdef", "trades/005930/x"):
             assert c.get(f"/api/trading/{path}").status_code == 404, path
+
+
+def test_stock_basic_proxy_path():
+    """종목 기본정보는 6자리 코드만 통과한다 (모든 화면의 종목 클릭 경로)."""
+    with _client() as c:
+        _login(c)
+        assert c.get("/api/trading/stock/005930").status_code == 502
+        for path in ("stock", "stock/12345", "stock/abcdef", "stock/005930/x"):
+            assert c.get(f"/api/trading/{path}").status_code == 404, path
+        assert c.post("/api/trading/stock/005930", json={}).status_code == 404

@@ -32,6 +32,7 @@ TR_CHANGE_RATE_RANK = "ka10027"  # 전일대비등락률상위 (급등률 상위
 TR_STOCK_LIST = "ka10099"        # 종목정보 리스트 (요청 필드 실호출 검증 필요)
 
 TR_QUOTE = "ka10006"             # 주식시세 — flu_rt(등락률) + cntr_str(체결강도)
+TR_STOCK_BASIC = "ka10001"       # 주식기본정보 — 시총·PER·EPS·52주 고저 등
 
 PATH_CHART = "/api/dostk/chart"
 PATH_MARKET = "/api/dostk/mrkcond"
@@ -300,6 +301,14 @@ class KiwoomClient:
         매매 tier 승격 후보에만 부른다 — 하루 1~2종목이라 레이트리밋 부담이 없다.
         """
         return await self._call(PATH_MARKET, TR_QUOTE, {"stk_cd": code})
+
+    async def stock_basic(self, code: str) -> dict:
+        """주식기본정보 (ka10001) — 시총·PER·EPS·52주 고저·상하한가 등.
+
+        사람이 종목을 눌렀을 때만 부른다. 자동 루프가 쓰지 않으므로 레이트리밋
+        예산에 미치는 영향이 사실상 없다.
+        """
+        return await self._call(PATH_STOCK_INFO, TR_STOCK_BASIC, {"stk_cd": code})
 
     async def daily_realized(self, start: str, end: str) -> dict:
         """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.
