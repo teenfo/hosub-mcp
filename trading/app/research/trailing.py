@@ -457,6 +457,9 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
 
     out = {v: _blank() for v in names}
     base = _blank()
+    # 거래 하나가 정책을 바꾸면 **어떤 청산에서 어떤 청산으로** 갔는지.
+    # 총합만 보면 "왜" 를 못 읽는다 — 사유가 바뀐 자리가 손익을 만든다.
+    moves: dict[str, dict[str, dict]] = {v: {} for v in names}
     used = no_bars = 0
     old_file, desk.STATE_FILE = desk.STATE_FILE, Path("/nonexistent/desk.json")
     old = (settings.CONFIG.get("execution", {}) or {}).get("desk")
@@ -473,6 +476,7 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
             base["wins"] += 1 if k > 0 else 0
             _tally(base, pos.get("exit_reason") or "?", k,
                    _above(pos, float(pos["exit"])))
+            per_pos = {}
             for v in names:
                 cfg = _cfg_of(v)
                 settings.CONFIG.setdefault("execution", {})["desk"] = \
@@ -482,6 +486,15 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
                 out[v]["krw"] += k
                 out[v]["wins"] += 1 if k > 0 else 0
                 _tally(out[v], why, k, _above(pos, px))
+                per_pos[v] = (why, k, _above(pos, px))
+            if "fixed" in per_pos:
+                f_why, f_k, f_up = per_pos["fixed"]
+                for v, (why, k, up) in per_pos.items():
+                    key = (f"{f_why}{'+' if f_up else '-'}"
+                           f" → {why}{'+' if up else '-'}")
+                    m = moves[v].setdefault(key, {"n": 0, "delta": 0.0})
+                    m["n"] += 1
+                    m["delta"] += k - f_k
     finally:
         desk.STATE_FILE = old_file
         if old is None:
@@ -500,5 +513,9 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
 
     return {"trades": used, "no_bars": no_bars, "day": day,
             "as_executed": _fin(base),
-            "policies": {v: _fin(out[v]) for v in names},
+            "policies": {v: _fin(out[v]) | {"moves": {
+                k: {"n": m["n"], "delta": round(m["delta"], 0)}
+                for k, m in sorted(moves[v].items(),
+                                   key=lambda kv: kv[1]["delta"])}}
+                for v in names},
             "note": "표본이 작다. 값을 고르는 용도가 아니라 '내 거래에 켰다면' 을 본다"}
