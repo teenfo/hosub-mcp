@@ -560,6 +560,25 @@ def test_오버라이드는_준_값만_바꾼다(env):
     assert desk._num("interval_sec") == 3.0
 
 
+def test_추종_파라미터는_범위를_벗어나지_못한다(env):
+    """실거래 청산선을 정하는 값이다 — 오타 하나가 손절선을 엉뚱한 곳에 놓는다."""
+    got = desk.set_state(tighten_at=5, lock_gain_pct=150, max_gain_pct=-1)
+    assert got["tighten_at"] == 1.0          # 목표갭 대비 비율은 0~1
+    assert got["lock_gain_pct"] == 100.0     # 상승분의 0~100%
+    assert got["max_gain_pct"] == 0.0        # 음수 상한은 없다(0 = 상한 없음)
+    assert desk.set_state(tighten_at=-1)["tighten_at"] == 0.0
+
+
+def test_발동_지점을_바꾸면_손절선_계산이_바뀐다(env, monkeypatch):
+    """진입 10,000 · 목표갭 400. 발동 30% 면 10,120 부터 확정 계산이 걸린다."""
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": True, "tighten_at": 0.3, "lock_gain_pct": 50}})
+    pos = {"side": "long", "entry": 10_000.0, "stop": 9_800.0, "target": 10_400.0,
+           "stop_live": None, "target_live": None}
+    assert desk.update_lines(pos, 10_119)[0] == 9_919.0     # 미발동 — 갭 추종
+    assert desk.update_lines(pos, 10_120)[0] == 10_060.0    # 발동 — 상승분 120×0.5
+
+
 def test_주기는_하한_아래로_못_내린다(env):
     """0초 주기는 이벤트 루프를 굶긴다."""
     desk.set_state(interval_sec=0)

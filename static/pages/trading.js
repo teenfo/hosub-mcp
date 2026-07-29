@@ -686,6 +686,52 @@ export default {
         d.enabled ? "데스크 켜짐" : "데스크 꺼짐"),
     ]);
 
+    /** 추종 파라미터 편집 줄 — 실거래 청산선을 정하는 값이라 화면에서 바로 본다.
+     *  폴링이 입력을 덮어쓰지 않도록 포커스 중인 칸은 건드리지 않는다. */
+    const trailInputs = {};
+    const trailNum = (key, label, val, step, hint) => {
+      const inp = trailInputs[key] || (trailInputs[key] = el("input", {
+        class: "form-control form-control-sm py-0", type: "number", step,
+        style: "width:5rem", title: hint }));
+      if (document.activeElement !== inp) inp.value = val;
+      inp.onchange = async () => {
+        const v = Number(inp.value);
+        if (!isFinite(v)) return;
+        inp.disabled = true;
+        // tighten_at 만 비율(0~1)이다 — 화면은 %로 보이고 보낼 때 환산한다
+        try { await postJSON("/api/trading/desk", { [key]: key === "tighten_at" ? v / 100 : v }); changed("status", null); await loadStatus(); }
+        catch (e) { alert("실패: " + e.message); }
+        finally { inp.disabled = false; }
+      };
+      return el("div", { class: "d-flex align-items-center gap-1" },
+        [el("span", { class: "text-secondary" }, label), inp]);
+    };
+
+    const tgtToggle = el("input", { class: "form-check-input", type: "checkbox",
+      role: "switch", id: "deskTgt" });
+    tgtToggle.onchange = async () => {
+      try { await postJSON("/api/trading/desk", { trail_target: tgtToggle.checked }); changed("status", null); await loadStatus(); }
+      catch (e) { alert("실패: " + e.message); tgtToggle.checked = !tgtToggle.checked; }
+    };
+
+    const trailRow = (d) => {
+      if (document.activeElement !== tgtToggle) tgtToggle.checked = !!d.trail_target;
+      return el("div", { class: "d-flex gap-3 align-items-center flex-wrap mt-1 small" }, [
+        trailNum("tighten_at", "발동", Math.round((d.tighten_at ?? 0.5) * 100), 5,
+          "목표까지 이만큼 오면 손절선 계산을 '상승분의 N%' 로 바꿉니다(%)"),
+        trailNum("lock_gain_pct", "확정", d.lock_gain_pct ?? 30, 5,
+          "발동 뒤 손절선 = 진입가 + 상승분 × 이 비율(%). 클수록 확정분이 크지만 잔진동에 먼저 걸립니다"),
+        trailNum("max_gain_pct", "익절상한", d.max_gain_pct ?? 3, 0.5,
+          "익절선 천장(진입가 대비 %). 0이면 상한 없음"),
+        el("div", { class: "form-check form-switch mb-0" }, [
+          tgtToggle,
+          el("label", { class: "form-check-label", for: "deskTgt",
+            title: "익절선도 손절선처럼 따라 올릴지. 실측에서 켜면 손해였습니다(기본 끔)" },
+            "익절선 추종"),
+        ]),
+      ]);
+    };
+
     const renderDesk = (d) => {
       deskBox.innerHTML = "";
       if (!d) return;
@@ -724,6 +770,7 @@ export default {
           + (d.proposed ? ` · 승인대기 ${fmt(d.proposed)}건` : "")
           + (d.last_tick ? ` · ${d.last_tick}` : "")),
       ]));
+      deskBox.appendChild(trailRow(d));
       if (d.override && Object.keys(d.override).length) {
         deskBox.appendChild(el("div", { class: "text-secondary mt-1",
           title: "config.yaml 이 아니라 화면·API 로 바꾼 값입니다. 재배포하면 이 파일이 우선합니다" },
