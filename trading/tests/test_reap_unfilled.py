@@ -68,6 +68,29 @@ def test_계좌에_있으면_미체결이어도_건드리지_않는다(db):
     assert _status("p1")[0] == "open"
 
 
+def test_숏은_인버스_ETF_보유로_대조한다(db):
+    """숏 신호는 현물 계좌에서 공매도가 안 되므로 인버스 ETF 매수로 나간다.
+
+    2026-07-29 실측: LG디스플레이 숏(주문번호 0185630)의 실제 체결은
+    **KODEX 인버스 11주 @1,235** 였다. 원 종목으로 대조하면 계좌에 034220 이
+    없으니 유령으로 읽혀 **실보유 포지션이 무효 처리된다.**
+    """
+    _open("p1", "034220", side="short", qty=11, entry=9_020)
+    with ledger._conn() as conn:
+        conn.execute("UPDATE positions SET exec_symbol='114800' WHERE id='p1'")
+    assert ledger.reap_unfilled({"114800": 11}, now=LATER) == [], \
+        "체결된 종목(ETF)이 계좌에 있으면 유령이 아니다"
+    assert _status("p1")[0] == "open"
+
+
+def test_대체_종목도_계좌에_없으면_회수한다(db):
+    """대체 종목 예외가 '숏은 절대 회수 안 함' 이 되면 안 된다."""
+    _open("p1", "034220", side="short", qty=11, entry=9_020)
+    with ledger._conn() as conn:
+        conn.execute("UPDATE positions SET exec_symbol='114800' WHERE id='p1'")
+    assert [r["id"] for r in ledger.reap_unfilled({}, now=LATER)] == ["p1"]
+
+
 def test_유예_전에는_건드리지_않는다(db):
     _open("p1", "034220")
     soon = T0 + timedelta(minutes=2)

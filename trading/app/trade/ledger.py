@@ -154,6 +154,24 @@ def record_fill(fill: dict) -> bool:
     return updated
 
 
+def executed_symbol(row) -> str:
+    """이 포지션이 **실제로 계좌에서 오간 종목코드**.
+
+    숏 신호는 현물 계좌에서 공매도가 안 되므로 인버스 ETF 매수로 바뀌어 나간다
+    (`orders.propose` → `exec_symbol`). 계좌 잔고와 대조할 때는 반드시 이 값을
+    써야 한다 — 원 종목으로 보면 "계좌에 없다" 가 되어 실보유를 유령으로 읽는다.
+    """
+    try:
+        return str(row["exec_symbol"] or row["symbol"])
+    except (KeyError, IndexError, TypeError):
+        return str(row["symbol"])
+
+
+def _substituted(row, code: str) -> bool:
+    """체결된 종목이 포지션의 기준 종목과 다른가(인버스 ETF 대체 등)."""
+    return bool(code) and code != str(row["symbol"])
+
+
 def reconcile_executions(execs: list[dict]) -> dict:
     """증권사 체결내역(ka10076)으로 원장의 추정값을 실측으로 확정한다.
 
@@ -167,6 +185,17 @@ def reconcile_executions(execs: list[dict]) -> dict:
     같은 주문번호에 체결이 여러 건이면(분할 체결) **수량가중 평균가**로 합치고
     비용은 더한다. 한 건만 보고 확정하면 나머지 체결이 통째로 사라진다.
 
+    ## 대체 종목(인버스 ETF)으로 나간 주문은 가격을 덮지 않는다
+
+    숏 신호는 현물 계좌에서 공매도가 안 되므로 `settings.INVERSE_ETF` 매수로
+    바뀌어 나간다(`orders.propose`). 그때 체결가는 **ETF 의 가격**이고 포지션의
+    손절·목표·손익은 **원 종목 기준**이다. 주문번호만 보고 덮으면 기준이 무너진다.
+
+    실측 2026-07-29: LG디스플레이 숏(기준가 9,020)에 KODEX 인버스 체결가
+    1,235 가 들어가 슬리피지가 −86.3% 로 기록됐다. 삼성중공업 숏도 20,450 →
+    1,236(−94.0%). 손익은 원 종목 기준으로 이미 계산돼 있어 **숫자만 서로
+    어긋난 채 남았다.** 그래서 체결 종목이 다르면 확정 표시와 비용만 채운다.
+
     반환: {entries, exits} — 각각 갱신한 포지션 수.
     """
     agg: dict[str, dict] = {}
@@ -174,7 +203,8 @@ def reconcile_executions(execs: list[dict]) -> dict:
         ord_no, qty = e.get("ord_no") or "", int(e.get("qty") or 0)
         if not ord_no or qty <= 0:
             continue
-        a = agg.setdefault(ord_no, {"amt": 0.0, "qty": 0, "fee": 0.0, "tax": 0.0})
+        a = agg.setdefault(ord_no, {"amt": 0.0, "qty": 0, "fee": 0.0, "tax": 0.0,
+                                    "code": str(e.get("code") or "")})
         a["amt"] += float(e.get("price") or 0) * qty
         a["qty"] += qty
         a["fee"] += float(e.get("commission") or 0)
@@ -189,6 +219,12 @@ def reconcile_executions(execs: list[dict]) -> dict:
             row = conn.execute(
                 "SELECT * FROM positions WHERE ord_no=?", (ord_no,)).fetchone()
             if row:
+                if _substituted(row, a["code"]):
+                    conn.execute(
+                        "UPDATE positions SET entry_fee_krw=?, fill_confirmed=1 "
+                        "WHERE id=?", (a["fee"], row["id"]))
+                    entries += 1
+                    continue
                 model = row["model_entry"] or price
                 conn.execute(
                     "UPDATE positions SET entry=?, qty=?, slippage_pct=?, "
@@ -203,6 +239,13 @@ def reconcile_executions(execs: list[dict]) -> dict:
                 "SELECT * FROM positions WHERE exit_ord_no=? AND status='closed'",
                 (ord_no,)).fetchone()
             if ex:
+                if _substituted(ex, a["code"]):
+                    conn.execute(
+                        "UPDATE positions SET exit_fee_krw=?, tax_krw=?, "
+                        "exit_fill_confirmed=1 WHERE id=?",
+                        (a["fee"], a["tax"], ex["id"]))
+                    exits += 1
+                    continue
                 conn.execute(
                     "UPDATE positions SET exit=?, exit_fee_krw=?, tax_krw=?, "
                     "exit_fill_confirmed=1 WHERE id=?",
@@ -566,7 +609,9 @@ def reap_unfilled(holdings: dict[str, int] | None, now: datetime | None = None,
             held = held_minutes(r["opened"], now)
             if held is None or held < grace_min:
                 continue                      # 아직 체결이 도착할 시간이다
-            if int(holdings.get(r["symbol"], 0) or 0) > 0:
+            # 숏은 인버스 ETF 매수로 나간다 — 원 종목으로 대조하면 실보유가
+            # 전부 유령으로 읽힌다(2026-07-29 실측: LG디스플레이 숏 = 114800 매수)
+            if int(holdings.get(executed_symbol(r), 0) or 0) > 0:
                 continue                      # 계좌에 실재한다 — 유령이 아니다
             conn.execute(
                 "UPDATE positions SET status='void', exit_reason=? WHERE id=?",
