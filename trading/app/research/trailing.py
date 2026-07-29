@@ -46,6 +46,8 @@
 """
 import json
 import logging
+import multiprocessing as mp
+import os
 from datetime import timedelta
 from pathlib import Path
 
@@ -221,34 +223,60 @@ def _exit_mix(trades) -> dict:
     return dict(sorted(mix.items(), key=lambda kv: -kv[1]))
 
 
+def _workers(want: int = 0) -> int:
+    """기본은 코어 수 − 2. 매매 프로세스와 WS 수신에 여유를 남긴다(리포트와 동일)."""
+    if want > 0:
+        return want
+    return max(1, min(6, (os.cpu_count() or 2) - 2))
+
+
+def _one(arg):
+    """워커 진입점. 종목당 (스캔 1회 + 변종별 재생)."""
+    sym, min_bars, limit_days, sides, names = arg
+    df = store.load_bars(sym, "1m", limit=limit_days * 400)
+    if df.empty or len(df) < min_bars:
+        return None
+    try:
+        return sym, run_symbol(sym, df, sides=sides, names=names)
+    except Exception:  # noqa: BLE001 - 한 종목 실패가 전체를 멈추지 않는다
+        log.exception("재생 실패 %s", sym)
+        return None
+
+
 def analyze(symbols: list[str], min_bars: int = 600, limit_days: int = 60,
             sides: tuple[str, ...] | None = ("long",),
-            names: list[str] | None = None) -> dict:
+            names: list[str] | None = None, workers: int = 0) -> dict:
     """전 종목을 전 변종으로 재생하고 비교표를 낸다.
 
     `paired` 는 **모든 변종이 같은 진입을 잡은 거래**만 모은 것이다. 청산이
     빨라지면 다음 신호를 잡을 수 있어 진입 자체가 달라지는데, 그 차이까지 섞이면
     청산 정책의 효과를 읽을 수 없다.
+
+    종목 간에는 의존이 없어 코어에 나눠 돌린다 — 순차로는 200종목이 한 시간을
+    넘긴다(리포트가 같은 이유로 병렬화돼 있다).
     """
     names = names or variants()
     costs, risk = settings.COSTS, settings.RISK.get("risk_per_trade_pct", 0.5)
     per = {v: [] for v in names}
     used = skipped = 0
 
-    for sym in symbols:
-        df = store.load_bars(sym, "1m", limit=limit_days * 400)
-        if df.empty or len(df) < min_bars:
-            skipped += 1
-            continue
-        try:
-            got = run_symbol(sym, df, sides=sides, names=names)
-        except Exception:  # noqa: BLE001 - 한 종목 실패가 전체를 멈추지 않는다
-            log.exception("재생 실패 %s", sym)
+    args = [(s, min_bars, limit_days, sides, names) for s in symbols]
+    n = _workers(workers)
+    if n <= 1 or len(args) <= 1:
+        results = map(_one, args)
+    else:
+        ctx = mp.get_context("spawn")   # fork 는 부모의 열린 SQLite 핸들을 물려받는다
+        with ctx.Pool(n) as pool:
+            results = pool.map(_one, args, chunksize=2)
+        log.info("추종 스윕: %d종목 / 워커 %d", len(symbols), n)
+
+    for got in results:
+        if got is None:
             skipped += 1
             continue
         used += 1
         for v in names:
-            per[v].extend(got[v])
+            per[v].extend(got[1][v])
 
     common = set.intersection(*({_key(t) for t in per[v]} for v in names)) \
         if names else set()
