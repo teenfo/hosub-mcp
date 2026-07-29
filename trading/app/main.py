@@ -91,8 +91,28 @@ TEMPLATE = (Path(__file__).parent.parent / "templates" / "dashboard.html").read_
 )
 
 
+_ws_prev: set[str] = set()
+
+
 async def _resubscribe() -> None:
-    await feed.update(_ws_symbols())
+    """구독 목록 갱신. **바뀐 종목을 로그에 남긴다.**
+
+    `feed.update` 는 집합이 같으면 조용히 돌아가고, 다르면 소켓을 닫고 재접속하며
+    그동안 틱을 잃는다. 감시목록이 자주 갈리면 그 손실이 누적되는데, 종전에는
+    아무 흔적이 없어 "데스크 REST 폴백이 왜 늘었나" 를 되짚을 수 없었다.
+    발굴 엔진 전환과 데스크 활성화를 같은 날 하면(사용자 결정 2026-07-29)
+    이 줄의 시각이 둘을 가르는 근거가 된다.
+    """
+    syms = _ws_symbols()
+    new = set(syms)
+    global _ws_prev
+    if new != _ws_prev:
+        added, removed = sorted(new - _ws_prev), sorted(_ws_prev - new)
+        if _ws_prev:      # 첫 구독은 전량이라 나열해도 읽히지 않는다
+            log.info("WS 구독 변경 %d → %d종목 (추가 %s · 제거 %s) — 재접속하며 틱 유실",
+                     len(_ws_prev), len(new), added or "없음", removed or "없음")
+        _ws_prev = new
+    await feed.update(syms)
 
 
 def scout_mod_owns() -> bool:
