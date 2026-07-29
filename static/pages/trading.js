@@ -666,19 +666,44 @@ export default {
 
     // 매매 데스크 계측 — WS 대비 REST 비율이 이 설계의 성적표다.
     // REST 가 늘고 있으면 발굴 예산을 다시 먹는 중이므로 눈에 보여야 한다.
+    // 켜고 끄기는 배포 없이 즉시 반영된다(런타임 오버라이드). 초 단위로 실거래
+    // 청산을 내는 루프이므로 이상이 보이면 그 자리에서 멈출 수 있어야 한다.
+    const deskToggle = el("input", { class: "form-check-input", type: "checkbox",
+      role: "switch", id: "deskOn" });
+    deskToggle.onchange = async () => {
+      const on = deskToggle.checked;
+      if (on && !confirm("매매 데스크를 켭니다.\n\n보유 포지션의 손절·목표를 초 단위로 보고 도달하면 시장가로 청산합니다. 판정 주기만 빨라질 뿐 규칙은 지금과 같습니다.\n\n이상이 보이면 이 스위치로 즉시 끌 수 있습니다.")) {
+        deskToggle.checked = false; return;
+      }
+      deskToggle.disabled = true;
+      try { await postJSON("/api/trading/desk", { enabled: on }); changed("status", null); await loadStatus(); }
+      catch (e) { alert("실패: " + e.message); deskToggle.checked = !on; }
+      finally { deskToggle.disabled = false; }
+    };
+    const deskSwitch = (d) => el("div", { class: "form-check form-switch mb-0 me-2" }, [
+      deskToggle,
+      el("label", { class: "form-check-label small", for: "deskOn" },
+        d.enabled ? "데스크 켜짐" : "데스크 꺼짐"),
+    ]);
+
     const renderDesk = (d) => {
       deskBox.innerHTML = "";
       if (!d) return;
+      if (document.activeElement !== deskToggle) deskToggle.checked = !!d.enabled;
       if (!d.enabled) {
-        deskBox.appendChild(el("div", { class: "text-secondary" },
-          `⚙ 매매 데스크 꺼짐 — 청산 감시는 기존 30초 주기입니다 (execution.desk.enabled)`));
+        deskBox.appendChild(el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+          deskSwitch(d),
+          el("span", { class: "text-secondary" },
+            `청산 감시는 기존 30초 주기입니다. 켜면 ${d.interval_sec}초 주기로 보유 ${d.max_symbols}종목까지 봅니다.`),
+        ]));
         return;
       }
       const total = (d.ws || 0) + (d.rest || 0);
       const restPct = total ? (d.rest / total * 100) : 0;
       deskBox.append(el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+        deskSwitch(d),
         el("span", { class: "badge text-bg-" + (d.degraded ? "warning" : "success") },
-          d.degraded ? `⚙ 매매 데스크 강등 (WS 미연결)` : `⚙ 매매 데스크 ${d.interval_sec}초 주기`),
+          d.degraded ? `강등 (WS 미연결 — ${d.degraded_interval_sec}초)` : `${d.interval_sec}초 주기`),
         el("span", { class: "badge text-bg-light text-dark", title: "보유 감시 대상 / 상한" },
           `감시 ${d.watched ?? 0}/${d.max_symbols ?? 5}종목`),
         el("span", {
@@ -690,6 +715,11 @@ export default {
         el("span", { class: "text-secondary" },
           `사이클 ${fmt(d.cycles || 0)} · 청산 ${fmt(d.exits || 0)}건` + (d.last_tick ? ` · ${d.last_tick}` : "")),
       ]));
+      if (d.override && Object.keys(d.override).length) {
+        deskBox.appendChild(el("div", { class: "text-secondary mt-1",
+          title: "config.yaml 이 아니라 화면·API 로 바꾼 값입니다. 재배포하면 이 파일이 우선합니다" },
+          "런타임 설정 적용 중: " + JSON.stringify(d.override)));
+      }
       deskBox.appendChild(el("div", { class: "text-secondary mt-1" },
         d.last_line
           ? `라인 갱신 ${fmt(d.lines || 0)}회 · 최근 ${d.last_line.at} ${d.last_line.name || d.last_line.symbol} 손절 ${d.last_line.stop == null ? "—" : fmt(d.last_line.stop)} / 목표 ${d.last_line.target == null ? "—" : fmt(d.last_line.target)}`

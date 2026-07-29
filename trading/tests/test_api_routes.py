@@ -176,6 +176,24 @@ def test_status_exposes_desk_metrics(client):
     assert {"enabled", "ws", "rest", "cycles", "interval_sec"} <= set(d["desk"])
 
 
+def test_desk_can_be_switched_off_without_a_deploy(client, monkeypatch, tmp_path):
+    """초 단위로 실거래 청산을 내는 루프다 — 배포를 기다려서 끌 수는 없다."""
+    from app.trade import desk
+
+    monkeypatch.setattr(desk, "STATE_FILE", tmp_path / "desk.json")
+    monkeypatch.setitem(desk.settings.CONFIG, "execution", {"desk": {"enabled": True}})
+
+    r = client.post("/api/desk", json={"enabled": False},
+                    headers={"X-Internal-Token": TOKEN})
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert r.json()["desk"]["enabled"] is False
+    assert _get(client, "/api/status").json()["desk"]["enabled"] is False
+
+
+def test_desk_requires_auth(client):
+    assert client.post("/api/desk", json={"enabled": True}).status_code == 401
+
+
 def test_reconcile_without_api_key_is_not_an_error_page(client, monkeypatch):
     from app import main
 
