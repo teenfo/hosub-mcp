@@ -830,7 +830,7 @@ async def log_llm_call(raw_item_id: int, input_hash: str, model_name: str,
 async def list_items(date: str | None = None, ticker: str | None = None,
                      min_score: int | None = None, status: str | None = None,
                      novelty: str | None = None, limit: int = 100,
-                     offset: int = 0) -> list[dict]:
+                     offset: int = 0, source: str | None = None) -> list[dict]:
     """분석 목록 (최신순). 필터는 전부 선택.
 
     offset: 페이지 넘김. 화면은 안 쓰지만 **소급 측정이 전량을 읽으려면 필요**하다
@@ -849,6 +849,10 @@ async def list_items(date: str | None = None, ticker: str | None = None,
         where.append("a.status = %s"); args.append(status)
     if novelty:
         where.append("a.novelty = %s"); args.append(novelty)
+    if source:
+        # 'news' 는 수집 경로가 둘(구글 RSS·네이버 API)인데 화면에서는 한 덩어리다
+        srcs = ["rss", "naver"] if source == "news" else [source]
+        where.append("r.source = any(%s)"); args.append(srcs)
     args.append(min(int(limit), 500))
     args.append(max(0, int(offset)))
     sql = (
