@@ -163,3 +163,67 @@ async def test_대사_실패해도_일지는_만들되_사실에_남긴다(env, 
     assert entry["date"] == "2026-07-29"
     assert any("대사에 실패" in f for f in entry["facts"]), \
         "모델 비용 기준임을 조용히 넘기면 안 된다"
+
+
+# --------------------------------------------------------------------------
+# 2026-07-29 실측 — 단일가 대기 중 계좌에서 주문을 취소한 종목에 청산을 눌렀다
+# --------------------------------------------------------------------------
+def test_거부된_청산은_원장을_닫지_않는다(tmp_path, monkeypatch):
+    """키움은 거부도 HTTP 200 으로 준다(return_code 20).
+
+    HTTP 성공만 보고 닫으면 **계좌에 남은 채 원장만 닫히는 진짜 고아**가 된다.
+    """
+    import asyncio
+
+    from app.kiwoom.client import client
+    from app.trade import ledger, orders
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(orders, "DB_PATH", tmp_path / "t.db")
+    ledger.open_position({"id": "p1", "symbol": "007810", "side": "long", "qty": 2,
+                          "entry": 42_700, "stop": 41_000, "target": 44_000,
+                          "rule": "orb"}, fill=42_700)
+
+    async def rejected(*a, **k):
+        return {"return_code": 20,
+                "return_msg": "[2000](800033:매도가능수량이 부족합니다. 0주 매도가능)"}
+
+    monkeypatch.setattr(client, "order", rejected)
+    got = asyncio.run(orders.execute_exit(
+        ledger.positions(status="open")[0], "manual", 42_200))
+
+    assert got["ok"] is False and got["status"] == "rejected"
+    assert "매도가능수량" in got["message"]
+    assert ledger.positions(status="open"), "거부됐으면 포지션이 열린 채여야 한다"
+
+
+def test_수락된_청산은_원장을_닫는다(tmp_path, monkeypatch):
+    """거부 판정이 정상 경로까지 막으면 안 된다."""
+    import asyncio
+
+    from app.kiwoom.client import client
+    from app.trade import ledger, orders
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(orders, "DB_PATH", tmp_path / "t.db")
+    ledger.open_position({"id": "p1", "symbol": "007810", "side": "long", "qty": 2,
+                          "entry": 42_700, "stop": 41_000, "target": 44_000,
+                          "rule": "orb"}, fill=42_700)
+
+    async def ok(*a, **k):
+        return {"return_code": 0, "ord_no": "0702299"}
+
+    monkeypatch.setattr(client, "order", ok)
+    got = asyncio.run(orders.execute_exit(
+        ledger.positions(status="open")[0], "manual", 42_200))
+    assert got["ok"] is True
+    assert ledger.positions(status="open") == []
+
+
+def test_accepted_는_return_code_로_판정한다():
+    from app.trade import orders
+
+    assert orders.accepted({"return_code": 0}) is True
+    assert orders.accepted({"return_code": "0"}) is True
+    assert orders.accepted({}) is True             # 코드가 없으면 성공 취급(구버전)
+    assert orders.accepted({"return_code": 20}) is False

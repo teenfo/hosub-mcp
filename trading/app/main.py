@@ -1101,6 +1101,22 @@ async def api_position_close(pos_id: str, _=Depends(require_auth)):
                 if p["id"] == pos_id), None)
     if not pos:
         return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
+
+    # 계좌에 없는 것을 팔려고 하지 않는다. 2026-07-29 실측: 단일가 대기 중
+    # 사용자가 계좌에서 주문을 취소한 종목에 청산을 눌렀더니 매도 주문이 나가고
+    # `매도가능수량이 부족합니다` 로 거부됐다. 체결된 적 없는 포지션은 **팔 대상이
+    # 아니라 장부에서 지울 대상**이다 — `/void` 를 권한다.
+    #
+    # 조회에 실패하면(None) 막지 않는다. 청산은 계좌를 보호하는 방향이라
+    # 모른다고 멈추면 급할 때 못 판다(`_held_symbols` 의 '과차단보다 통과').
+    holdings = await _holdings_map()
+    sym = ledger.executed_symbol(pos)
+    held = None if holdings is None else int(holdings.get(sym, 0) or 0)
+    if held == 0:
+        return {"ok": False, "need_void": True, "held_qty": 0, "held_symbol": sym,
+                "error": (f"계좌에 {sym} 보유가 없습니다 — 체결되지 않은 주문으로 "
+                          "보입니다. 매도 대신 '제외' 로 장부에서 정리하세요")}
+
     px = _price_of(pos["symbol"]) or pos["entry"]
     return await orders.execute_exit(pos, "manual", float(px))
 

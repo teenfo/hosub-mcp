@@ -200,3 +200,59 @@ def test_reconcile_without_api_key_is_not_an_error_page(client, monkeypatch):
     monkeypatch.setattr(main.settings, "KIWOOM_APP_KEY", "")
     r = client.post("/api/account/reconcile", headers={"X-Internal-Token": TOKEN})
     assert r.status_code == 200 and r.json()["ok"] is False
+
+
+def test_계좌에_없는_포지션은_매도하지_않고_제외를_권한다(client, monkeypatch, tmp_path):
+    """2026-07-29 실측 — 체결된 적 없는 주문에 청산을 누르면 매도가 나갔다.
+
+    팔 것이 없는데 주문을 내면 거부되거나, 결제 타이밍에 따라 **없는 물량이
+    팔린다.** 체결된 적 없는 포지션은 팔 대상이 아니라 장부에서 지울 대상이다.
+    """
+    from app import main
+    from app.trade import ledger, orders
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(orders, "DB_PATH", tmp_path / "t.db")
+    ledger.open_position({"id": "p1", "symbol": "007810", "side": "long", "qty": 2,
+                          "entry": 42_700, "stop": 41_000, "target": 44_000,
+                          "rule": "orb"}, fill=42_700)
+
+    async def _empty():
+        return {}                      # 계좌에 아무것도 없다
+
+    monkeypatch.setattr(main, "_holdings_map", _empty)
+    called = []
+    monkeypatch.setattr(orders, "execute_exit",
+                        lambda *a, **k: called.append(a))
+
+    pid = ledger.positions(status="open")[0]["id"]
+    r = client.post(f"/api/positions/{pid}/close",
+                    headers={"X-Internal-Token": TOKEN}).json()
+    assert r["need_void"] is True and r["ok"] is False
+    assert called == [], "매도 주문이 나가면 안 된다"
+    assert ledger.positions(status="open"), "원장은 그대로 열려 있어야 한다"
+
+
+def test_계좌_조회_실패면_청산을_막지_않는다(client, monkeypatch, tmp_path):
+    """청산은 계좌를 보호하는 방향이다 — 모른다고 멈추면 급할 때 못 판다."""
+    from app import main
+    from app.trade import ledger, orders
+
+    monkeypatch.setattr(ledger, "DB_PATH", tmp_path / "t.db")
+    monkeypatch.setattr(orders, "DB_PATH", tmp_path / "t.db")
+    ledger.open_position({"id": "p1", "symbol": "007810", "side": "long", "qty": 2,
+                          "entry": 42_700, "stop": 41_000, "target": 44_000,
+                          "rule": "orb"}, fill=42_700)
+
+    async def _unknown():
+        return None                    # 조회 실패
+
+    async def _exec(pos, reason, px):
+        return {"ok": True, "status": "sent"}
+
+    monkeypatch.setattr(main, "_holdings_map", _unknown)
+    monkeypatch.setattr(orders, "execute_exit", _exec)
+    pid = ledger.positions(status="open")[0]["id"]
+    r = client.post(f"/api/positions/{pid}/close",
+                    headers={"X-Internal-Token": TOKEN}).json()
+    assert r["ok"] is True

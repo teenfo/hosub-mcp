@@ -643,7 +643,12 @@ export default {
       if (!confirm(`${name}을(를) 지금 시장가로 매도합니다.\n\n실제 매도 주문이 나갑니다 — 되돌릴 수 없습니다.`)) return;
       try {
         const r = await postJSON(`/api/trading/positions/${id}/close`);
-        if (r && r.ok === false) { alert("발주 실패: " + (r.error || "사유 미상") + "\n원장은 그대로 둡니다."); }
+        if (r && r.need_void) {
+          // 체결된 적 없는 주문이다 — 팔 것이 없으므로 장부에서 지우는 게 맞다
+          if (confirm(`${r.error}\n\n지금 제외할까요?`)) { await voidPos(id, name); return; }
+        } else if (r && r.ok === false) {
+          alert("발주 거부: " + (r.message || r.error || "사유 미상") + "\n\n원장은 닫지 않았습니다 — 계좌를 확인하세요.");
+        }
         changed("pos", null); await loadPositions();
       } catch (e) { alert("실패: " + e.message); }
     };

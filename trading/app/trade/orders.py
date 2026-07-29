@@ -5,6 +5,7 @@ TTL 이 지난 pending 은 자동 만료. 모든 상태 전이는 audit 테이�
 숏 신호는 현물 계좌 제약상 인버스 ETF '매수' 로 매핑한다(동일 명목금액 근사).
 """
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -15,6 +16,7 @@ from pathlib import Path
 from .. import settings
 from ..signals.rules import Signal
 
+log = logging.getLogger(__name__)
 DB_PATH = Path(settings.DATA_DIR) / "trading.db"
 
 
@@ -135,9 +137,27 @@ def propose_exit(pos: dict, reason: str, exit_px: float) -> str:
     return order_id
 
 
+def accepted(result) -> bool:
+    """키움이 이 주문을 **받아들였는가**.
+
+    키움은 거부도 HTTP 200 으로 준다(`return_code` 20 = 증거금/수량 부족 등).
+    HTTP 성공만 보고 체결로 취급하면 원장과 계좌가 어긋난다 —
+    `approve_and_send` 는 이미 이 규약을 쓰는데 `execute_exit` 만 빠져 있었다.
+    """
+    rc = result.get("return_code") if isinstance(result, dict) else 0
+    return rc in (0, "0", None)
+
+
 async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
     """즉시 시장가 매도로 청산(승인 없이). 손절 자동/장 마감 정리에 사용.
-    키움은 네이티브 스톱주문이 없어 서버가 감시 후 직접 발주한다."""
+    키움은 네이티브 스톱주문이 없어 서버가 감시 후 직접 발주한다.
+
+    **거부되면 원장을 닫지 않는다.** 2026-07-29 실측: 단일가 대기 중 사용자가
+    계좌에서 주문을 취소한 종목에 청산을 눌렀더니 `매도가능수량이 부족합니다`
+    (return_code 20) 거부가 왔는데 원장은 청산 처리됐다. 그날은 애초에 미체결이라
+    결과적으로 맞는 상태였지만, **체결된 포지션에서 같은 일이 나면 계좌에 남은 채
+    원장만 닫히는 진짜 고아**가 된다.
+    """
     from ..kiwoom.client import client
     from . import ledger
 
@@ -146,7 +166,8 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
     now = datetime.now(UTC)
     try:
         result = await client.order("sell", exec_symbol, int(pos["qty"]), price=0)
-        status, detail = "sent", json.dumps(result, ensure_ascii=False)[:2000]
+        status = "sent" if accepted(result) else "rejected"
+        detail = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # noqa: BLE001
         status, detail, result = "error", str(e), {"error": str(e)}
     # 시장가 청산이라 실제 체결가는 exit_px(손절선·목표가)와 다르다. 주문번호를
@@ -164,7 +185,12 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
         _audit(conn, order_id, f"exit_{reason}", detail)
     if status == "sent":
         ledger.close_position(pos["id"], float(exit_px), reason, ord_no=exit_ord_no)
-    return {"ok": status == "sent", "status": status, "result": result}
+    else:
+        log.warning("청산 발주 거부 %s(%s): %s — 원장을 닫지 않는다",
+                    pos.get("name"), pos.get("symbol"), detail[:200])
+    msg = result.get("return_msg") if isinstance(result, dict) else None
+    return {"ok": status == "sent", "status": status, "result": result,
+            "message": msg or detail[:200]}
 
 
 def expire_stale() -> int:
