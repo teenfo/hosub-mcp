@@ -88,34 +88,51 @@ async def test_weight_cap_leaves_capital_for_later_signals(monkeypatch):
     }
     monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
 
-    # 상한 없음 → 첫 종목이 5주(50만) 다 쓰고 나머지는 0주
+    # 상한 없음 → 첫 종목이 5주(50만)를 다 쓴다. 뒤 신호도 **수량은 계산되고
+    # 승인대기에 올라가되** 살 수 없다는 것이 fundable 로 표시된다(2026-07-29).
     eng = SignalEngine(equity=500_000)
     eng.state.max_positions = 9
     monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
     _prep(monkeypatch, eng, signals)
-    qtys = [f["qty"] for f in await eng.run_once()]
-    assert qtys == [5, 0, 0]
+    found = await eng.run_once()
+    assert [f["qty"] for f in found] == [5, 5, 5]
+    assert [f["fundable"] for f in found] == [True, False, False]
+    assert "자금 부족" in found[1]["note"]
 
-    # 상한 20%(=1주) → 세 종목 모두 진입
+    # 상한 20%(=1주) → 세 종목 모두 진입하고 셋 다 자금이 된다
     eng2 = SignalEngine(equity=500_000)
     eng2.state.max_positions = 9
     monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 20)
     _prep(monkeypatch, eng2, signals)
-    assert [f["qty"] for f in await eng2.run_once()] == [1, 1, 1]
+    found2 = await eng2.run_once()
+    assert [f["qty"] for f in found2] == [1, 1, 1]
+    assert all(f["fundable"] for f in found2)
 
 
 @pytest.mark.asyncio
-async def test_note_explains_weight_cap(monkeypatch):
-    """1주 값이 비중 상한을 넘으면 '잔고 부족'이 아니라 '비중 상한'으로 표시."""
+async def test_over_weight_reaches_the_queue_but_not_auto_approval(monkeypatch):
+    """1주 값이 비중 상한을 넘어도 **승인대기에는 올린다** — 보이지 않으면
+    판단할 수 없다. 다만 자동승인은 집어가지 않는다(비중 규칙은 안전장치다).
+    """
     eng = SignalEngine(equity=560_000)
     monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 20)
+    monkeypatch.setitem(settings.RISK, "auto_approve", True)
+    sent = []
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+
+    async def _spy(order_id, qty=None):
+        sent.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy)
     _prep(monkeypatch, eng, {
         "000100": [_sig("orb", 150_000, 148_000, 153_000)],   # 상한 112,000 초과
     })
     found = await eng.run_once()
-    assert found[0]["qty"] == 0
+    assert found[0]["qty"] == 1 and found[0]["over_weight"] is True
+    assert found[0]["actionable"] is True and found[0]["order_id"] == "oid"
     assert "비중 상한" in found[0]["note"]
-    assert "잔고 부족" not in found[0]["note"]
+    assert sent == [], "자동승인이 비중 상한을 우회하면 안 된다"
 
 
 @pytest.mark.asyncio
@@ -131,9 +148,10 @@ async def test_spent_cash_deducted_within_cycle(monkeypatch):
     })
     monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
     found = await eng.run_once()
-    assert found[0]["qty"] == 2                   # 80% 상한 = 2주(20만)
-    assert found[1]["qty"] == 0                   # 남은 5만 < 1주
-    assert "잔고 부족" in found[1]["note"]
+    assert found[0]["qty"] == 2 and found[0]["fundable"] is True   # 80% 상한 = 2주
+    # 뒤 신호는 수량이 계산돼 승인대기에는 오르지만 남은 5만으로는 못 산다
+    assert found[1]["qty"] == 2 and found[1]["fundable"] is False
+    assert "자금 부족" in found[1]["note"]
     assert "가용" in found[1]["note"]             # 자산이 아닌 '남은 현금' 기준
 
 
@@ -214,3 +232,32 @@ async def test_open_positions_synced_from_ledger(monkeypatch):
     monkeypatch.setattr(ledger, "open_count", _boom)
     eng._sync_open_positions()                    # 조회 실패는 직전 값 유지
     assert eng.state.open_positions == 3
+
+
+@pytest.mark.asyncio
+async def test_pending_order_fires_a_slack_notification(monkeypatch):
+    """승인대기 주문이 생기는 **바로 그 지점**에서 알림이 나가야 한다.
+
+    나중(승인·발주 시점)이면 늦다 — 사용자가 승인할지 정하려고 받는 알림이다.
+    자금이 모자란 건도 보낸다: 입금하거나 다른 포지션을 정리하는 판단을 하려면
+    신호가 났다는 사실을 알아야 한다.
+    """
+    sent = []
+
+    async def spy(text):
+        sent.append(text)
+
+    monkeypatch.setattr(engine_mod.slack, "notify", spy)
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    eng = SignalEngine(equity=500_000)
+    eng.state.max_positions = 9
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    monkeypatch.setitem(settings.RISK, "risk_per_trade_pct", 5.0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 100_000, 99_000, 101_500)],
+        "000200": [_sig("orb", 400_000, 396_000, 406_000)],   # 자금 부족
+    })
+    await eng.run_once()
+    assert len(sent) == 2, "자금이 모자란 건도 알린다"
+    assert any("종목000100" in t for t in sent)
+    assert any("🟡" in t for t in sent), "자금 부족은 제목에 드러난다"

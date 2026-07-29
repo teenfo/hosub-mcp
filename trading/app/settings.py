@@ -111,6 +111,12 @@ INTERNAL_TOKEN = os.environ.get("INTERNAL_TOKEN", "")
 # TNM 이 trading 을 부를 때 쓰는 TRADING_TOKEN 의 반대 방향이다.
 TNM_URL = os.environ.get("TNM_URL", "http://127.0.0.1:8602")
 TNM_TOKEN = os.environ.get("TNM_TOKEN", "")
+
+# 슬랙 알림 — TNM 과 **같은 토큰·채널**을 쓰되 TNM 을 경유하지 않는다.
+# 경유하면 TNM 이 죽었을 때 매매 알림까지 멈춘다. 매매 알림이 더 급하고,
+# 두 서비스의 수명주기를 묶을 이유가 없다. 비어 있으면 알림만 안 나간다.
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "")
 # TNM 분석 레코드의 '성공' 상태값. 다른 값은 skipped_duplicate / llm_failed 다.
 # 상수로 뺀 이유: 'done' 으로 잘못 쓰면 필터가 **조용히 0건**을 돌려주고
 # 아무 오류도 안 난다 — 실제로 발굴 엔진 news 어댑터와 소급 측정 양쪽이
