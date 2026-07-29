@@ -97,6 +97,18 @@ execution:
   # 자동 청산 — 키움 REST 는 스톱주문이 없어 서버가 감시 후 직접 발주한다.
   auto_exit: true               # false 면 청산 자동화 끔(장부 기록만)
   stop_mode: auto               # auto=손절 즉시 시장가 매도(B) / approve=손절도 승인(A). 목표는 항상 승인.
+  # --- 매매 데스크 (보유 포지션 전용 고속 청산 감시) ---
+  # 청산 판정만 초 단위로 돌린다. 가격은 이미 WS 로 실시간이므로 **추가 호출이
+  # 거의 없다** — 낡은(stale_sec 초과) 종목만 REST 로 보충한다.
+  # 실거래 청산을 다루므로 배포와 활성화를 분리한다: false 로 배포하고,
+  # 다음 거래일 장 시작 후 켜서 30분 관찰한 뒤 유지 여부를 정한다.
+  desk:
+    enabled: false            # 켜기 전까지는 기존 30초 _ledger_loop 이 그대로 맡는다
+    interval_sec: 2           # 현행 30초의 15배. 1은 발주 왕복·SQLite 쓰기와 경합
+    stale_sec: 5              # WS 값이 이보다 오래되면 못 믿는다 → 그 종목만 REST
+    max_symbols: 5            # max_positions 와 동일. 초과분은 기존 루프가 맡는다
+    degraded_interval_sec: 30 # WS 미연결 시 강등 주기(REST 폭주 방지)
+
   # --- 본전 이동 shadow (관측 전용) ---
   # "목표거리의 arm_at_pct% 에 닿으면 손절선을 진입가로 올렸다면 어땠을까" 를
   # 실제 청산과 나란히 기록만 한다. **매매에는 관여하지 않는다.**

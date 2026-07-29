@@ -22,7 +22,7 @@ from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
-from .trade import orders
+from .trade import desk, orders
 from . import journal
 
 logging.basicConfig(level=logging.INFO)
@@ -105,6 +105,9 @@ async def _ledger_loop() -> None:
                 stop_mode = cfg.get("stop_mode", "auto")   # auto(B) / approve(A)
                 if "09:00" <= hhmm <= "15:30":
                     auto_all = settings.RISK.get("auto_approve", False)
+                    # 체결되지 않은 주문이 손익으로 남지 않게 계좌와 대조해 회수한다.
+                    # 청산 판정보다 **먼저** 돌려야 유령 포지션에 청산 주문이 나가지 않는다.
+                    await _reap_unfilled(ledger)
                     # 본전 이동 shadow — 실제 청산 판정과 **같은 가격·같은 주기**로
                     # 관측한다. 기록 전용이라 아래 청산 로직에 관여하지 않는다.
                     await _breakeven_observe(breakeven)
@@ -135,6 +138,77 @@ async def _ledger_loop() -> None:
         # 감시를 멈추지 않도록 위 블록과 분리한다.
         await _breakeven_settle()
         await asyncio.sleep(30)
+
+
+async def _desk_rest_price(symbol: str) -> float | None:
+    """WS 값이 낡은 종목만 REST 로 보충한다(데스크 폴백).
+
+    보유 종목 한정이라 최악에도 사이클당 몇 콜이다. 실패하면 None —
+    데스크는 가격을 모르면 판정하지 않는다.
+    """
+    from .kiwoom.client import client
+    from .kiwoom.quote import parse_quote
+
+    try:
+        q = parse_quote(await client.quote(symbol))
+    except Exception:  # noqa: BLE001
+        log.warning("데스크 REST 시세 실패 %s", symbol)
+        return None
+    return float(q["price"]) if q else None
+
+
+async def _desk_loop() -> None:
+    await desk.loop(
+        fresh_price=lambda s: aggregator.fresh_price(s, desk.stale_sec()),
+        rest_price=_desk_rest_price,
+        execute_exit=orders.execute_exit,
+        ws_ok=lambda: feed.connected,
+    )
+
+
+async def _holdings_map() -> dict[str, int] | None:
+    """{종목코드: 보유수량}. 조회 실패·미설정이면 **None** — 호출자는 아무것도 하지 않는다.
+
+    `/api/account` 의 30초 캐시를 그대로 쓴다(신규 호출을 늘리지 않는다).
+    """
+    import time
+
+    from .kiwoom.account import parse_balance
+    from .kiwoom.client import client
+
+    if not settings.KIWOOM_APP_KEY:
+        return None
+    now = time.monotonic()
+    data = _account_cache["data"] if (
+        _account_cache["data"] and now - _account_cache["ts"] < 30) else None
+    if data is None:
+        try:
+            data = parse_balance(await client.balance())
+        except Exception:  # noqa: BLE001 - 조회 실패는 '모름'이지 '없음'이 아니다
+            log.warning("계좌 조회 실패 — 미체결 회수 이번 주기 생략")
+            return None
+        if data.get("ok"):
+            _account_cache.update(ts=now, data=data)
+    if not data.get("ok"):
+        return None
+    out: dict[str, int] = {}
+    for h in data.get("holdings") or []:
+        try:
+            out[str(h.get("code"))] = int(h.get("qty") or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+async def _reap_unfilled(ledger) -> None:
+    """미체결 포지션 회수. 실패해도 청산 감시를 막지 않는다."""
+    try:
+        holdings = await _holdings_map()
+        if holdings is None:
+            return
+        await asyncio.to_thread(ledger.reap_unfilled, holdings)
+    except Exception:  # noqa: BLE001
+        log.exception("미체결 포지션 회수 오류")
 
 
 async def _breakeven_observe(breakeven) -> None:
@@ -177,6 +251,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
         asyncio.create_task(_ledger_loop()),
+        # 매매 데스크 — 보유 포지션만 초 단위로 본다. execution.desk.enabled 가
+        # false 면 아무것도 하지 않고 위 _ledger_loop(30초)가 그대로 맡는다.
+        asyncio.create_task(_desk_loop()),
     ]
     log.info("신호 엔진 루프 시작 (env=%s, 키 %s)", settings.KIWOOM_ENV,
              "설정됨" if settings.KIWOOM_APP_KEY else "미설정")
@@ -248,6 +325,8 @@ async def api_status(_=Depends(require_auth)):
         "market": engine.market_status(),
         # 키움 REST 호출 부하 — 주기를 줄일 여유가 있는지 판단 근거
         "api_usage": _api_usage(),
+        # 매매 데스크 계측. WS 대비 REST 비율이 이 설계의 성적표다
+        "desk": desk.status(),
     }
 
 
@@ -820,9 +899,14 @@ async def api_account_realized(days: int = 30, _=Depends(require_auth)):
 
     closed = ledger.positions(status="closed", limit=1000)
     engine_krw = round(sum(p.get("pnl_krw") or 0 for p in closed), 0)
+    # 화면의 '오늘 실현손익' 은 이 값을 쓴다. 원장 합산은 모델 비용이라
+    # 2026-07-28 실측에서 손실을 1,796원 과대계상했고, 가드가 그 값으로 판정했다.
+    ymd = today.strftime("%Y%m%d")
+    today_row = next((d for d in (broker.get("days") or []) if d["date"] == ymd), None)
     data = {
-        "period": {"start": start, "end": today.strftime("%Y%m%d")},
+        "period": {"start": start, "end": ymd},
         "broker": broker,
+        "today": today_row,
         "engine": {"realized": engine_krw, "trades": len(closed)},
         # 증권사가 못 세는 게 아니라 원장이 못 보는 것이다 — 이름을 그렇게 붙인다
         "untracked": (round(broker.get("realized", 0) - engine_krw, 0)
@@ -915,15 +999,58 @@ async def api_performance(_=Depends(require_auth)):
 
 @app.post("/api/positions/{pos_id}/close")
 async def api_position_close(pos_id: str, _=Depends(require_auth)):
-    """추적 중인 포지션을 현재가로 청산 처리(장부상 — 실제 청산 주문은 별도)."""
-    from .trade import ledger
+    """**실제 매도를 발주**하고 체결 접수된 경우에만 원장을 닫는다.
+
+    2026-07-29 까지 이 경로는 주문을 내지 않고 원장만 닫았다(`close_position` 직접
+    호출). 화면 버튼은 '청산' 이라고 보이는데 계좌에는 종목이 그대로 남아, 원장과
+    계좌가 어긋난 **고아 종목**이 생겼다. 그날 고아가 만들어진 원인 중 하나다.
+
+    사람이 화면에서 명시적으로 누른 것이 이미 승인이므로 즉시 시장가로 나간다.
+    발주가 실패하면 `execute_exit` 가 원장을 닫지 않는다 — 그것이 이 수정의 핵심이다.
+    계좌와 어긋난 항목을 장부에서만 정리하려면 `/void` 를 쓴다.
+    """
+    from .trade import ledger, orders
 
     pos = next((p for p in ledger.positions(status="open", limit=200)
                 if p["id"] == pos_id), None)
     if not pos:
         return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
     px = _price_of(pos["symbol"]) or pos["entry"]
-    return {"ok": ledger.close_position(pos_id, float(px), "manual")}
+    return await orders.execute_exit(pos, "manual", float(px))
+
+
+@app.post("/api/positions/{pos_id}/void")
+async def api_position_void(pos_id: str, payload: dict | None = Body(None),
+                            _=Depends(require_auth)):
+    """계좌와 어긋난 원장 항목을 무효 처리한다(**주문 없음**).
+
+    청산이 아니다 — 계좌에 실재하지 않는데 원장에만 남은 고아를 지우는 경로다.
+    `void` 는 실현손익·가드·일지·성과 집계에서 빠지고 감사 흔적은 남는다.
+
+    계좌에 **실재하는** 종목을 무효 처리하면 청산 감시가 사라지므로, 보유 수량이
+    0이 아니면 `confirm: true` 없이는 거절한다. 계좌 조회에 실패하면 수량을 모르는
+    것이므로 마찬가지로 거절한다 — 모르는 상태에서 지우지 않는다.
+    """
+    from .trade import ledger
+
+    pos = next((p for p in ledger.positions(status="open", limit=200)
+                if p["id"] == pos_id), None)
+    if not pos:
+        return JSONResponse({"ok": False, "error": "오픈 포지션 없음"}, 404)
+    holdings = await _holdings_map()
+    held = None if holdings is None else int(holdings.get(pos["symbol"], 0) or 0)
+    confirm = bool((payload or {}).get("confirm"))
+    if not confirm and held != 0:
+        return {"ok": False, "need_confirm": True, "held_qty": held,
+                "ledger_qty": pos.get("qty"),
+                "error": ("계좌 보유 수량을 확인할 수 없습니다"
+                          if held is None else
+                          f"계좌에 {held}주가 실재합니다 — 무효 처리하면 청산 감시가 사라집니다")}
+    ok = await asyncio.to_thread(ledger.void_position, pos_id, "수동 제외")
+    if ok:
+        log.warning("포지션 수동 무효 처리: %s(%s) 원장 %s주 · 계좌 %s주",
+                    pos.get("name"), pos.get("symbol"), pos.get("qty"), held)
+    return {"ok": ok, "held_qty": held, "ledger_qty": pos.get("qty")}
 
 
 @app.get("/api/scanner")

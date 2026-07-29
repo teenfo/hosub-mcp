@@ -1,5 +1,6 @@
 """실시간 틱 → 1분봉 집계 + REST 분봉 백필."""
 import logging
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -17,8 +18,13 @@ class BarAggregator:
 
     def __init__(self) -> None:
         self._current: dict[str, dict] = {}  # symbol -> {minute, o,h,l,c,v}
+        # 마지막 틱이 **도착한** 시각(monotonic). 봉의 분 시각(`minute`)과 다르다 —
+        # 거래가 뜸하면 봉은 남아 있는데 값이 낡는다. 매매 데스크가 "이 가격을
+        # 믿어도 되는가" 를 판정하려면 도착 시각이 필요하다.
+        self._seen: dict[str, float] = {}
 
     async def on_tick(self, symbol: str, price: float, volume: int, ts: str) -> None:
+        self._seen[symbol] = time.monotonic()
         now = datetime.now(KST)
         if len(ts) == 6:  # HHMMSS
             now = now.replace(
@@ -49,6 +55,26 @@ class BarAggregator:
             "open": bar["o"], "high": bar["h"], "low": bar["l"],
             "close": bar["c"], "volume": bar["v"],
         }
+
+    def age_sec(self, symbol: str) -> float | None:
+        """마지막 틱이 도착한 뒤 지난 초. 한 번도 못 받았으면 None.
+
+        `snapshot()` 의 `time` 은 봉의 분 시각이라 신선도 판정에 쓸 수 없다.
+        """
+        seen = self._seen.get(symbol)
+        return None if seen is None else max(0.0, time.monotonic() - seen)
+
+    def fresh_price(self, symbol: str, stale_sec: float) -> float | None:
+        """`stale_sec` 이내에 틱이 온 종목의 현재가. 낡았거나 없으면 None.
+
+        **호출자는 None 을 '가격 없음'이 아니라 '못 믿는다'로 읽어야 한다** —
+        REST 로 보충하든지 이번 판정을 건너뛰든지 정하는 것은 호출자의 몫이다.
+        """
+        age = self.age_sec(symbol)
+        if age is None or age > stale_sec:
+            return None
+        bar = self._current.get(symbol)
+        return float(bar["c"]) if bar else None
 
     def _flush(self, symbol: str, bar: dict) -> None:
         df = pd.DataFrame(

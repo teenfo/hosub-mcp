@@ -27,6 +27,12 @@ class RealtimeFeed:
         self._task: asyncio.Task | None = None
         self._ws = None
 
+    @property
+    def connected(self) -> bool:
+        """소켓이 붙어 있는가. 매매 데스크가 주기 강등을 판단하는 근거다 —
+        끊긴 동안에는 WS 값이 전부 낡아 REST 폴백이 매 사이클 터진다."""
+        return self._ws is not None
+
     def start(self, symbols: list[str]) -> None:
         self._symbols = set(symbols)
         if not self._task or self._task.done():

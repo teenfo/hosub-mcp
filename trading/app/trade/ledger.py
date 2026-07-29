@@ -50,7 +50,14 @@ def _conn() -> sqlite3.Connection:
                      # 누적하면 체결내역을 두 번 훑을 때 비용이 두 배가 된다.
                      ("entry_fee_krw", "REAL"),
                      ("exit_fee_krw", "REAL"),
-                     ("tax_krw", "REAL")):
+                     ("tax_krw", "REAL"),
+                     # 매매 데스크가 장중에 갱신하는 손절·익절선. **원본(stop/target)은
+                     # 건드리지 않는다** — 갱신 규칙이 나빴을 때 되돌릴 기준이 남아야
+                     # 하고, 일지·백테스트·본전 이동 shadow 가 "원래 설계가 무엇이었나"
+                     # 를 계속 읽어야 한다.
+                     ("stop_live", "REAL"),
+                     ("target_live", "REAL"),
+                     ("lines_updated", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -404,6 +411,44 @@ def held_minutes(opened: str, now: datetime | None = None) -> float | None:
     return (now - t).total_seconds() / 60
 
 
+def effective_lines(row) -> tuple[float, float]:
+    """지금 판정에 쓸 (손절선, 목표가).
+
+    매매 데스크가 갱신한 `*_live` 가 있으면 그 값을, 없으면 진입 시 고정값을 쓴다.
+    데스크가 꺼져 있거나 아직 갱신하지 않은 포지션은 자동으로 기존 동작이 된다.
+    """
+    def _pick(live_key: str, base_key: str) -> float:
+        try:
+            v = row[live_key]
+        except (KeyError, IndexError):     # 구버전 행(컬럼 없음)
+            v = None
+        return float(v if v is not None else row[base_key])
+
+    return _pick("stop_live", "stop"), _pick("target_live", "target")
+
+
+def set_lines(pos_id: str, stop: float | None, target: float | None,
+              now: datetime | None = None) -> bool:
+    """손절·익절선 갱신. **값이 실제로 바뀔 때만 쓴다**(반환: 썼는가).
+
+    데스크가 초 단위로 도는데 매번 UPDATE 하면 SQLite 쓰기가 그만큼 잦아진다.
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT stop_live, target_live FROM positions WHERE id=? AND status='open'",
+            (pos_id,)).fetchone()
+        if row is None:
+            return False
+        if row["stop_live"] == stop and row["target_live"] == target:
+            return False
+        conn.execute(
+            "UPDATE positions SET stop_live=?, target_live=?, lines_updated=? WHERE id=?",
+            (stop, target,
+             (now or datetime.now(KST)).isoformat(timespec="seconds"), pos_id),
+        )
+    return True
+
+
 def due_exits(price_of, now: datetime | None = None) -> list[dict]:
     """손절/목표/시간초과에 걸린 오픈 포지션 목록(청산 대상).
 
@@ -422,13 +467,14 @@ def due_exits(price_of, now: datetime | None = None) -> list[dict]:
         p = price_of(row["symbol"])
         if p is None:
             continue
+        stop, target = effective_lines(row)
         if row["side"] == "long":
-            reason = "stop" if p <= row["stop"] else ("target" if p >= row["target"] else None)
+            reason = "stop" if p <= stop else ("target" if p >= target else None)
         else:
-            reason = "stop" if p >= row["stop"] else ("target" if p <= row["target"] else None)
+            reason = "stop" if p >= stop else ("target" if p <= target else None)
         px = None
         if reason:
-            px = float(row["stop"] if reason == "stop" else row["target"])
+            px = float(stop if reason == "stop" else target)
         else:
             limit = max_hold_min(row["rule"])
             held = held_minutes(row["opened"], now) if limit else None
@@ -456,6 +502,7 @@ def force_close_eod(price_of) -> int:
 
 
 def positions(status: str | None = None, limit: int = 100) -> list[dict]:
+    """status 미지정이면 **void 를 뺀** 전체. void 를 보려면 명시해야 한다."""
     with _conn() as conn:
         if status:
             rows = conn.execute(
@@ -463,8 +510,73 @@ def positions(status: str | None = None, limit: int = 100) -> list[dict]:
                 (status, limit)).fetchall()
         else:
             rows = conn.execute(
-                "SELECT * FROM positions ORDER BY opened DESC LIMIT ?", (limit,)).fetchall()
+                "SELECT * FROM positions WHERE status!='void' "
+                "ORDER BY opened DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# --------------------------------------------------------------------------
+# 미체결 회수 — 체결되지 않은 주문이 손익으로 남지 않게 한다
+# --------------------------------------------------------------------------
+def void_position(pos_id: str, note: str = "") -> bool:
+    """포지션을 무효 처리한다(status='void'). 삭제하지 않는다 — 감사 흔적을 남긴다.
+
+    `void` 는 `status='open'`/`'closed'` 어느 조회에도 걸리지 않으므로
+    실현손익·가드·일지·성과 집계에서 자동으로 빠진다.
+    """
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE positions SET status='void', exit_reason=? WHERE id=? "
+            "AND status!='void'",
+            (f"void:{note}" if note else "void", pos_id),
+        )
+        return cur.rowcount > 0
+
+
+def reap_unfilled(holdings: dict[str, int] | None, now: datetime | None = None,
+                  grace_min: float = 5.0) -> list[dict]:
+    """체결이 확인되지 않은 오픈 포지션을 **계좌 잔고와 대조해** 회수한다.
+
+    2026-07-29 실측이 이유다. `orders.approve_and_send` 는 키움 REST 가 주문번호를
+    반환하면(`status == "sent"`) 곧바로 `open_position()` 을 부른다. 거래소가 그
+    뒤에 주문을 거부해도 되돌리는 경로가 없다. 그날 현물 계좌에서 개별주 공매도
+    2건이 주문번호만 받고 체결되지 않았는데, 원장에는 포지션이 열리고 수동 청산으로
+    **−1,025원이 실현손익에 들어갔다**. 그 값을 일일 손실 가드가 그대로 썼다.
+
+    **판별 기준은 원장이 아니라 계좌 잔고다.** `fill_confirmed=0` 만으로는 유령을
+    가릴 수 없다 — 같은 날 고려산업은 `fill_confirmed=0` 이었지만 계좌에 52주가
+    실재했다(실시간 체결 이벤트만 놓친 경우). 원장만 보고 지웠으면 실제 보유
+    종목의 청산 감시가 사라졌을 것이다.
+
+    holdings: {종목코드: 보유수량}. **None 이면 아무것도 하지 않는다** —
+        조회 실패로 전 포지션을 지우는 것이 유령을 남기는 것보다 훨씬 위험하다
+        (`engine._held_symbols` 의 '과차단보다 통과' 와 같은 판단).
+    반환: 회수한 포지션 목록.
+    """
+    if holdings is None:
+        return []
+    now = now or datetime.now(KST)
+    reaped: list[dict] = []
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM positions WHERE status='open' "
+            "AND (fill_confirmed IS NULL OR fill_confirmed=0)"
+        ).fetchall()
+        for r in rows:
+            held = held_minutes(r["opened"], now)
+            if held is None or held < grace_min:
+                continue                      # 아직 체결이 도착할 시간이다
+            if int(holdings.get(r["symbol"], 0) or 0) > 0:
+                continue                      # 계좌에 실재한다 — 유령이 아니다
+            conn.execute(
+                "UPDATE positions SET status='void', exit_reason=? WHERE id=?",
+                (f"void:미체결 {held:.0f}분", r["id"]),
+            )
+            reaped.append(dict(r))
+    for r in reaped:
+        log.warning("미체결 포지션 회수: %s(%s) %s주 — 주문번호 %s, 계좌 보유 없음",
+                    r.get("name"), r.get("symbol"), r.get("qty"), r.get("ord_no"))
+    return reaped
 
 
 def _agg(rows: list[sqlite3.Row]) -> dict:
@@ -516,7 +628,7 @@ def marks_for(symbol: str, day: str) -> dict:
     """
     with _conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM positions WHERE symbol=? "
+            "SELECT * FROM positions WHERE symbol=? AND status!='void' "
             "AND (substr(opened,1,10)=? OR substr(closed,1,10)=?) ORDER BY opened",
             (symbol, day, day),
         ).fetchall()

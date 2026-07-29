@@ -432,13 +432,48 @@ async def summarize(entry: dict) -> dict:
             "at": datetime.now(KST).isoformat(timespec="seconds")}
 
 
+async def _reconcile_first() -> bool:
+    """집계 전에 증권사 체결내역으로 실측가·실비용을 확정한다.
+
+    원장의 진입·청산가는 WS 스냅샷과 이론가(손절선·목표가)에서 오고, 비용은 모델
+    공식이다. 증권사 실비용이 붙어야 일지의 숫자가 계좌와 맞는다 — 2026-07-29 실측에서
+    대사 전 −12,238원이 대사 후 −10,442원이 됐고(증권사 −10,620원과 178원 차이),
+    9시대 성과는 부호까지 뒤집혔다.
+
+    `reconcile_executions` 는 멱등이라 여러 번 돌려도 비용이 겹치지 않는다.
+    실패해도 일지 생성을 막지 않는다 — 사실 목록에 그 사실만 남긴다.
+    """
+    import asyncio
+
+    from .kiwoom.client import client
+    from .kiwoom.realized import parse_executions
+    from .trade import ledger
+
+    if not settings.KIWOOM_APP_KEY:
+        return False
+    try:
+        execs = parse_executions(await client.executions())
+        await asyncio.to_thread(ledger.reconcile_executions, execs)
+        return True
+    except Exception:  # noqa: BLE001 - 대사 실패가 일지를 막지 않는다
+        log.warning("일지 대사 실패 — 모델 비용 기준으로 집계한다", exc_info=True)
+        return False
+
+
 async def generate(day: str | None = None, with_summary: bool = True) -> dict:
     """일지 생성 + 저장. 하루 마감 잡과 수동 재생성이 함께 쓴다.
 
     장이 끝나기 전에는 요약을 만들지 않는다(집계만 저장). final 이 False 인 저장본은
     '진행 중 스냅샷'이라, 조회할 때 저장본 대신 그때그때 다시 계산한다.
     """
+    reconciled = await _reconcile_first()
     entry = build(day)
+    # 대사에 실패했으면 숫자가 모델 비용 기준이라는 사실을 일지에 남긴다.
+    # 조용히 모델값을 쓰면 그게 실측인 줄 알고 읽게 된다.
+    if not reconciled:
+        entry["facts"].append(
+            "[주의] 증권사 체결내역 대사에 실패해 손익이 모델 비용 기준이다 — "
+            "실제 값과 다를 수 있다(2026-07-29 실측: 대사 전후 1,796원 차이).")
     ok, why = summary_ready(entry["date"])
     entry["final"] = ok
     if with_summary and ok:

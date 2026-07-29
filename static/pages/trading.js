@@ -191,9 +191,12 @@ export default {
     );
 
     const loadRisk = async () => {
-      let r;
+      let r, rz = null;
       try { r = await fetchJSON("/api/trading/risk"); } catch (e) { return; }
-      if (!changed("risk", r)) return;
+      // 실현손익은 증권사 라이브 값을 주값으로 쓴다(원장 합산은 모델 비용이라 어긋난다).
+      // 조회 실패 시에는 원장값으로 폴백하되 화면에 그 사실을 적는다.
+      try { rz = await fetchJSON("/api/trading/account/realized"); } catch (e) { rz = null; }
+      if (!changed("risk", [r, rz])) return;
       // 입력 중인 칸은 건드리지 않는다(폴링이 타이핑을 덮어쓰지 않게).
       const set = (input, v) => { if (document.activeElement !== input) input.value = v; };
       set(gTarget, r.daily_target_pct);
@@ -211,16 +214,38 @@ export default {
       gLongOnly.checked = !!r.long_only;
       gConfirm.checked = !!r.confirm_on_close;
       gStatus.innerHTML = "";
-      const cls = r.pct >= 0 ? "text-danger" : "text-primary";
-      gStatus.append(el("div", {}, [
+      // 주값 = 증권사 당일 실현손익. 원장값(가드가 판정에 쓰는 값)은 대조로 나란히 둔다.
+      const live = rz && rz.today ? rz.today.realized : null;
+      const shown = live == null ? r.krw : live;
+      // %는 같은 분모(가드가 쓰는 equity)로 다시 계산한다 — 금액만 바꾸고 %를
+      // 원장값으로 두면 둘이 어긋나 보인다.
+      const shownPct = live == null || !r.equity
+        ? r.pct : Number((live / r.equity * 100).toFixed(4));
+      const cls = shown >= 0 ? "text-danger" : "text-primary";
+      const uc = (rz && rz.unconfirmed) || {};
+      const ucN = (uc.entries || 0) + (uc.exits || 0);
+      gStatus.append(el("div", { class: "d-flex align-items-baseline gap-2 flex-wrap" }, [
         el("span", { class: "text-secondary" }, "오늘 실현손익 "),
-        el("span", { class: "fw-semibold " + cls }, `${won(r.krw)} (${pct(r.pct)})`),
-        el("span", { class: "text-secondary" }, ` · ${r.trades}건`),
+        el("span", { class: "fw-semibold " + cls }, `${won(shown)} (${pct(shownPct)})`),
+        el("span", { class: "text-secondary" }, `· ${r.trades}건`),
+        live == null
+          ? el("span", { class: "badge text-bg-secondary",
+              title: "증권사 실현손익을 조회하지 못해 원장(모델 비용) 값을 표시합니다" }, "원장 기준")
+          : el("span", { class: "badge text-bg-light text-dark",
+              title: "키움 일자별실현손익(수수료·세금 차감 후). 원장 합산은 모델 비용이라 어긋납니다" }, "증권사 실측"),
+        live != null && Math.round(live) !== Math.round(r.krw)
+          ? el("span", { class: "text-secondary",
+              title: "원장은 승인·발주된 주문만 기록하고 비용을 모델로 근사합니다. 가드는 이 원장값으로 판정합니다" },
+              `원장 ${won(r.krw)} · 차이 ${won(Math.round(live - r.krw))}`) : null,
+        ucN ? el("span", { class: "badge text-bg-warning",
+          title: "체결가가 아직 증권사 실측으로 확정되지 않은 건. 마감 후 대사에서 채워집니다" },
+          `실측 미확정 ${ucN}건`) : null,
       ]));
-      const bar = el("div", { class: "progress mt-2", style: "height:8px" });
+      const bar = el("div", { class: "progress mt-2", style: "height:8px",
+        title: "표시 금액과 같은 기준(증권사 실측)입니다. 가드 판정은 원장값으로 합니다" });
       const hi = r.daily_target_pct || 0;
-      const frac = hi > 0 ? Math.max(0, Math.min(100, r.pct / hi * 100)) : 0;
-      bar.appendChild(el("div", { class: "progress-bar " + (r.pct >= 0 ? "bg-danger" : "bg-primary"), style: `width:${r.pct >= 0 ? frac : 0}%` }));
+      const frac = hi > 0 ? Math.max(0, Math.min(100, shownPct / hi * 100)) : 0;
+      bar.appendChild(el("div", { class: "progress-bar " + (shownPct >= 0 ? "bg-danger" : "bg-primary"), style: `width:${shownPct >= 0 ? frac : 0}%` }));
       gStatus.appendChild(bar);
       gStatus.appendChild(el("div", { class: "mt-2 d-flex gap-2 align-items-center flex-wrap" }, [
         r.halted
@@ -605,15 +630,70 @@ export default {
     // 실제 계좌 보유(키움)와 시스템 추적 포지션(손절/목표 감시 대상)을 나란히 본다.
     // 둘이 어긋나면(체결 실패·수동 매매 등) 경고를 띄운다 — 유령 포지션 감시 방지.
     const posBody = el("div", { class: "small" });
+    const deskBox = el("div", { class: "small mb-2" });
     posC.body.append(
       el("div", { class: "small text-secondary mb-2" },
-        el("span", { html: '<i class="bi bi-shield-check"></i> 장중 30초마다 <b>손절·목표</b>를 감시해 도달 시 자동 시장가 청산하고, <b>15:30 이후</b> 남은 물량은 종가로 정리합니다(오버나이트 없음).' })),
+        el("span", { html: '<i class="bi bi-shield-check"></i> <b>손절·목표</b>에 닿으면 자동 시장가 청산하고, <b>15:30 이후</b> 남은 물량은 종가로 정리합니다(오버나이트 없음). 감시 주기는 아래 <b>매매 데스크</b> 표시를 따릅니다 — 데스크가 꺼져 있으면 기존 30초 주기입니다.' })),
+      deskBox,
       posBody);
 
+    // 청산 = 실제 매도 발주. 2026-07-29 까지 이 버튼은 주문 없이 원장만 닫아
+    // 계좌에 종목이 남는 고아를 만들었다. 문구도 그때 것이라 사실과 달랐다.
     const closePos = async (id, name) => {
-      if (!confirm(`${name} 추적 포지션을 청산 처리할까요? (장부 기록 — 실제 매도 주문은 별도)`)) return;
-      try { await postJSON(`/api/trading/positions/${id}/close`); changed("pos", null); await loadPositions(); }
-      catch (e) { alert("실패: " + e.message); }
+      if (!confirm(`${name}을(를) 지금 시장가로 매도합니다.\n\n실제 매도 주문이 나갑니다 — 되돌릴 수 없습니다.`)) return;
+      try {
+        const r = await postJSON(`/api/trading/positions/${id}/close`);
+        if (r && r.ok === false) { alert("발주 실패: " + (r.error || "사유 미상") + "\n원장은 그대로 둡니다."); }
+        changed("pos", null); await loadPositions();
+      } catch (e) { alert("실패: " + e.message); }
+    };
+
+    // 제외 = 주문 없이 원장만 무효화(고아 정리). 계좌 수량을 먼저 확인시킨다 —
+    // 계좌에 실재하는 종목을 제외하면 손절·목표 감시가 사라진다.
+    const voidPos = async (id, name) => {
+      if (!confirm(`${name}을(를) 추적에서 제외할까요?\n\n매도 주문은 나가지 않습니다. 계좌와 어긋난 장부 항목만 무효 처리합니다.`)) return;
+      try {
+        let r = await postJSON(`/api/trading/positions/${id}/void`);
+        if (r && r.need_confirm) {
+          const q = r.held_qty == null ? "확인 불가" : `${fmt(r.held_qty)}주`;
+          if (!confirm(`⚠ ${r.error}\n\n계좌 보유 ${q} · 장부 ${fmt(r.ledger_qty ?? 0)}주\n\n그래도 제외할까요? 이 종목의 손절·목표 감시가 사라집니다.`)) return;
+          r = await postJSON(`/api/trading/positions/${id}/void`, { confirm: true });
+        }
+        if (r && r.ok === false) alert("실패: " + (r.error || "사유 미상"));
+        changed("pos", null); await loadPositions();
+      } catch (e) { alert("실패: " + e.message); }
+    };
+
+    // 매매 데스크 계측 — WS 대비 REST 비율이 이 설계의 성적표다.
+    // REST 가 늘고 있으면 발굴 예산을 다시 먹는 중이므로 눈에 보여야 한다.
+    const renderDesk = (d) => {
+      deskBox.innerHTML = "";
+      if (!d) return;
+      if (!d.enabled) {
+        deskBox.appendChild(el("div", { class: "text-secondary" },
+          `⚙ 매매 데스크 꺼짐 — 청산 감시는 기존 30초 주기입니다 (execution.desk.enabled)`));
+        return;
+      }
+      const total = (d.ws || 0) + (d.rest || 0);
+      const restPct = total ? (d.rest / total * 100) : 0;
+      deskBox.append(el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+        el("span", { class: "badge text-bg-" + (d.degraded ? "warning" : "success") },
+          d.degraded ? `⚙ 매매 데스크 강등 (WS 미연결)` : `⚙ 매매 데스크 ${d.interval_sec}초 주기`),
+        el("span", { class: "badge text-bg-light text-dark", title: "보유 감시 대상 / 상한" },
+          `감시 ${d.watched ?? 0}/${d.max_symbols ?? 5}종목`),
+        el("span", {
+          class: "badge text-bg-" + (restPct > 20 ? "warning" : "light") + (restPct > 20 ? "" : " text-dark"),
+          title: `WS 값으로 판정한 횟수 대 REST 로 보충한 횟수. REST 가 늘면 추가 호출이 늘고 있다는 뜻입니다(${d.stale_sec}초 넘게 틱이 없는 종목만 보충).` },
+          `WS ${fmt(d.ws || 0)} · REST ${fmt(d.rest || 0)} (${restPct.toFixed(0)}%)`),
+        d.no_price ? el("span", { class: "badge text-bg-secondary", title: "가격을 모르면 판정하지 않습니다" },
+          `가격없음 ${fmt(d.no_price)}`) : null,
+        el("span", { class: "text-secondary" },
+          `사이클 ${fmt(d.cycles || 0)} · 청산 ${fmt(d.exits || 0)}건` + (d.last_tick ? ` · ${d.last_tick}` : "")),
+      ]));
+      deskBox.appendChild(el("div", { class: "text-secondary mt-1" },
+        d.last_line
+          ? `라인 갱신 ${fmt(d.lines || 0)}회 · 최근 ${d.last_line.at} ${d.last_line.name || d.last_line.symbol} 손절 ${d.last_line.stop == null ? "—" : fmt(d.last_line.stop)} / 목표 ${d.last_line.target == null ? "—" : fmt(d.last_line.target)}`
+          : "손절·익절 라인 실시간 갱신 규칙은 아직 없습니다 — 진입 시 정한 값을 그대로 씁니다."));
     };
 
     const loadPositions = async () => {
@@ -675,6 +755,8 @@ export default {
       // 추적 중이나 계좌에 없는 포지션(유령) — 별도 표시
       if (ghost.length) {
         posBody.appendChild(el("div", { class: "fw-semibold mb-1" }, `추적 전용 ${ghost.length}건 (계좌 미보유)`));
+        posBody.appendChild(el("div", { class: "text-secondary mb-1" },
+          "계좌에 없는 장부 항목입니다 — 미체결이거나 계좌 밖에서 정리된 건. 제외하면 실현손익·일지·가드 집계에서 빠지고 기록은 남습니다."));
         const t = el("table", { class: "table table-sm align-middle mb-0 small" });
         t.appendChild(el("thead", { html: "<tr><th>종목</th><th>규칙</th><th>진입</th><th>손절</th><th>목표</th><th></th></tr>" }));
         const tb = el("tbody");
@@ -682,10 +764,14 @@ export default {
           const tr = el("tr", { class: "table-warning", html:
             `<td>${p.name || p.symbol}</td><td>${p.rule}</td><td>${fmt(p.entry)}</td>` +
             `<td>${fmt(p.stop)}</td><td>${fmt(p.target)}</td>` });
-          const td = el("td");
-          const b = el("button", { class: "btn btn-sm btn-outline-danger py-0", type: "button" }, "추적 종료");
-          b.onclick = () => closePos(p.id, p.name || p.symbol);
-          td.appendChild(b); tr.appendChild(td); tb.appendChild(tr);
+          const td = el("td", { class: "text-nowrap" });
+          const b = el("button", { class: "btn btn-sm btn-outline-danger py-0", type: "button",
+            title: "주문 없이 장부에서만 제외합니다" }, "제외");
+          b.onclick = () => voidPos(p.id, p.name || p.symbol);
+          const c = el("button", { class: "btn btn-sm btn-outline-secondary py-0 ms-1", type: "button",
+            title: "실제 매도 주문을 냅니다 — 계좌에 없으면 거부될 수 있습니다" }, "청산");
+          c.onclick = () => closePos(p.id, p.name || p.symbol);
+          td.append(b, c); tr.appendChild(td); tb.appendChild(tr);
         }
         t.appendChild(tb);
         posBody.appendChild(el("div", { class: "table-responsive" }, t));
@@ -727,6 +813,7 @@ export default {
         }
         return;
       }
+      renderDesk(s.desk);
       let a = null;
       try { a = await fetchJSON("/api/trading/account"); } catch (e) { a = null; }
       // 상태+계좌가 직전과 동일하면 다시 그리지 않는다 (깜빡임 제거)
