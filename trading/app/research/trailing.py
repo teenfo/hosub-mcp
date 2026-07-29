@@ -381,6 +381,12 @@ def _bars_after(symbol: str, day: str, after: str):
     return list(same[same.index > t0].itertuples())
 
 
+def _above(pos: dict, px: float) -> bool:
+    """청산가가 진입가보다 **유리한 쪽**인가(롱은 위, 숏은 아래)."""
+    e = float(pos["entry"])
+    return px > e if pos["side"] == "long" else px < e
+
+
 def _project(pos: dict, bars, update: bool, hold_limit: int) -> tuple[float, str]:
     """한 포지션을 정책 하나로 재생 → (청산가, 사유). 봉이 없으면 실제값 그대로."""
     entry = float(pos["entry"])
@@ -433,8 +439,24 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
                          float(pos["target"]), None, float(exit_px), "")
         return t.pnl_pct(costs) / 100 * float(pos["entry"]) * int(pos["qty"] or 0)
 
-    out = {v: {"krw": 0.0, "wins": 0, "exits": {}} for v in names}
-    base = {"krw": 0.0, "wins": 0, "exits": {}}
+    def _blank():
+        return {"krw": 0.0, "wins": 0, "exits": {}, "by_reason": {}}
+
+    def _tally(d, reason, k, above):
+        """사유별로 **건수만이 아니라 손익과 방향**을 함께 센다.
+
+        추종을 켜면 `stop` 사유가 늘어나는데, 그중 상당수는 **진입가 위에서
+        잘린 익절**이다. 사유 이름만 세면 "손절이 늘었다" 로 잘못 읽힌다
+        (2026-07-29 사용자 지적). 그래서 진입가 대비 방향을 같이 남긴다.
+        """
+        d["exits"][reason] = d["exits"].get(reason, 0) + 1
+        key = f"{reason}+" if above else f"{reason}-"
+        b = d["by_reason"].setdefault(key, {"n": 0, "krw": 0.0})
+        b["n"] += 1
+        b["krw"] += k
+
+    out = {v: _blank() for v in names}
+    base = _blank()
     used = no_bars = 0
     old_file, desk.STATE_FILE = desk.STATE_FILE, Path("/nonexistent/desk.json")
     old = (settings.CONFIG.get("execution", {}) or {}).get("desk")
@@ -449,8 +471,8 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
             k = _krw(pos, pos["exit"])
             base["krw"] += k
             base["wins"] += 1 if k > 0 else 0
-            r = pos.get("exit_reason") or "?"
-            base["exits"][r] = base["exits"].get(r, 0) + 1
+            _tally(base, pos.get("exit_reason") or "?", k,
+                   _above(pos, float(pos["exit"])))
             for v in names:
                 cfg = _cfg_of(v)
                 settings.CONFIG.setdefault("execution", {})["desk"] = \
@@ -459,7 +481,7 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
                 k = _krw(pos, px)
                 out[v]["krw"] += k
                 out[v]["wins"] += 1 if k > 0 else 0
-                out[v]["exits"][why] = out[v]["exits"].get(why, 0) + 1
+                _tally(out[v], why, k, _above(pos, px))
     finally:
         desk.STATE_FILE = old_file
         if old is None:
@@ -470,7 +492,11 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
     def _fin(d):
         return {"krw": round(d["krw"], 0),
                 "win_rate": round(d["wins"] / used * 100, 1) if used else 0.0,
-                "exits": dict(sorted(d["exits"].items(), key=lambda kv: -kv[1]))}
+                "exits": dict(sorted(d["exits"].items(), key=lambda kv: -kv[1])),
+                # 사유 뒤 +/− 는 **진입가 대비 방향**이다. `stop+` 은 따라 올라간
+                # 손절선에서 이익으로 끝난 것 — 이름만 손절이지 익절이다
+                "by_reason": {k: {"n": v["n"], "krw": round(v["krw"], 0)}
+                              for k, v in sorted(d["by_reason"].items())}}
 
     return {"trades": used, "no_bars": no_bars, "day": day,
             "as_executed": _fin(base),
