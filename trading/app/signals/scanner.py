@@ -154,6 +154,21 @@ def filter_gainers(items: list[dict], cfg: dict,
     return picked
 
 
+def _engine_owns() -> bool:
+    """엔진(full)이 감시목록을 소유하면 스캐너는 **직접 쓰지 않는다.**
+
+    파싱·필터 결과(`self.results`/`self.gainers`)는 그대로 남는다 — 화면이 읽고
+    엔진의 volume·gainers 어댑터가 같은 함수를 재사용한다. 회수되는 것은
+    '감시목록에 직접 쓰는' 부분뿐이다.
+    """
+    from ..scout import engine as scout
+
+    if scout.owns_watchlist():
+        log.info("스캐너 자동편입 보류 — 감시목록은 엔진(full)이 소유")
+        return True
+    return False
+
+
 class Scanner:
     def __init__(self) -> None:
         self.results: list[dict] = []       # 이미 급등 중 (편승 후보)
@@ -171,7 +186,7 @@ class Scanner:
         keep = frozenset(e["code"] for e in watchlist.entries()
                          if e.get("source") == "active")
         self.results = filter_candidates(parse_rank(raw), cfg, keep=keep)
-        if cfg.get("auto_watch", False):
+        if cfg.get("auto_watch", False) and not _engine_owns():
             # 거래대금 상위는 '시장이 실제로 돈을 넣는' 종목이라 유동성이 안전하다.
             # 이 필터 결과가 종전에는 화면 표시로만 쓰이고 감시목록에 닿지 않았다.
             watchlist.replace_active(self.results)
@@ -218,7 +233,7 @@ class Scanner:
         keep = frozenset(e["code"] for e in watchlist.entries()
                          if e.get("source") == "gainer")
         self.gainers = filter_gainers(items, cfg, keep=keep)
-        if cfg.get("auto_watch", True):
+        if cfg.get("auto_watch", True) and not _engine_owns():
             # 성공한 스캔은 빈 결과라도 반영 — 더 이상 급등이 아닌 종목을 정리
             watchlist.replace_gainers(self.gainers)
             await watchlist.notify()
