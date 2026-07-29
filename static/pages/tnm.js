@@ -68,6 +68,11 @@ export default {
         a.onclick = (ev) => {
           ev.preventDefault();
           fStatus.value = status;
+          // 다른 필터를 비운다. 칩이 '재탕 2,496' 이라고 약속했는데 기본
+          // 최소점수(70)가 그대로 걸려 있으면 목록이 그보다 훨씬 적게 나온다 —
+          // 숫자와 목록이 어긋나면 어느 쪽이 맞는지 알 수 없다.
+          fScore.value = "";
+          fSource.value = "";
           changed.invalidate("items");
           loadItems();
         };
@@ -101,7 +106,14 @@ export default {
 
     const fDate = el("input", { type: "date", class: "form-control form-control-sm", style: "max-width:150px" });
     const fTicker = el("input", { class: "form-control form-control-sm", placeholder: "종목코드", style: "max-width:110px" });
-    const fScore = el("input", { type: "number", class: "form-control form-control-sm", placeholder: "최소점수", style: "max-width:100px" });
+    // 기본 최소점수 70. 정렬이 발행 최신순인데 뉴스가 물량으로 압도해서
+    // (실측 뉴스 11,902 · 공시 567 · 리포트 49) 걸지 않으면 첫 화면 100건이
+    // 전부 뉴스가 된다. 70을 걸면 뉴스 62 · 공시 29 · 리포트 9로 섞인다.
+    // 그 아래 구간은 대부분 재탕 기사와 시황해설이다. 비우면 전체가 나온다.
+    const DEFAULT_MIN_SCORE = "70";
+    const fScore = el("input", { type: "number", class: "form-control form-control-sm",
+                                 placeholder: "최소점수", value: DEFAULT_MIN_SCORE,
+                                 title: "기본 70 — 비우면 전체", style: "max-width:100px" });
     const fStatus = el("select", { class: "form-select form-select-sm", style: "max-width:130px" }, [
       el("option", { value: "ok", selected: "selected" }, "정상 (기본)"),
       el("option", { value: "" }, "전체 상태"),
@@ -199,7 +211,11 @@ export default {
       listBody.appendChild(el("div", { class: "mb-2", html:
         Object.entries(mix).sort((a, b) => b[1] - a[1])
           .map(([s, n]) => `${sourceBadge(s)} <span class="text-secondary me-2">${n}</span>`)
-          .join(" ") }));
+          .join(" ") +
+        // 걸려 있는 필터를 화면에 적는다 — 안 보이면 "왜 이것밖에 없지" 가 된다
+        (fScore.value
+          ? `<span class="text-secondary">· 최소점수 ${fScore.value} 이상만 (비우면 전체)</span>`
+          : "") }));
       const t = el("table", { class: "table table-sm table-hover align-middle mb-0 small" });
       t.appendChild(el("thead", { html: "<tr><th>발행</th><th>소스</th><th>종목</th><th>점수</th><th>분류</th><th>제목</th><th>라벨</th></tr>" }));
       const tb = el("tbody");
