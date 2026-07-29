@@ -406,7 +406,7 @@ export default {
         : emptyRow("지금 바꿀 것이 없습니다 — 후보와 감시목록이 일치합니다"), pending.length);
       const wl = d.watchlist || [];
       diffTabs.set("actual", wl.length ? tableOf(
-        "<th>종목</th><th>tier</th><th>보호</th>",
+        "<th>종목</th><th>tier</th><th>보호</th><th></th>",
         wl.map((w) => el("tr", {}, [
           el("td", {}, `${w.name} (${w.code})`),
           el("td", {}, badge(TIER_KO[w.tier] || w.tier, TIER_TONE[w.tier] || "light")),
@@ -414,12 +414,44 @@ export default {
             ? el("span", { class: "badge text-bg-light text-dark",
                            title: "보유 중이거나 사용자가 직접 지정" }, "강등 제외")
             : el("span", { class: "text-secondary" }, "—")),
+          el("td", { class: "text-nowrap" }, wlControls(w)),
         ]))) : emptyRow("감시목록이 비어 있습니다"), wl.length);
 
       const hist = d.decisions || [];
       histBody.innerHTML = "";
       histBody.appendChild(hist.length ? decisionRows(hist, true)
         : emptyRow("아직 결정 이력이 없습니다 — 소스가 첫 수집을 마치면 쌓이기 시작합니다"));
+    };
+
+    /** 감시목록 조작 — tier 전환·제거. 발굴·감시 페이지에 있던 것을 여기로 옮겼다.
+     *  엔진 판단을 보는 자리와 실제로 손대는 자리가 갈라져 있으면, 대조해 놓고
+     *  다른 페이지로 가서 고쳐야 한다. 판단과 조작은 한 화면에 있어야 한다. */
+    const wlControls = (w) => {
+      const mode = el("button", { class: "btn btn-sm btn-outline-primary py-0 me-1",
+        type: "button",
+        title: w.tier === "collect" ? "매매 대상으로 전환" : "수집전용으로 전환(매매 제외)" },
+        w.tier === "collect" ? "매매로" : "수집전용");
+      mode.onclick = async () => {
+        mode.disabled = true;
+        try {
+          await postJSON("/api/trading/watchlist/mode",
+                         { code: w.code, collect_only: w.tier !== "collect" });
+          changed.invalidate("scout"); await load();
+        } catch (e) { alert("실패: " + e.message); mode.disabled = false; }
+      };
+      const rm = el("button", { class: "btn btn-sm btn-outline-danger py-0",
+        type: "button" }, "제거");
+      rm.onclick = async () => {
+        if (!confirm(`${w.name}(${w.code}) 을 감시목록에서 제거할까요?`)) return;
+        rm.disabled = true;
+        try {
+          await postJSON("/api/trading/watchlist/remove", { code: w.code });
+          changed.invalidate("scout"); await load();
+        } catch (e) { alert("실패: " + e.message); rm.disabled = false; }
+      };
+      // 보호 종목은 강등에서 제외되지만 사람이 직접 빼는 것은 막지 않는다 —
+      // 다만 보유 중일 수 있으므로 확인 문구가 그 역할을 한다.
+      return [mode, rm];
     };
 
     runBtn.onclick = async () => {
