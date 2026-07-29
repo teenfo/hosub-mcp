@@ -171,6 +171,22 @@ def test_꺼지면_전부_30초_루프가_맡는다(env):
     assert [desk.owns(r) for r in ("stop", "target", "timeout")] == [False] * 3
 
 
+def test_상한_때문에_못_보는_동안에는_소유권을_가져가지_않는다(env, monkeypatch):
+    """겹치는 것보다 **비는 것**이 훨씬 위험하다.
+
+    상한이 걸리면 초과분은 데스크가 건너뛴다. 그때도 소유권을 주장하면 그 종목은
+    데스크도 30초 루프도 보지 않는다 — 손절이 아무도 없는 채로 남는다.
+    """
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        {"desk": {"enabled": True, "max_symbols": 2}})
+    _open("p1", "005930")
+    _open("p2", "000660")
+    assert desk.owns("stop") is True, "상한 안이면 데스크가 다 본다"
+
+    _open("p3", "035720")                  # 상한 초과
+    assert desk.owns("stop") is False, "못 보는 동안에는 30초 루프가 받아야 한다"
+
+
 async def test_데스크가_직접_발주한다(env):
     """판정만 빠르고 발주가 30초 루프를 타면 빨라진 의미가 없다.
 

@@ -148,8 +148,18 @@ def owns(reason: str) -> bool:
 
     시간 손절(`timeout`)은 넘기지 않는다 — 시각 기준이라 2초 해상도가 필요 없고,
     보유시간 규칙은 데스크가 들고 있지 않다.
+
+    **상한이 걸려 보유를 다 못 보면 소유권을 가져가지 않는다.** `max_symbols` 를
+    두면 초과분은 데스크가 건너뛰는데, 그때도 소유권을 주장하면 그 종목은 데스크도
+    30초 루프도 보지 않는 상태가 된다 — 손절이 아무도 없는 채로 남는다.
+    상한이 걸린 동안에는 판정이 겹치지만, 겹치는 것보다 비는 것이 훨씬 위험하다.
     """
-    return enabled() and reason in ("stop", "target")
+    if not (enabled() and reason in ("stop", "target")):
+        return False
+    limit = int(_num("max_symbols"))
+    if limit <= 0:
+        return True                       # 보유 전량을 본다 — 온전한 소유권
+    return len(ledger.positions(status="open", limit=200)) <= limit
 
 
 def in_session(now: datetime | None = None) -> bool:
