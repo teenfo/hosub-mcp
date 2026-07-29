@@ -36,6 +36,23 @@ collect:
       trade: 30                # 매매 대상
       collect: 120             # 수집전용
       other: 720               # 그 외(뉴스 발굴 등)
+  # 증권사 리서치 리포트. 수집 대상 증권사는 DB(tnm_brokers)가 소유하고 화면에서
+  # 토글한다 — 여기 있는 것은 '어느 소스를 몇 페이지나 볼 것인가' 뿐이다.
+  research:
+    enabled: true
+    interval_min: 60
+    naver_enabled: true        # 네이버 금융 리서치 (5분류, EUC-KR)
+    consensus_enabled: true    # 한경컨센서스 (목표가·투자의견이 목록에 함께 온다)
+    pages: 1                   # 네이버 분류당 페이지 수(페이지당 30건)
+    days: 3                    # 한경컨센서스 소급 일수
+    # 네이버 종목분석은 목표가·투자의견이 상세에만 있어 리포트당 1콜이 더 든다.
+    # 못 채운 건은 목표가만 null 로 남고 나머지 정보는 온전하다.
+    detail_max_per_cycle: 20
+    # 해외 증권사는 리포트 원문이 공개돼 있지 않다. 국내 언론 인용 기사만
+    # 구글 RSS 로 모은다(증권사당 1콜) — 원문이 아니라는 것을 화면에도 적는다.
+    foreign_enabled: true
+    foreign_max_per_cycle: 12
+    initial_days: 3            # 해외 인용 기사 첫 수집 소급 범위
 
 dedup:
   duplicate_threshold: 0.92    # 이상 → duplicate (LLM 생략)
@@ -53,7 +70,9 @@ llm:
   max_body_chars: 6000
 
 score:                         # 요청서 6장 — 결정론적 산식 계수
-  w_source: {dart: 1.0, naver: 0.7, rss: 0.7}
+  # research(증권사 리포트)는 뉴스보다 높고 공시보다 낮다. 애널리스트가 이름을
+  # 걸고 쓴 분석이라 재탕 기사보다 무겁지만, 공시처럼 사실 확정은 아니다.
+  w_source: {dart: 1.0, research: 0.85, naver: 0.7, rss: 0.7}
   w_category:
     실적: 1.0
     공급계약: 1.0

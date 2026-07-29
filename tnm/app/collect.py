@@ -12,7 +12,9 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from . import brokers as broker_reg
 from . import db, discover, settings
+from .collectors import research
 from .collectors.base import Collector, RawDoc
 from .collectors.dart import DartCollector
 from .collectors.naver import NaverNewsCollector, daily_budget
@@ -28,6 +30,7 @@ def is_market_hours(now: datetime) -> bool:
 
 
 DART_CURSOR_KEY = "dart_market_rcept_no"
+FOREIGN_CURSOR_KEY = "research_foreign_seen"   # 해외사별 마지막 기사 시각(ISO)
 # 계층별 뉴스 수집 주기(분). 구글 RSS 는 종목명 검색이라 종목당 1콜이 강제돼
 # 전종목이 불가능하다. 대신 매매 대상은 자주, 그 외는 드물게 본다.
 DEFAULT_TIER_INTERVAL = {"trade": 30, "collect": 120, "other": 720}
@@ -84,6 +87,8 @@ class CollectRunner:
             return {"skipped": "DB 미준비"}
         self.running.add(kind)
         try:
+            if kind == "research":
+                return await self._run_research()
             if kind == "dart" and settings.COLLECT.get("dart", {}).get("market_mode", True):
                 return await self._run_dart_market()
             stocks = await db.active_watch_for_collect()
@@ -211,6 +216,187 @@ class CollectRunner:
             log.info("dart 신규 종목 발굴: %d건 등록 (%s)", added,
                      ", ".join(f"{c['ticker']} {c['reason']}" for c in take[:5]))
         return out | {"discovered": added}
+
+    # ---------------- 증권사 리서치 리포트 ----------------
+
+    def _report_row(self, r: research.Report) -> dict:
+        return {"source": r.source, "source_uid": r.source_uid, "broker": r.broker,
+                "category": r.category, "ticker": r.ticker,
+                "stock_name": r.stock_name, "title": r.title, "summary": r.summary,
+                "url": r.url, "pdf_url": r.pdf_url, "analyst": r.analyst,
+                "target_price": r.target_price, "opinion": r.opinion,
+                "published_at": r.published_at}
+
+    def _report_to_raw(self, r: research.Report) -> dict:
+        """리포트 → raw_items 행. 목표가·투자의견을 본문에 넣는다.
+
+        분류 LLM 이 보는 것은 본문 텍스트뿐이라, 별도 칼럼에만 있는 목표가는
+        분류·점수에 반영되지 않는다. 리포트에서 가장 중요한 정보를 문장으로
+        옮겨 넣어야 파이프라인이 그것을 읽는다.
+        """
+        parts = [f"[{r.broker} 리포트] {r.title}"]
+        if r.summary:
+            parts.append(r.summary)
+        if r.target_price:
+            parts.append(f"목표주가 {r.target_price:,}원")
+        if r.opinion:
+            parts.append(f"투자의견 {r.opinion}")
+        if r.analyst:
+            parts.append(f"작성 {r.analyst}")
+        body = " / ".join(parts)
+        return {"source_uid": f"{r.source}:{r.source_uid}", "title": r.title,
+                "body": body, "url": r.url, "published_at": r.published_at,
+                "content_hash": content_hash(r.title, body),
+                "norm_body": normalize(r.title + " " + body)}
+
+    async def _collect_foreign(self, brokers: list[dict], cfg: dict,
+                               counts: dict) -> list[research.Report]:
+        """해외 증권사 인용 기사. 증권사당 RSS 1콜, 커서는 전역 state 에 모아 둔다."""
+        targets = [b for b in brokers if b.get("kind") == "foreign"]
+        if not targets or not cfg.get("foreign_enabled", True):
+            return []
+        import json
+
+        raw = await db.get_state(FOREIGN_CURSOR_KEY)
+        try:
+            cursors = json.loads(raw) if raw else {}
+        except ValueError:
+            cursors = {}
+        out: list[research.Report] = []
+        for b in targets[:int(cfg.get("foreign_max_per_cycle", 12))]:
+            prev = cursors.get(b["name"])
+            since = None
+            if prev:
+                try:
+                    since = datetime.fromisoformat(prev)
+                except ValueError:
+                    since = None
+            try:
+                rows = await research.fetch_foreign(
+                    b, since, initial_days=int(cfg.get("initial_days", 3)))
+            except Exception as e:  # noqa: BLE001 — 증권사 단위 격리
+                counts["errors"] += 1
+                log.warning("해외 리서치 수집 실패 %s: %s", b["name"], e)
+                continue
+            if rows:
+                cursors[b["name"]] = max(r.published_at for r in rows).isoformat()
+                out.extend(rows)
+        if cursors:
+            await db.set_state(FOREIGN_CURSOR_KEY, json.dumps(cursors))
+        return out
+
+    async def _run_research(self) -> dict:
+        """증권사 리포트 수집 — 국내는 원문 목록, 해외는 국내 언론 인용.
+
+        수집 여부는 tnm_brokers.enabled 가 정한다. **끈 증권사의 리포트는 적재
+        하지 않고**, 목록에 없는 증권사는 적재하되 '미등록'으로 세어 화면에
+        보여준다 — 이름을 놓쳤다는 사실 자체가 목록을 고칠 근거다.
+        """
+        cfg = settings.COLLECT.get("research", {}) or {}
+        counts = {"fetched": 0, "kept": 0, "inserted": 0, "raw_inserted": 0,
+                  "disabled_skip": 0, "unregistered": 0, "errors": 0}
+        if not cfg.get("enabled", True):
+            return counts | {"skipped": "비활성"}
+        try:
+            counts["seeded"] = await db.seed_brokers(broker_reg.seed_rows())
+        except Exception as e:  # noqa: BLE001 — 시드 실패가 수집을 막지 않는다
+            counts["errors"] += 1
+            log.warning("증권사 시드 실패: %s", e)
+        brokers = await db.list_brokers()
+        index = broker_reg.build_index(brokers)
+
+        found: list[research.Report] = []
+        if cfg.get("naver_enabled", True):
+            try:
+                found += await research.fetch_naver(pages=int(cfg.get("pages", 1)))
+            except Exception as e:  # noqa: BLE001 — 소스 단위 격리
+                counts["errors"] += 1
+                log.warning("네이버 리서치 수집 실패: %s", e)
+        if cfg.get("consensus_enabled", True):
+            try:
+                found += await research.fetch_consensus(
+                    days=int(cfg.get("days", 3)))
+            except Exception as e:  # noqa: BLE001
+                counts["errors"] += 1
+                log.warning("한경컨센서스 수집 실패: %s", e)
+        found += await self._collect_foreign(brokers, cfg, counts)
+        counts["fetched"] = len(found)
+
+        keep: list[research.Report] = []
+        for r in found:
+            b = broker_reg.match(r.broker, index)
+            if b is None:
+                counts["unregistered"] += 1
+                keep.append(r)
+                continue
+            if not b.get("enabled"):
+                counts["disabled_skip"] += 1
+                continue
+            # 표기를 등록된 정식명으로 통일한다 — 그래야 증권사별 집계가 갈리지
+            # 않는다('유안타 리서치'와 '유안타증권'이 따로 세어지는 것을 막는다).
+            r.broker = b["name"]
+            keep.append(r)
+        # 목록 페이지는 매 사이클 같은 30건을 다시 준다. 여기서 신규만 남기지
+        # 않으면 상세 조회(건당 1콜)와 증권사 누적 건수가 매시간 헛돈다.
+        try:
+            known = await db.known_report_keys([(r.source, r.source_uid) for r in keep])
+        except Exception as e:  # noqa: BLE001 — 조회 실패면 멱등 INSERT 에 맡긴다
+            log.warning("리서치 기존 건 조회 실패: %s", e)
+            known = set()
+        keep = [r for r in keep if (r.source, r.source_uid) not in known]
+        counts["kept"] = len(keep)
+        if not keep:
+            self.last_run["research"] = datetime.now(KST).isoformat(timespec="seconds")
+            self.last_result["research"] = counts
+            return counts
+
+        try:
+            await research.fill_naver_targets(
+                keep, limit=int(cfg.get("detail_max_per_cycle", 20)))
+        except Exception as e:  # noqa: BLE001 — 보조 정보라 실패해도 계속
+            log.warning("리서치 상세(목표가) 조회 실패: %s", e)
+
+        counts["inserted"] = await db.insert_reports([self._report_row(r) for r in keep])
+
+        # 관심종목 리포트는 raw_items 에도 넣어 기존 분석 파이프라인을 태운다.
+        wids = await db.watch_ids_by_ticker()
+        by_wid: dict[int, list[dict]] = {}
+        for r in keep:
+            wid = wids.get(r.ticker or "")
+            if wid:
+                by_wid.setdefault(wid, []).append(self._report_to_raw(r))
+        for wid, rows in by_wid.items():
+            try:
+                counts["raw_inserted"] += await db.insert_raw_items(wid, "research", rows)
+            except Exception as e:  # noqa: BLE001 — 종목 단위 격리
+                counts["errors"] += 1
+                log.warning("리서치 raw 적재 실패 watchlist_id=%s: %s", wid, e)
+        if counts["raw_inserted"]:
+            await db.link_report_items()
+
+        tally: dict[str, int] = {}
+        for r in keep:
+            tally[r.broker] = tally.get(r.broker, 0) + 1
+        try:
+            await db.bump_brokers(tally, datetime.now(KST))
+        except Exception as e:  # noqa: BLE001 — 통계라 실패해도 수집은 성립
+            log.warning("증권사 통계 갱신 실패: %s", e)
+
+        self.last_run["research"] = datetime.now(KST).isoformat(timespec="seconds")
+        self.last_result["research"] = counts
+        log.info("리서치 수집: %s", counts)
+        return counts
+
+    async def research_loop(self) -> None:
+        cfg = settings.COLLECT.get("research", {}) or {}
+        interval_min = int(cfg.get("interval_min", 60))
+        await asyncio.sleep(20)
+        while True:
+            try:
+                await self.run_once("research")
+            except Exception:  # noqa: BLE001
+                log.exception("research 수집 루프 오류")
+            await asyncio.sleep(interval_min * 60)
 
     async def dart_loop(self) -> None:
         cfg = settings.COLLECT.get("dart", {})

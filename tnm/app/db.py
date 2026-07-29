@@ -379,6 +379,219 @@ async def insert_raw_items(watchlist_id: int, source: str, rows: list[dict]) -> 
     return inserted
 
 
+async def watch_ids_by_ticker() -> dict[str, int]:
+    """수집 대상 종목의 ticker → watchlist_id. 리포트를 raw_items 로 잇는 데 쓴다."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select ticker, id from tnm_watchlist"
+            " where is_active and not is_excluded")
+        return {r[0]: r[1] for r in await cur.fetchall()}
+
+
+# ---------------- 증권사 · 리서치 리포트 ----------------
+
+_BROKER_COLS = ("id, name, kind, enabled, aliases, note, reports,"
+                " last_seen_at, created_at")
+
+
+def _row_to_broker(r) -> dict:
+    keys = [c.strip() for c in _BROKER_COLS.split(",")]
+    d = dict(zip(keys, r))
+    d["aliases"] = list(d.get("aliases") or [])
+    for ts in ("last_seen_at", "created_at"):
+        if d.get(ts) is not None:
+            d[ts] = d[ts].isoformat()
+    return d
+
+
+async def list_brokers(enabled_only: bool = False) -> list[dict]:
+    async with _pool.connection() as conn:
+        q = f"select {_BROKER_COLS} from tnm_brokers"
+        if enabled_only:
+            q += " where enabled"
+        cur = await conn.execute(q + " order by kind, name")
+        return [_row_to_broker(r) for r in await cur.fetchall()]
+
+
+async def seed_brokers(rows: list[dict]) -> int:
+    """시드 등록 — 이미 있는 이름은 **건드리지 않는다**.
+
+    사용자가 끈 증권사를 배포 때마다 시드가 다시 켜면 토글이 무의미해진다.
+    """
+    if not rows:
+        return 0
+    # 행마다 별칭 개수가 달라 unnest 로 묶을 수 없다(Postgres 배열은 각 행의
+    # 길이가 같아야 한다). 기동 시 1회 수십 행이라 반복 INSERT 로 충분하다.
+    added = 0
+    async with _pool.connection() as conn:
+        for r in rows:
+            cur = await conn.execute(
+                "insert into tnm_brokers (name, kind, aliases, note)"
+                " values (%s, %s, %s::text[], %s) on conflict (name) do nothing",
+                (r["name"], r.get("kind") or "domestic",
+                 list(r.get("aliases") or []), r.get("note")))
+            added += max(cur.rowcount, 0)
+    return added
+
+
+async def add_broker(name: str, kind: str = "domestic",
+                     aliases: list[str] | None = None,
+                     note: str | None = None) -> dict:
+    """수동 추가. 이미 있으면 활성화하고 별칭을 합친다(덮어쓰지 않는다)."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "insert into tnm_brokers (name, kind, aliases, note)"
+            " values (%s, %s, %s::text[], %s)"
+            " on conflict (name) do update set enabled = true,"
+            "   aliases = (select array_agg(distinct a) from unnest("
+            "     tnm_brokers.aliases || excluded.aliases) a),"
+            "   note = coalesce(excluded.note, tnm_brokers.note)"
+            f" returning {_BROKER_COLS}",
+            (name, kind, list(aliases or []), note))
+        return _row_to_broker(await cur.fetchone())
+
+
+async def set_broker(name: str, *, enabled: bool | None = None,
+                     kind: str | None = None,
+                     aliases: list[str] | None = None) -> bool:
+    sets, args = [], []
+    if enabled is not None:
+        sets.append("enabled = %s")
+        args.append(enabled)
+    if kind is not None:
+        sets.append("kind = %s")
+        args.append(kind)
+    if aliases is not None:
+        sets.append("aliases = %s::text[]")
+        args.append(list(aliases))
+    if not sets:
+        return False
+    args.append(name)
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            f"update tnm_brokers set {', '.join(sets)} where name = %s", tuple(args))
+        return cur.rowcount > 0
+
+
+async def delete_broker(name: str) -> bool:
+    async with _pool.connection() as conn:
+        cur = await conn.execute("delete from tnm_brokers where name = %s", (name,))
+        return cur.rowcount > 0
+
+
+async def known_report_keys(keys: list[tuple[str, str]]) -> set[tuple[str, str]]:
+    """이미 적재된 (source, source_uid) 집합.
+
+    목록 페이지는 매 사이클 같은 30건을 다시 준다. 신규만 골라내지 않으면
+    상세 조회(리포트당 1콜)와 누적 건수가 매시간 헛돈다.
+    """
+    if not keys:
+        return set()
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select source, source_uid from tnm_reports"
+            " where (source, source_uid) in ("
+            "   select * from unnest(%s::text[], %s::text[]))",
+            ([k[0] for k in keys], [k[1] for k in keys]))
+        return {(r[0], r[1]) for r in await cur.fetchall()}
+
+
+async def insert_reports(rows: list[dict]) -> int:
+    """리포트 적재. (source, source_uid) 충돌은 무시 — 멱등. 반환: 실제 삽입 수."""
+    if not rows:
+        return 0
+    inserted = 0
+    async with _pool.connection() as conn:
+        for d in rows:
+            cur = await conn.execute(
+                "insert into tnm_reports (source, source_uid, broker, category,"
+                " ticker, stock_name, title, summary, url, pdf_url, analyst,"
+                " target_price, opinion, published_at)"
+                " values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)"
+                " on conflict (source, source_uid) do nothing",
+                (d["source"], d["source_uid"], d["broker"], d["category"],
+                 d.get("ticker"), d.get("stock_name"), d["title"], d.get("summary"),
+                 d["url"], d.get("pdf_url"), d.get("analyst"),
+                 d.get("target_price"), d.get("opinion"), d["published_at"]))
+            inserted += max(cur.rowcount, 0)
+    return inserted
+
+
+async def link_report_items() -> int:
+    """리포트 ↔ raw_items 연결. raw_items 의 source_uid 규약은 'source:uid'."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "update tnm_reports r set raw_item_id = i.id from tnm_raw_items i"
+            " where i.source = 'research'"
+            "   and i.source_uid = r.source || ':' || r.source_uid"
+            "   and r.raw_item_id is null")
+        return max(cur.rowcount, 0)
+
+
+async def bump_brokers(counts: dict[str, int], seen_at) -> int:
+    """증권사별 누적 건수·최종 관측 시각 갱신. 미등록 이름은 조용히 무시된다."""
+    if not counts:
+        return 0
+    names = list(counts)
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "update tnm_brokers b set reports = b.reports + v.n,"
+            " last_seen_at = greatest(coalesce(b.last_seen_at, %s), %s)"
+            " from (select * from unnest(%s::text[], %s::int[])) as v(name, n)"
+            " where b.name = v.name",
+            (seen_at, seen_at, names, [counts[n] for n in names]))
+        return max(cur.rowcount, 0)
+
+
+_REPORT_COLS = ("id, source, source_uid, broker, category, ticker, stock_name,"
+                " title, summary, url, pdf_url, analyst, target_price, opinion,"
+                " published_at, raw_item_id, collected_at")
+
+
+async def list_reports(broker: str | None = None, category: str | None = None,
+                       ticker: str | None = None, days: int = 7,
+                       limit: int = 100, offset: int = 0) -> list[dict]:
+    where, args = ["published_at >= now() - make_interval(days => %s)"], [max(1, days)]
+    if broker:
+        where.append("broker = %s")
+        args.append(broker)
+    if category:
+        where.append("category = %s")
+        args.append(category)
+    if ticker:
+        where.append("ticker = %s")
+        args.append(ticker)
+    args += [min(max(limit, 1), 500), max(offset, 0)]
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            f"select {_REPORT_COLS} from tnm_reports where {' and '.join(where)}"
+            " order by published_at desc, id desc limit %s offset %s", tuple(args))
+        keys = [c.strip() for c in _REPORT_COLS.split(",")]
+        out = []
+        for r in await cur.fetchall():
+            d = dict(zip(keys, r))
+            for ts in ("published_at", "collected_at"):
+                if d.get(ts) is not None:
+                    d[ts] = d[ts].isoformat()
+            out.append(d)
+        return out
+
+
+async def report_stats(days: int = 7) -> dict:
+    """최근 N일 수집 현황 — 증권사별 건수와 미등록 이름."""
+    async with _pool.connection() as conn:
+        cur = await conn.execute(
+            "select r.broker, count(*), bool_or(b.name is not null)"
+            " from tnm_reports r left join tnm_brokers b on b.name = r.broker"
+            " where r.published_at >= now() - make_interval(days => %s)"
+            " group by r.broker order by count(*) desc", (max(1, days),))
+        rows = await cur.fetchall()
+    return {"by_broker": [{"broker": r[0], "count": r[1], "registered": r[2]}
+                          for r in rows],
+            "total": sum(r[1] for r in rows),
+            "unregistered": [r[0] for r in rows if not r[2]]}
+
+
 # ---------------- 임베딩·신규성 워커 (M4 — DB 가 큐) ----------------
 
 async def pending_embeds(limit: int = 8) -> list[dict]:
