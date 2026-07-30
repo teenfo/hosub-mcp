@@ -59,6 +59,16 @@ services:
         - ["tnm/.venv/bin/pip", "install", "-q", "-r", "tnm/requirements.txt"]
       restart_after: true
       timeout_seconds: 600
+  jw-mcp:
+    unit: jw-mcp.service
+    description: "JW.org 콘텐츠 MCP (127.0.0.1:8604 — 자체 OAuth 2.1, /opt/jw-mcp 독립 클론)"
+    deploy:
+      workdir: /opt/jw-mcp
+      steps:
+        - ["git", "pull", "--ff-only"]
+        - ["npm", "ci", "--omit=dev"]
+      restart_after: true
+      timeout_seconds: 600
   # 예시) 서비스를 올린 뒤 아래 형태로 추가:
   # bcl-portal:
   #   unit: bcl-portal.service
