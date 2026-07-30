@@ -167,6 +167,60 @@ async def test_presurge_uses_surge_rate_not_rank(fake_client):
     assert got[0].raw == 3160.0
 
 
+@pytest.mark.asyncio
+async def test_presurge_는_실측_급증률_범위를_통과시킨다(fake_client):
+    """**이 소스를 사흘간 죽여 놓은 지점의 회귀 테스트다.**
+
+    `sdnin_rt` 은 누적 거래량 대비 증가율(%)이라 장중 상위권이 5~6 이다. 기본
+    문턱이 300 이던 종전에는 실측 200건이 전량 탈락했다 — 조회는 성공하니
+    `source_health` 는 정상으로 보였다.
+    """
+    fake_client(surge=_surge_payload(["000001"], surge=5.74, change=1.41))
+    got = await intraday.PresurgeSource().collect()
+    assert got, "실측 상위권 급증률이 통과하지 못하면 소스가 또 죽는다"
+    assert got[0].raw == 5.74
+    assert 0.0 < got[0].strength < 1.0
+
+
+# --- ⑥ 장중에만 도는가 ---
+#
+# 종전에는 마감 후에도 순위 API 를 매 분 불렀다. 순위는 종가에 고정되니 같은
+# 스냅샷을 밤새 적재하고, 그 신호로 **개장 전 승격 결정이 나갔다**(실측
+# 2026-07-29 21~23 UTC = 7/30 06~08시 KST, promote_collect 6건). 전날 종가 순위로
+# 오늘 종목을 정하는 것은 근거가 약하고 그 사이 호출은 전부 낭비다.
+
+@pytest.mark.parametrize("hhmm,day,ok", [
+    ("09:00", 30, True), ("13:00", 30, True), ("15:30", 30, True),
+    ("15:31", 30, False), ("08:59", 30, False), ("20:00", 30, False),
+    ("11:00", 25, False),          # 토요일
+])
+def test_장중_소스는_장외에_돌지_않는다(hhmm, day, ok, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from app import settings
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "k")
+    h, m = (int(x) for x in hhmm.split(":"))
+    t = datetime(2026, 7, day, h, m, tzinfo=ZoneInfo("Asia/Seoul"))
+    assert intraday.session_open(t) is ok
+    monkeypatch.setattr(intraday, "session_open", lambda now=None: ok)
+    for src in (intraday.VolumeSource(), intraday.GainersSource(),
+                intraday.PresurgeSource()):
+        assert src.enabled() is ok, src.name
+
+
+def test_장외_소스는_꺼진_것이지_0건이_아니다(monkeypatch):
+    """빈 리스트를 돌려주면 `mark_ok(0)` 이 찍혀 매일 밤 0건 경고가 울린다.
+
+    마감은 이상이 아니다 — `enabled()` 로 끄면 엔진이 조용히 건너뛰고
+    `source_health` 도 건드리지 않는다.
+    """
+    from app import settings
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "k")
+    monkeypatch.setattr(intraday, "session_open", lambda now=None: False)
+    assert intraday.VolumeSource().enabled() is False
+
+
 # --- ⑤ 급증 소스 개장 워밍업 ---
 #
 # 실측 2026-07-28 09:00:25(개장 25초): 신일전자 13,605,700% · NAVER 718,757%

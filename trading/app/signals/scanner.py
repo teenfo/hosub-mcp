@@ -77,7 +77,12 @@ def filter_presurge(items: list[dict], cfg: dict,
     '이미 감시 중이면 제외' 를 무력화한다 — 그러지 않으면 승격 직후 소스가
     보고를 멈춰 신호가 만료되고, 강등되면 다시 보고하는 발진이 생긴다.
     """
-    min_surge = cfg.get("min_volume_surge_pct", 300.0)   # 거래량 급증률 최소
+    # `sdnin_rt` 는 '직전 조회의 누적 거래량 대비 증가율(%)' 이다(실측 근거는
+    # scout/model.py SURGE_FULL 주석). 분모가 누적이라 장중에 300% 는 도달할 수
+    # 없어 종전 기본값 300 은 **구조적으로 통과 불가**였다. 문턱은 잡음만 걸러내는
+    # 하한으로 낮게 두고 상위 선택은 `top_n` 에 맡긴다 — 형제 필터가 순위 기반인
+    # 것과 같은 규약이고, 분모의 시간대 편향에도 견딘다.
+    min_surge = cfg.get("min_volume_surge_pct", 0.5)     # 거래량 급증률 최소(%)
     lo = cfg.get("change_pct_min", -1.0)                 # 등락률 하한
     hi = cfg.get("change_pct_max", 3.0)                  # 이 이상 오르면 이미 급등(기존 스캐너 몫)
     min_price = cfg.get("min_price", 1_000)

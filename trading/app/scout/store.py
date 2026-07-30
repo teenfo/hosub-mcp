@@ -81,6 +81,12 @@ def _conn() -> sqlite3.Connection:
         );
         """
     )
+    # 연속 0건 폴 횟수. 조회 성공만 보던 종전 규약은 "정상적으로 아무것도 못 찾는"
+    # 상태를 침묵으로 넘겼다(presurge 7/28~30, `fails: 0` 인 채 신호 0건).
+    have = {r[1] for r in conn.execute("PRAGMA table_info(source_health)")}
+    if "empty" not in have:
+        conn.execute(
+            "ALTER TABLE source_health ADD COLUMN empty INTEGER NOT NULL DEFAULT 0")
     return conn
 
 
@@ -227,14 +233,29 @@ def _list(raw) -> list:
 
 # --- 소스 상태 ---------------------------------------------------------------
 
-def mark_ok(source: str, count: int) -> None:
+def mark_ok(source: str, count: int) -> int:
+    """성공 폴을 기록하고 **연속 0건 횟수**를 돌려준다.
+
+    조회 성공만 보면 "정상적으로 아무것도 못 찾는" 상태를 잡을 수 없다. 실제로
+    `presurge` 가 7/28~7/30 사흘간 `fails: 0 · last_ok` 최신인 채로 신호 0건이었고,
+    화면·API 어디에도 그 사실이 드러나지 않았다 — 문턱값 단위가 틀려서 200건을
+    받아 전량 탈락시키는 중이었다. **조회 성공은 소스가 살아 있다는 증거가 아니다.**
+
+    장 마감처럼 정당하게 0건인 시간대는 소스를 `enabled()` 에서 끄므로 여기까지
+    오지 않는다 — 그래서 이 카운터가 울리면 실제로 이상한 것이다.
+    """
     with _conn() as conn:
         conn.execute(
-            "INSERT INTO source_health (source, last_ok, fails, signals)"
-            " VALUES (?,?,0,?) ON CONFLICT(source) DO UPDATE SET"
-            " last_ok=excluded.last_ok, fails=0, signals=excluded.signals",
-            (source, datetime.now(UTC).isoformat(), count),
+            "INSERT INTO source_health (source, last_ok, fails, signals, empty)"
+            " VALUES (?,?,0,?,?) ON CONFLICT(source) DO UPDATE SET"
+            " last_ok=excluded.last_ok, fails=0, signals=excluded.signals,"
+            " empty=CASE WHEN excluded.signals > 0 THEN 0"
+            "            ELSE source_health.empty + 1 END",
+            (source, datetime.now(UTC).isoformat(), count, 0 if count else 1),
         )
+        row = conn.execute(
+            "SELECT empty FROM source_health WHERE source=?", (source,)).fetchone()
+    return int(row["empty"] or 0) if row else 0
 
 
 def mark_fail(source: str, msg: str) -> int:

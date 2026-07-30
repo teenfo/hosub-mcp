@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 
 from ... import settings
 from ...signals import scanner
-from .. import model
+from .. import model, promote
 from ..model import Signal
 from .base import rank_signals, watched_keep
 
@@ -28,6 +28,25 @@ OPEN = time(9, 0)
 PRESURGE_WARMUP_MIN = 10
 
 
+def session_open(now: datetime | None = None) -> bool:
+    """장중인가. **세 소스 모두 장중에만 의미가 있다.**
+
+    종전에는 마감 후에도 순위 API 를 매 분 계속 불렀다. 순위는 종가에 고정되므로
+    같은 스냅샷을 밤새 되풀이해 적재하고, 그 신호로 **개장 전에 승격 결정이
+    나갔다**(실측 2026-07-29 21~23 UTC = 7/30 06~08시 KST, `promote_collect` 6건).
+    전날 종가 순위로 오늘 종목을 정하는 것은 근거가 약하고, 그 사이 API 호출은
+    전부 낭비다(소스 3종 × 분당 1콜 × 마감 후 17시간).
+
+    `enabled()` 로 끄는 것이 맞다 — 빈 리스트를 돌려주면 `mark_ok(0)` 이 찍혀
+    '연속 0건' 경고가 매일 밤 울린다. 마감은 이상이 아니다.
+
+    강등이 `promote.in_session` 으로 이미 막혀 있으므로, 마감 시각에 신호가
+    만료돼도 감시목록은 그대로 유지된다. 뉴스·야간발굴은 장외에도 계속 돌아
+    공시·리포트 기반 승격 경로는 살아 있다.
+    """
+    return promote.in_session(now)
+
+
 class VolumeSource:
     """거래대금 상위 (ka10032) — '시장이 실제로 돈을 넣고 있는' 종목."""
 
@@ -37,7 +56,8 @@ class VolumeSource:
         return settings.CONFIG.get("scanner", {})
 
     def enabled(self) -> bool:
-        return bool(self._cfg().get("enabled", True)) and bool(settings.KIWOOM_APP_KEY)
+        return (bool(self._cfg().get("enabled", True))
+                and bool(settings.KIWOOM_APP_KEY) and session_open())
 
     def interval_sec(self) -> int:
         return int(self._cfg().get("interval_sec", 60))
@@ -65,7 +85,8 @@ class GainersSource:
         return settings.CONFIG.get("gainers", {})
 
     def enabled(self) -> bool:
-        return bool(self._cfg().get("enabled", True)) and bool(settings.KIWOOM_APP_KEY)
+        return (bool(self._cfg().get("enabled", True))
+                and bool(settings.KIWOOM_APP_KEY) and session_open())
 
     def interval_sec(self) -> int:
         return int(self._cfg().get("interval_sec", 60))
@@ -108,7 +129,8 @@ class PresurgeSource:
         return settings.CONFIG.get("scanner", {})
 
     def enabled(self) -> bool:
-        return bool(self._cfg().get("enabled", True)) and bool(settings.KIWOOM_APP_KEY)
+        return (bool(self._cfg().get("enabled", True))
+                and bool(settings.KIWOOM_APP_KEY) and session_open())
 
     def interval_sec(self) -> int:
         return int(self._cfg().get("interval_sec", 60))

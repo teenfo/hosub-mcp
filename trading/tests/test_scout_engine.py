@@ -164,6 +164,31 @@ async def test_disabled_sources_do_not_block_readiness(spy_watchlist):
 
 
 @pytest.mark.asyncio
+async def test_다시_켜진_소스는_첫_수집까지_투영을_막는다(spy_watchlist):
+    """장중 소스를 마감 후 끄기 시작하면서 생긴 구멍의 회귀 테스트다.
+
+    다음 날 09:00 에 어제 신호는 TTL 로 만료됐는데 `polled` 에 이름이 남아 있으면
+    `ready()` 가 True 가 되고, 장중 소스 점수 0 인 상태로 투영해 **개장 직후
+    대량 강등**이 나간다. 종전에는 밤새 폴링했으므로 이 창이 없었다.
+    """
+    vol = _Src(model.VOLUME, [_sig()])
+    e = _engine([vol, _Src(model.NEWS, [_sig(code="000002", source=model.NEWS)])])
+    await e.run_once()
+    assert e.ready() is True                 # 장중 — 둘 다 폴링했다
+
+    vol._on = False                          # 마감
+    await e.run_once()
+    assert model.VOLUME not in e.polled, "꺼진 소스는 '보고했다' 로 남지 않는다"
+    assert e.ready() is True                 # 꺼진 소스는 ready 를 막지 않는다
+
+    vol._on = True                           # 다음 날 개장
+    e.next_due[model.VOLUME] = float("inf")  # 아직 첫 수집 차례가 안 왔다
+    out = await e.run_once()
+    assert e.ready() is False, "첫 수집 전에 투영하면 장중 점수 0 으로 강등이 나간다"
+    assert out["decisions"] == 0 and spy_watchlist == []
+
+
+@pytest.mark.asyncio
 async def test_shrink_circuit_breaker(monkeypatch, spy_watchlist):
     """한 번에 대량 축소는 대개 소스 장애다 — 상한을 둔다."""
     monkeypatch.setattr(eng, "MAX_SHRINK", 3)

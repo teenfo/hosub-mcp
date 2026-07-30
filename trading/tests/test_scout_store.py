@@ -218,3 +218,30 @@ def test_error_message_is_kept_for_the_screen():
 
 def test_health_empty_before_first_poll():
     assert store.health() == {}
+
+
+# --- 연속 0건 — '조회 성공' 이 '소스 정상' 이 아니다 ---
+#
+# presurge 가 7/28~7/30 사흘간 `fails: 0 · last_ok` 최신인 채로 신호 0건이었다.
+# 문턱값 단위가 틀려 200건을 받아 전량 탈락시키는 중이었는데, 화면·API 어디에도
+# 그 사실이 없었다. 실패만 세는 규약이 이 침묵을 만들었다.
+
+def test_연속_0건을_센다():
+    assert store.mark_ok(model.PRESURGE, 0) == 1
+    assert store.mark_ok(model.PRESURGE, 0) == 2
+    assert store.mark_ok(model.PRESURGE, 0) == 3
+    assert store.health()[model.PRESURGE]["empty"] == 3
+
+
+def test_한_건이라도_나오면_0건_카운터가_풀린다():
+    store.mark_ok(model.PRESURGE, 0)
+    store.mark_ok(model.PRESURGE, 0)
+    assert store.mark_ok(model.PRESURGE, 1) == 0
+    assert store.health()[model.PRESURGE]["empty"] == 0
+
+
+def test_0건은_실패가_아니다():
+    """백오프에 걸리면 안 된다 — 조회 자체는 성공했다."""
+    store.mark_ok(model.VOLUME, 0)
+    h = store.health()[model.VOLUME]
+    assert h["fails"] == 0 and h["last_ok"] and h["empty"] == 1
