@@ -625,19 +625,23 @@ export default {
                 [el("span", { html: stockHTML(symbol, name) }), chart]);
     };
 
-    // 데스크 설정(추종 발동선 계산용). renderDesk 가 갱신한다 — 보유 표와
-    // 데스크 카드가 같은 값을 봐야 "발동" 표시가 실제 동작과 일치한다.
+    // 데스크 설정(손절 전환선 계산용). renderDesk 가 갱신한다 — 보유 표와
+    // 데스크 카드가 같은 값을 봐야 표시가 실제 동작과 일치한다.
     let deskState = {};
 
-    /** 진입가 대비 현재가 위치 + 익절선 추종 발동선까지의 거리.
+    /** 진입가 대비 현재가 위치 + **손절 전환선**까지의 거리.
      *
-     * 왜 % 하나로 안 되는가: 추종 발동 조건은 **진입가 대비 %가 아니라
-     * 진입→목표 갭 대비 비율**(`tighten_at`)이다. 목표가가 종목마다 다르므로
-     * 같은 +1.5% 가 어떤 종목에서는 발동이고 어떤 종목에서는 아니다.
-     * 그래서 둘을 같이 보여준다 — 진입가 대비 %(직관)와 갭 진행률(실제 조건).
+     * `tighten_at` 이 넘어가면 손절선 계산이 '진입 시 갭 유지' 에서
+     * '진입가 + 상승분 × 확정률' 로 바뀐다 — **익절선이 아니라 손절선** 얘기다.
+     * 종전 표기('추종 발동')는 익절선으로 읽혔다.
      *
-     * 평단(계좌)과 진입가(원장)는 다를 수 있다. 발동 판정은 **원장 진입가**로
-     * 하므로 그 기준을 쓰고, 원장이 없으면 평단으로 대체한다. */
+     * 왜 % 하나로 안 되는가: 전환 조건은 **진입가 대비 %가 아니라 진입→목표 갭
+     * 대비 비율**(`tighten_at`)이다. 목표가가 종목마다 다르므로 같은 +1.5% 가
+     * 어떤 종목에서는 전환이고 어떤 종목에서는 아니다. 그래서 둘을 같이
+     * 보여준다 — 진입가 대비 %(직관)와 갭 진행률(실제 조건).
+     *
+     * 평단(계좌)과 진입가(원장)는 다를 수 있다. 판정은 **원장 진입가**로 하므로
+     * 그 기준을 쓰고, 원장이 없으면 평단으로 대체한다. */
     const entryProgress = (h, p) => {
       const cur = Number(h.cur_price || 0);
       const entry = Number((p && p.entry) || h.avg_price || 0);
@@ -645,8 +649,8 @@ export default {
       const pct = (cur / entry - 1) * 100;
       const tone = pct > 0 ? "text-danger" : pct < 0 ? "text-primary" : "";
       let out = `<span class="${tone}">${pct > 0 ? "+" : ""}${pct.toFixed(2)}%</span>`;
-      // 추종이 꺼져 있으면 발동선을 말할 이유가 없다 — 없는 기능을 있는 것처럼
-      // 보여주지 않는다.
+      // 라인 추종이 꺼져 있으면 전환선을 말할 이유가 없다 — 없는 기능을 있는
+      // 것처럼 보여주지 않는다.
       const d = deskState || {};
       const target = Number((p && (p.target_live ?? p.target)) || 0);
       const at = Number(d.tighten_at ?? 0);
@@ -657,8 +661,8 @@ export default {
         out += ` <span class="text-secondary" style="font-size:.72rem">`
              + `갭 ${prog.toFixed(0)}%`
              + (cur >= trigger
-                 ? ' <span class="badge text-bg-warning">추종 발동</span>'
-                 : ` · 발동 ${fmt(trigger)}`)
+                 ? ` <span class="badge text-bg-warning" title="손절선이 '진입가 + 상승분 × ${d.lock_gain_pct ?? 30}%' 로 계산됩니다">손절 전환됨</span>`
+                 : ` · 손절 전환 ${fmt(trigger)}`)
              + `</span>`;
       }
       return out;
@@ -730,12 +734,20 @@ export default {
     ]);
 
     /** 추종 파라미터 편집 줄 — 실거래 청산선을 정하는 값이라 화면에서 바로 본다.
-     *  폴링이 입력을 덮어쓰지 않도록 포커스 중인 칸은 건드리지 않는다. */
+     *  폴링이 입력을 덮어쓰지 않도록 포커스 중인 칸은 건드리지 않는다.
+     *
+     *  `trailing`(라인 추종)이 꺼져 있으면 아래 값들은 `desk.update_lines` 가
+     *  첫 줄에서 return 하므로 **하나도 동작하지 않는다**. 그래도 조작 가능하게
+     *  두면 화면이 거짓말을 한다 — 실제로 그 상태로 오래 돌았다(2026-07-30:
+     *  라인 추종 OFF · 사이클 2,577 · 라인 갱신 0건인데 발동·확정 입력칸이 열려
+     *  있었다). 그래서 마스터가 꺼지면 같이 잠근다. */
     const trailInputs = {};
-    const trailNum = (key, label, val, step, hint) => {
+    const trailNum = (key, label, val, step, hint, off) => {
       const inp = trailInputs[key] || (trailInputs[key] = el("input", {
         class: "form-control form-control-sm py-0", type: "number", step,
-        style: "width:5rem", title: hint }));
+        style: "width:5rem" }));
+      inp.title = off ? "라인 추종이 꺼져 있어 이 값은 쓰이지 않습니다" : hint;
+      inp.disabled = !!off;
       if (document.activeElement !== inp) inp.value = val;
       inp.onchange = async () => {
         const v = Number(inp.value);
@@ -747,7 +759,35 @@ export default {
         finally { inp.disabled = false; }
       };
       return el("div", { class: "d-flex align-items-center gap-1" },
-        [el("span", { class: "text-secondary" }, label), inp]);
+        [el("span", { class: off ? "text-secondary opacity-50" : "text-secondary" }, label), inp]);
+    };
+
+    // 라인 추종 — **마스터 스위치**다. 꺼져 있으면 아래 파라미터·익절선 추종이
+    // 전부 무효다(`desk.update_lines` 가 `if not trailing(): return None`).
+    // 종전에는 배지로만 보여 조작할 수 없었다 — 하위 옵션만 토글이 있고 상위는
+    // 없는 거꾸로 된 구조였다.
+    const trailToggle = el("input", { class: "form-check-input", type: "checkbox",
+      role: "switch", id: "deskTrail" });
+    trailToggle.onchange = async () => {
+      const on = trailToggle.checked;
+      if (on && !confirm("라인 추종을 켭니다.\n\n손절선이 가격을 따라 올라갑니다 — 진입 시 정한 값에 고정되지 않고, 오르면 따라붙고 내려도 그 자리에 남습니다. 실거래 청산선이 움직입니다.\n\n끄면 즉시 진입 시 값으로 돌아갑니다(이미 올려둔 값은 원본을 보존하고 있습니다).")) {
+        trailToggle.checked = false; return;
+      }
+      trailToggle.disabled = true;
+      try { await postJSON("/api/trading/desk", { trailing: on }); changed("status", null); await loadStatus(); }
+      catch (e) { alert("실패: " + e.message); trailToggle.checked = !on; }
+      finally { trailToggle.disabled = false; }
+    };
+
+    const trailSwitch = (d) => {
+      if (document.activeElement !== trailToggle) trailToggle.checked = !!d.trailing;
+      return el("div", { class: "form-check form-switch mb-0",
+        title: d.trailing
+          ? `가격이 오르면 같은 갭으로 손절선을 올리고 내려도 그 자리에 둡니다. 목표까지 ${((d.tighten_at ?? 0.5) * 100).toFixed(0)}% 오면 손절선을 상승분의 ${d.lock_gain_pct ?? 30}% 로 끌어올립니다. 익절선은 ${d.trail_target ? '같이 따라 올라가되 진입가 +' + (d.max_gain_pct ?? 3) + '% 를 넘지 않습니다' : '진입 시 값 그대로 고정입니다'}. 손절선이 이익 구간으로 올라가면 시간 손절을 다시 셉니다.`
+          : "진입 시 정한 손절·목표를 그대로 씁니다. 아래 파라미터는 켜야 쓰입니다." },
+        [trailToggle,
+         el("label", { class: "form-check-label", for: "deskTrail" },
+           d.trailing ? "라인 추종 ON" : "라인 추종 OFF")]);
     };
 
     const tgtToggle = el("input", { class: "form-check-input", type: "checkbox",
@@ -757,19 +797,25 @@ export default {
       catch (e) { alert("실패: " + e.message); tgtToggle.checked = !tgtToggle.checked; }
     };
 
+    // 라벨은 **어느 선을 움직이는지**를 이름에 담는다. '발동'·'확정'은 둘 다
+    // 손절선 얘기인데 종전 라벨에 그 말이 없어 익절선으로 읽혔다.
     const trailRow = (d) => {
+      const off = !d.trailing;
       if (document.activeElement !== tgtToggle) tgtToggle.checked = !!d.trail_target;
+      tgtToggle.disabled = off;
       return el("div", { class: "d-flex gap-3 align-items-center flex-wrap mt-1 small" }, [
-        trailNum("tighten_at", "발동", Math.round((d.tighten_at ?? 0.5) * 100), 5,
-          "목표까지 이만큼 오면 손절선 계산을 '상승분의 N%' 로 바꿉니다(%)"),
-        trailNum("lock_gain_pct", "확정", d.lock_gain_pct ?? 30, 5,
-          "발동 뒤 손절선 = 진입가 + 상승분 × 이 비율(%). 클수록 확정분이 크지만 잔진동에 먼저 걸립니다"),
-        trailNum("max_gain_pct", "익절상한", d.max_gain_pct ?? 3, 0.5,
-          "익절선 천장(진입가 대비 %). 0이면 상한 없음"),
+        trailNum("tighten_at", "손절 전환", Math.round((d.tighten_at ?? 0.5) * 100), 5,
+          "목표까지 이만큼 오면 손절선 계산을 '상승분의 N%' 로 바꿉니다(%)", off),
+        trailNum("lock_gain_pct", "손절 확정률", d.lock_gain_pct ?? 30, 5,
+          "전환 뒤 손절선 = 진입가 + 상승분 × 이 비율(%). 오른 것 중 몇 %를 지킬지입니다. 클수록 확정분이 크지만 잔진동에 먼저 걸립니다", off),
+        trailNum("max_gain_pct", "익절 상한", d.max_gain_pct ?? 3, 0.5,
+          "익절선 천장(진입가 대비 %). 0이면 상한 없음", off),
         el("div", { class: "form-check form-switch mb-0" }, [
           tgtToggle,
-          el("label", { class: "form-check-label", for: "deskTgt",
-            title: "익절선도 손절선처럼 따라 올릴지. 실측에서 켜면 손해였습니다(기본 끔)" },
+          el("label", { class: "form-check-label" + (off ? " opacity-50" : ""), for: "deskTgt",
+            title: off
+              ? "라인 추종이 꺼져 있어 이 설정은 쓰이지 않습니다"
+              : "익절선도 손절선처럼 따라 올릴지. 실측에서 켜면 손해였습니다 — 실거래 57건 투사에서 목표에 닿아 익절했을 7건이 되밀려 손절로 나왔습니다(−6,593원). 기본 끔" },
             "익절선 추종"),
         ]),
       ]);
@@ -803,11 +849,7 @@ export default {
           `WS ${fmt(d.ws || 0)} · REST ${fmt(d.rest || 0)} (${restPct.toFixed(0)}%)`),
         d.no_price ? el("span", { class: "badge text-bg-secondary", title: "가격을 모르면 판정하지 않습니다" },
           `가격없음 ${fmt(d.no_price)}`) : null,
-        el("span", { class: "badge text-bg-" + (d.trailing ? "info" : "light text-dark"),
-          title: d.trailing
-            ? `가격이 오르면 같은 갭으로 손절·목표를 올리고 내려도 그 자리에 둡니다. 목표까지 ${((d.tighten_at ?? 0.5) * 100).toFixed(0)}% 오면 손절선을 상승분의 ${d.lock_gain_pct ?? 30}% 로 끌어올립니다. 익절선은 ${d.trail_target ? '같이 따라 올라가되 진입가 +' + (d.max_gain_pct ?? 3) + '% 를 넘지 않습니다' : '진입 시 값 그대로 고정입니다'}. 손절선이 이익 구간으로 올라가면 시간 손절을 다시 셉니다.`
-            : "진입 시 정한 손절·목표를 그대로 씁니다" },
-          d.trailing ? "라인 추종 ON" : "라인 추종 OFF"),
+        trailSwitch(d),
         el("span", { class: "text-secondary" },
           `사이클 ${fmt(d.cycles || 0)} · 청산 ${fmt(d.exits || 0)}건`
           + (d.proposed ? ` · 승인대기 ${fmt(d.proposed)}건` : "")
@@ -819,10 +861,14 @@ export default {
           title: "config.yaml 이 아니라 화면·API 로 바꾼 값입니다. 재배포하면 이 파일이 우선합니다" },
           "런타임 설정 적용 중: " + JSON.stringify(d.override)));
       }
+      // 갱신 0건의 이유가 둘이다 — 추종이 꺼져 있어서인지, 켜져 있는데 아직
+      // 전환선에 닿은 종목이 없어서인지. 구분하지 않으면 꺼진 것을 모른다.
       deskBox.appendChild(el("div", { class: "text-secondary mt-1" },
         d.last_line
           ? `라인 갱신 ${fmt(d.lines || 0)}회 · 최근 ${d.last_line.at} ${d.last_line.name || d.last_line.symbol} 손절 ${d.last_line.stop == null ? "—" : fmt(d.last_line.stop)} / 목표 ${d.last_line.target == null ? "—" : fmt(d.last_line.target)}`
-          : "손절·익절 라인 실시간 갱신 규칙은 아직 없습니다 — 진입 시 정한 값을 그대로 씁니다."));
+          : d.trailing
+            ? "라인 추종 켜짐 — 아직 갱신된 포지션이 없습니다(가격이 손절 전환선에 닿은 종목 없음)."
+            : "라인 추종이 꺼져 있습니다 — 진입 시 정한 손절·목표를 그대로 씁니다. 위 파라미터는 켜야 쓰입니다."));
     };
 
     /** 손절/목표 셀 — 데스크가 끌어올린 값이 있으면 **그 값이 실제 판정선**이다.
