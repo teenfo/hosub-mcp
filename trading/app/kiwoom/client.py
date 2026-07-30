@@ -65,6 +65,10 @@ class RateLimiter:
         self.waited_sec = 0.0        # 누적 대기 — 한도에 눌린 정도(부하 지표)
         self.throttled_until = 0.0   # 감속 상태 표시용(마지막 429 시각 기준)
         self.penalties = 0           # 자동 감속 발동 횟수
+        # 우선 호출(매매 데스크)이 대기 중인 수. 일반 호출은 이 값이 0이 될 때까지
+        # 자리를 비켜 준다 — 데스크가 분봉 백필 뒤에 줄 서면 2초 주기가 무의미해진다.
+        self._priority_waiting = 0
+        self.yielded = 0             # 일반 호출이 양보한 횟수(관측치)
 
     @property
     def interval(self) -> float:
@@ -89,16 +93,42 @@ class RateLimiter:
     def throttled(self) -> bool:
         return self.effective_rps < self.max_rps
 
-    async def wait(self) -> None:
-        async with self._lock:
-            self._maybe_recover()
-            now = time.monotonic()
-            delta = now - self._last
-            if delta < self.interval:
-                pause = self.interval - delta
-                self.waited_sec += pause
-                await asyncio.sleep(pause)
-            self._last = time.monotonic()
+    # 일반 호출이 연속으로 양보할 수 있는 최대 횟수. 데스크는 2초마다 보유
+    # 종목만큼 부르므로 우선 대기가 끊이지 않을 수 있다 — 상한이 없으면 분봉
+    # 백필이 영구히 굶고 신호가 아예 안 나온다. 양보는 늦추는 것이지 버리는 것이
+    # 아니어야 한다.
+    MAX_YIELDS = 5
+
+    async def wait(self, priority: bool = False) -> None:
+        """호출 간 최소 간격 확보. `priority` 는 매매 데스크 전용 레인이다.
+
+        데스크는 초 단위로 실거래 청산을 판정한다. 그 호출이 분봉 백필 30여 건
+        뒤에 줄 서면 2초 주기가 이름만 남는다(실측 2026-07-30: chart 149콜/분에
+        눌려 데스크 사이클이 늘어졌다). 우선 호출이 대기 중이면 일반 호출은
+        간격만큼 비켜 준다.
+        """
+        if priority:
+            self._priority_waiting += 1
+        try:
+            yields = 0
+            while True:
+                async with self._lock:
+                    if priority or not self._priority_waiting or yields >= self.MAX_YIELDS:
+                        self._maybe_recover()
+                        now = time.monotonic()
+                        delta = now - self._last
+                        if delta < self.interval:
+                            pause = self.interval - delta
+                            self.waited_sec += pause
+                            await asyncio.sleep(pause)
+                        self._last = time.monotonic()
+                        return
+                yields += 1
+                self.yielded += 1
+                await asyncio.sleep(self.interval)   # 락 밖에서 양보
+        finally:
+            if priority:
+                self._priority_waiting -= 1
 
 
 class ApiUsage:
@@ -172,13 +202,14 @@ class KiwoomClient:
                         self._limiter.effective_rps)
 
     async def _request(self, path: str, tr_id: str, body: dict,
-                       cont: str = "N", next_key: str = "") -> tuple[dict, str]:
+                       cont: str = "N", next_key: str = "",
+                       priority: bool = False) -> tuple[dict, str]:
         """호출 + 연속조회 키 반환 → (응답 JSON, 다음 페이지 키).
 
         키움은 이어질 데이터가 있으면 응답 헤더에 cont-yn=Y 와 next-key 를 준다.
         cont-yn 이 Y 가 아니면 빈 문자열을 돌려 호출부가 루프를 끝내게 한다.
         """
-        await self._limiter.wait()
+        await self._limiter.wait(priority)
         token = await token_manager.get()
         headers = {
             "authorization": f"Bearer {token}",
@@ -202,8 +233,9 @@ class KiwoomClient:
             nxt = resp.headers.get("next-key", "") or ""
         return resp.json(), nxt
 
-    async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N") -> dict:
-        data, _ = await self._request(path, tr_id, body, cont)
+    async def _call(self, path: str, tr_id: str, body: dict, cont: str = "N",
+                    priority: bool = False) -> dict:
+        data, _ = await self._request(path, tr_id, body, cont, priority=priority)
         return data
 
     # --- 시세 ---
@@ -296,12 +328,14 @@ class KiwoomClient:
             PATH_ACCOUNT, TR_ACCOUNT_BALANCE, {"qry_tp": "1", "dmst_stex_tp": "KRX"}
         )
 
-    async def quote(self, code: str) -> dict:
+    async def quote(self, code: str, priority: bool = False) -> dict:
         """현재 시세 (ka10006). 등락률·체결강도가 같이 온다.
 
-        매매 tier 승격 후보에만 부른다 — 하루 1~2종목이라 레이트리밋 부담이 없다.
+        `priority=True` 는 **매매 데스크 폴백** 전용이다. 데스크는 2초마다 실거래
+        청산을 판정하므로 이 호출이 분봉 백필 뒤에 줄 서면 주기가 이름만 남는다.
         """
-        return await self._call(PATH_MARKET, TR_QUOTE, {"stk_cd": code})
+        return await self._call(PATH_MARKET, TR_QUOTE, {"stk_cd": code},
+                                priority=priority)
 
     async def stock_basic(self, code: str) -> dict:
         """주식기본정보 (ka10001) — 시총·PER·EPS·52주 고저·상하한가 등.

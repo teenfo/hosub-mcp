@@ -44,6 +44,9 @@ class SignalEngine:
         self.gap_bias = "중립"         # 당일 시가 갭 방향
         self.night_bias = "중립"       # 야간 리포트(미국장 등) 익일 편향
         self.regime = "중립"           # 유효 국면 = base + 시가갭 + 야간리포트 결합
+        # 분봉 백필 라운드로빈 — 한 사이클에 감시목록 전체를 부르지 않는다
+        self._backfill_cursor = 0
+        self._backfill_held: set[str] = set()
 
     def _base_regime(self) -> str:
         """야간 발굴이 계산한 전일 breadth 국면(강세/약세/중립). 10분 캐시."""
@@ -349,7 +352,13 @@ class SignalEngine:
         # 최신화할 이유가 없고, 분봉 API 는 1회 호출로 900봉(≈2.3거래일)을 주므로
         # 장 마감 후 한 번만 불러도 그날치가 통째로 들어온다(eod_backfill_once).
         # 아낀 호출은 매매 대상의 감시 주기를 줄이는 데 쓸 수 있다.
-        for symbol in self._collect_targets():
+        # 보유 종목을 배치 앞에 두기 위해 장부에서 읽는다(DB 읽기, API 0콜).
+        try:
+            from ..trade import ledger as _ledger
+            self._backfill_held = _ledger.open_symbols()
+        except Exception:  # noqa: BLE001 - 실패하면 우선순위만 잃는다
+            self._backfill_held = set()
+        for symbol in self._backfill_batch(self._collect_targets()):
             await collector.backfill_minutes(symbol)
         # 신규 편입 종목의 과거 확보 — 단발 조회는 최근 900봉뿐이라 편입 당일에는
         # 백테스트 최소 일수를 못 채운다. 연속조회로 2주치를 끌어온다(종목당 1회).
@@ -613,6 +622,37 @@ class SignalEngine:
             except Exception:  # noqa: BLE001
                 log.exception("엔진 루프 오류")
             await asyncio.sleep(interval_sec or self.scan_interval())
+
+    def _backfill_batch(self, targets: list[str]) -> list[str]:
+        """이번 사이클에 분봉을 갱신할 종목 — **한 번에 다 부르지 않는다.**
+
+        사용자 결정(2026-07-30): 모든 주기의 우선순위는 매매 데스크다. 데스크가
+        2초를 지키려면 같은 예산을 쓰는 다른 호출을 줄여야 하고, 줄이는 방식은
+        **동시 조회 종목 수를 낮추는 것**이다.
+
+        실측 배경: 매매 tier 34종목 × 30초 사이클 = chart 68콜/분. 로스터·심층
+        백필이 겹쳐 149콜/분까지 올라 API 사용률이 90%가 됐고, 그 큐 뒤에서
+        데스크가 밀렸다.
+
+        라운드로빈이라 어떤 종목도 굶지 않는다 — n종목·배치 k면 각 종목이
+        ceil(n/k) 사이클마다 갱신된다. 보유 종목은 **항상 앞에 둔다**: 청산
+        판정이 걸린 종목의 분봉이 낡는 것은 다른 종목이 낡는 것과 무게가 다르다.
+
+        `backfill_per_cycle: 0` 이면 종전처럼 전부 부른다(되돌리기).
+        """
+        cap = int(settings.CONFIG.get("collection", {}).get("backfill_per_cycle", 0))
+        if cap <= 0 or len(targets) <= cap:
+            return targets
+        held = self._backfill_held or set()
+        first = [s for s in targets if s in held]
+        rest = [s for s in targets if s not in held]
+        room = max(0, cap - len(first))
+        if not rest or room == 0:
+            return first[:cap] if first else []
+        start = self._backfill_cursor % len(rest)
+        picked = (rest + rest)[start:start + room]
+        self._backfill_cursor = (start + room) % len(rest)
+        return first + picked
 
     @staticmethod
     def _collect_targets() -> list[str]:

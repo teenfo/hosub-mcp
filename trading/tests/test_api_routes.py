@@ -461,3 +461,71 @@ def test_gate_lookup_failure_does_not_block(client, monkeypatch):
     monkeypatch.setattr(watchlist, "add", lambda *a, **k: None)
     monkeypatch.setattr(watchlist, "notify", _noop_async())
     assert _post(client, "/api/watchlist", {"code": "005930"}).json()["ok"] is True
+
+
+# --- 레이트리밋 우선 레인: 데스크가 먼저 (2026-07-30 사용자 결정) ---
+
+def test_desk_calls_take_the_priority_lane():
+    """데스크 호출이 분봉 백필 뒤에 줄 서면 2초 주기가 이름만 남는다."""
+    import asyncio
+
+    from app.kiwoom.client import RateLimiter
+
+    async def run():
+        lim = RateLimiter(max_rps=10)          # interval 0.1s
+        order = []
+
+        async def normal(i):
+            await lim.wait()
+            order.append(f"n{i}")
+
+        async def urgent():
+            await asyncio.sleep(0.01)          # 일반 호출들이 먼저 대기에 들어간 뒤
+            await lim.wait(priority=True)
+            order.append("desk")
+
+        await asyncio.gather(*[normal(i) for i in range(6)], urgent())
+        return order
+
+    order = asyncio.run(run())
+    assert "desk" in order
+    # 6건 전부 뒤가 아니어야 한다 — 우선 레인이 있으면 중간에 끼어든다
+    assert order.index("desk") < 5, order
+
+
+def test_normal_calls_are_not_starved():
+    """양보는 늦추는 것이지 버리는 것이 아니다 — 상한이 없으면 백필이 굶는다."""
+    import asyncio
+
+    from app.kiwoom.client import RateLimiter
+
+    async def run():
+        lim = RateLimiter(max_rps=50)
+        done = []
+
+        async def desk_forever():
+            for _ in range(30):
+                await lim.wait(priority=True)
+
+        async def normal():
+            await lim.wait()
+            done.append(1)
+
+        await asyncio.wait_for(asyncio.gather(desk_forever(), normal()), timeout=5)
+        return done
+
+    assert asyncio.run(run()) == [1]
+
+
+def test_priority_counter_is_released_on_error():
+    """예외가 나도 대기 카운터가 남으면 일반 호출이 영구히 양보한다."""
+    import asyncio
+
+    from app.kiwoom.client import RateLimiter
+
+    async def run():
+        lim = RateLimiter(max_rps=100)
+        await lim.wait(priority=True)
+        return lim._priority_waiting
+
+    assert asyncio.run(run()) == 0
