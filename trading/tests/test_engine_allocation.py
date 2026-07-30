@@ -261,3 +261,54 @@ async def test_pending_order_fires_a_slack_notification(monkeypatch):
     assert len(sent) == 2, "자금이 모자란 건도 알린다"
     assert any("종목000100" in t for t in sent)
     assert any("🟡" in t for t in sent), "자금 부족은 제목에 드러난다"
+
+
+# --- 조회 부하 축소: 동시 조회 종목 수를 낮춘다 (2026-07-30 사용자 결정) ---
+#
+# 모든 주기의 우선순위는 매매 데스크다. 데스크가 2초를 지키려면 같은 예산을 쓰는
+# 다른 호출을 줄여야 하고, 줄이는 방식은 **동시 조회 종목 수**를 낮추는 것이다.
+
+def _eng():
+    return SignalEngine(equity=1_000_000)
+
+
+def test_batch_returns_all_when_disabled(monkeypatch):
+    """0 이면 종전대로 전부 — 되돌리기 경로가 살아 있어야 한다."""
+    monkeypatch.setitem(settings.CONFIG, "collection", {"backfill_per_cycle": 0})
+    targets = [f"{i:06d}" for i in range(20)]
+    assert _eng()._backfill_batch(targets) == targets
+
+
+def test_batch_caps_the_count(monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "collection", {"backfill_per_cycle": 5})
+    got = _eng()._backfill_batch([f"{i:06d}" for i in range(20)])
+    assert len(got) == 5
+
+
+def test_batch_rotates_so_nothing_starves(monkeypatch):
+    """라운드로빈 — n종목·배치 k면 ceil(n/k) 사이클에 전부 한 번씩 돈다."""
+    monkeypatch.setitem(settings.CONFIG, "collection", {"backfill_per_cycle": 4})
+    e = _eng()
+    targets = [f"{i:06d}" for i in range(12)]
+    seen = set()
+    for _ in range(3):
+        seen |= set(e._backfill_batch(targets))
+    assert seen == set(targets), "3사이클에 12종목 전부 돌아야 한다"
+
+
+def test_held_symbols_are_always_in_the_batch(monkeypatch):
+    """청산 판정이 걸린 종목의 분봉이 낡는 것은 다른 종목과 무게가 다르다."""
+    monkeypatch.setitem(settings.CONFIG, "collection", {"backfill_per_cycle": 3})
+    e = _eng()
+    e._backfill_held = {"000011"}
+    targets = [f"{i:06d}" for i in range(20)]
+    for _ in range(6):
+        assert "000011" in e._backfill_batch(targets)
+
+
+def test_batch_never_exceeds_cap_even_with_many_holdings(monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "collection", {"backfill_per_cycle": 2})
+    e = _eng()
+    e._backfill_held = {"000001", "000002", "000003"}
+    got = e._backfill_batch([f"{i:06d}" for i in range(10)])
+    assert len(got) == 2 and set(got) <= e._backfill_held

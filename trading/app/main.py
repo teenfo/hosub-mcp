@@ -232,7 +232,8 @@ async def _desk_rest_price(symbol: str) -> float | None:
     from .kiwoom.quote import parse_quote
 
     try:
-        q = parse_quote(await client.quote(symbol))
+        # 우선 레인 — 데스크 호출은 분봉 백필·순위 조회를 앞지른다
+        q = parse_quote(await client.quote(symbol, priority=True))
     except Exception:  # noqa: BLE001
         log.warning("데스크 REST 시세 실패 %s", symbol)
         return None
