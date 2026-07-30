@@ -78,6 +78,52 @@ def test_스윕_격자는_30에서_시작한다(env):
 
 
 # --------------------------------------------------------------------------
+# live — 지금 실서버에 걸린 값 그대로
+# --------------------------------------------------------------------------
+def test_live_는_격자가_아니라_실제_설정을_쓴다(env, monkeypatch):
+    """`tighten_at` 을 화면에서 바꾸면 격자의 어느 점과도 안 맞는다.
+
+    실측(2026-07-30): 격자 `lock30` 은 0.5 인데 실서버는 0.15 였다. 가까운 점으로
+    대신 답하면 '전환이 언제 걸리나' 가 통째로 달라진다 — 진입 10,000·목표 10,400
+    에서 0.15 는 10,060 부터, 0.5 는 10,200 부터다.
+    """
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": True, "trail_target": False,
+        "tighten_at": 0.15, "lock_gain_pct": 30, "max_gain_pct": 3.0}})
+    got = trailing.live_cfg()
+    assert got["tighten_at"] == 0.15
+    assert got["lock_gain_pct"] == 30.0
+    assert got["trail_target"] is False
+
+    # 10,100(상승 100) — 전환선 10,060 을 넘었으므로 확정 계산이 걸린다.
+    # 확정선 10,030 vs 갭 추종 9,900 → 확정선. lock30(전환 0.5)은 미도달이라 9,900.
+    settings.CONFIG["execution"]["desk"] = trailing._cfg_of(trailing.LIVE, got)
+    assert trailing._lines(10_000.0, 9_800.0, 10_400.0, "long",
+                           9_800.0, 10_400.0, 10_100)[0] == 10_030.0
+    assert _lines_at("lock30", 10_100)[0] == 9_900.0
+
+
+def test_live_는_추종이_꺼져_있으면_fixed_와_같다(env, monkeypatch):
+    """꺼진 것을 켠 것처럼 보여주지 않는다 — 지금 세팅이 곧 답이다."""
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": False, "tighten_at": 0.15}})
+    assert trailing._cfg_of(trailing.LIVE, trailing.live_cfg()) is None
+
+
+def test_live_는_실거래_투사의_기본_항목이다(env, monkeypatch):
+    """되풀이해 묻는 질문이라 부를 때마다 이름을 지정하게 두지 않는다.
+
+    반대로 **합성 스윕 격자(`variants`)는 오염시키지 않는다** — 그쪽은 격자 모양을
+    읽는 도구이고, 실서버 값 하나가 끼면 곡선의 축이 흔들린다.
+    """
+    assert trailing.LIVE not in trailing.variants()
+    monkeypatch.setattr("app.trade.ledger.positions", lambda **kw: [])
+    got = trailing.analyze_real(day="2026-07-30")
+    assert trailing.LIVE in got["policies"]
+    assert got["live_cfg"]["tighten_at"] is not None
+
+
+# --------------------------------------------------------------------------
 # 재생 — 답을 아는 봉으로
 # --------------------------------------------------------------------------
 def _bars(closes, day="2026-07-20"):
