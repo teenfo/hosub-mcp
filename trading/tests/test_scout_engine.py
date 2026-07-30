@@ -278,16 +278,25 @@ def test_snapshot_protects_everything_when_ledger_fails(monkeypatch):
 # 실측 기준 하루 1~2종목.
 
 def _quoter(monkeypatch, calls, fail=()):
+    """시세 조회를 가로챈다.
+
+    2026-07-30: 종목당 1콜(ka10006)에서 **묶음 1콜**(ka10095)로 바꿨다. full
+    전환 직후 mrkcond 가 분당 72~85콜까지 올라 전체 예산의 절반을 먹었다.
+    `calls` 는 이제 '조회된 종목' 을 그대로 담는다 — 호출 횟수가 아니라 어느
+    종목이 조회됐는지가 이 테스트들이 확인하려던 것이다.
+    """
     from app.kiwoom import client as kc
 
-    async def q(code):
-        calls.append(code)
-        if code in fail:
+    async def wi(codes):
+        calls.extend(codes)
+        if any(c in fail for c in codes):
             raise RuntimeError("조회 실패")
-        return {"return_code": 0, "close_pric": "-10100", "flu_rt": "-1.5",
-                "cntr_str": "88.8", "trde_qty": "1000"}
+        return {"return_code": 0, "atn_stk_infr": [
+            {"stk_cd": c, "stk_nm": f"종목{c}", "cur_prc": "-10100",
+             "flu_rt": "-1.5", "cntr_str": "88.8", "trde_qty": "1000",
+             "trde_prica": "5000"} for c in codes]}
 
-    monkeypatch.setattr(kc.client, "quote", q)
+    monkeypatch.setattr(kc.client, "watch_info", wi)
     monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "K")
     # 장중이어야 한다 — 밖이면 아무것도 안 부르고 테스트가 공허해진다
     monkeypatch.setattr(promote, "in_session", lambda now=None: True)

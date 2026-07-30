@@ -236,7 +236,19 @@ async def _desk_rest_price(symbol: str) -> float | None:
     except Exception:  # noqa: BLE001
         log.warning("데스크 REST 시세 실패 %s", symbol)
         return None
-    return float(q["price"]) if q else None
+    if not q:
+        return None
+    px = float(q["price"])
+    # **받은 값을 aggregator 에 넣는다.** 종전에는 데스크만 쓰고 버렸다. 그러면
+    # `_price_of` 의 스냅샷이 계속 비어 DB 분봉 종가로 폴백하고, WS 틱이 오지
+    # 않는 종목(실측: KODEX 인버스 등 ETF)은 화면 가격이 백필 주기까지 **고정**
+    # 된다. 데스크가 2초마다 조회하는데 화면은 안 움직이는 것이 그 증상이었다.
+    #
+    # 이미 지불한 콜의 결과다 — 버릴 이유가 없다. `on_tick` 이 아니라 전용
+    # 경로로 넣어 WS 신선도(`_seen`)를 오염시키지 않는다 — 그러면 데스크 요약의
+    # `WS x · REST y` 가 거짓이 되어 WS 생사를 못 가린다.
+    aggregator.apply_rest_price(symbol, px)
+    return px
 
 
 async def _desk_loop() -> None:
