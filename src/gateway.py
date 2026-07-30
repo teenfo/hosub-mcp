@@ -187,6 +187,33 @@ def compare_models(prompt: str, models: list, *, system: str | None = None,
                  client_factory=client_factory)
 
 
+def integration_doc(*, client_factory=httpx.Client) -> dict:
+    """소비자용 통합 가이드(마크다운) 원문.
+
+    _call 을 쓰지 않는다 — 이 엔드포인트만 JSON 이 아니라 text/markdown 을
+    돌려주므로 res.json() 이 터진다. 대시보드가 렌더할 수 있게 dict 로 감싼다.
+    """
+    token = _token()
+    if not token:
+        return _unconfigured()
+    url = f"{base_url()}/v1/integration"
+    try:
+        with client_factory(timeout=TIMEOUT) as client:
+            res = client.request("GET", url,
+                                 headers={"Authorization": f"Bearer {token}"})
+            if res.status_code >= 400:
+                return {"status": "error", "http_status": res.status_code,
+                        "error": res.text[:200]}
+            text = res.text
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "hint": f"게이트웨이({base_url()})가 떠 있는지 확인하세요.",
+        }
+    return {"status": "ok", "markdown": text, "bytes": len(text.encode("utf-8"))}
+
+
 def get_comparison(run_id: str, *, client_factory=httpx.Client) -> dict:
     return _call("GET", f"/v1/admin/compare/{quote(run_id, safe='')}",
                  client_factory=client_factory)

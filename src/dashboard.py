@@ -354,6 +354,16 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         return JSONResponse(await run_in_threadpool(
             gateway.get_comparison, request.path_params["run_id"]))
 
+    async def api_llm_integration(request):
+        """소비자용 통합 가이드 원문.
+
+        브라우저가 게이트웨이를 직접 부르면 소비자 토큰이 노출되므로 여기서
+        프록시한다(게이트웨이의 /v1/integration 은 인증을 요구한다).
+        """
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(gateway.integration_doc))
+
     # --- 모델 운영 (게이트웨이 /v1/admin/*) ---
     async def api_llm_installed(request):
         """맥에 설치된 모델 + 용량 + 쓰는 역할 + 최근 사용 + 삭제 차단 사유."""
@@ -556,6 +566,7 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/llm/roles", api_llm_role_revert, methods=["DELETE"]),
         Route("/api/llm/compare", api_llm_compare, methods=["POST"]),
         Route("/api/llm/compare/{run_id}", api_llm_compare_get),
+        Route("/api/llm/integration", api_llm_integration),
         Route("/api/llm/installed", api_llm_installed),
         Route("/api/llm/catalog", api_llm_catalog),
         Route("/api/llm/models/install", api_llm_model_install, methods=["POST"]),

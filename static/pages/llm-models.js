@@ -85,6 +85,24 @@ export default {
     catCol.appendChild(catCard);
     row.appendChild(catCol);
 
+    // --- 통합 가이드 (소비자에게 전달하는 URL) ---
+    //
+    // 소비 프로젝트(roxlogy 등)는 레포가 아니라 이 URL 을 참조한다. 계약이 두 곳에
+    // 있으면 반드시 어긋나므로, 문서를 복사해 주지 말고 URL 을 주는 것이 맞다.
+    const docCol = el("div", { class: "col-12" });
+    const docCard = el("div", { class: "card shadow-sm" }, [
+      el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
+        el("span", { html: '<i class="bi bi-link-45deg"></i> 통합 가이드 URL' }),
+        el("span", { class: "badge text-bg-secondary d-none", id: "doc-size" }),
+        el("span", { class: "small text-secondary ms-auto" },
+          "소비 프로젝트에 이 URL 을 주면 항상 최신 계약을 받습니다"),
+      ]),
+    ]);
+    const docBody = el("div", { class: "card-body" });
+    docCard.appendChild(docBody);
+    docCol.appendChild(docCard);
+    row.appendChild(docCol);
+
     // --- A/B 비교 ---
     const abCol = el("div", { class: "col-12" });
     const abCard = el("div", { class: "card shadow-sm" }, [
@@ -288,6 +306,121 @@ export default {
       }
     };
 
+    // --- 통합 가이드 렌더 ---
+    const copyBtn = (text, label = "복사") => {
+      const b = el("button",
+        { class: "btn btn-sm btn-outline-secondary", type: "button" }, label);
+      b.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(text);
+          b.textContent = "복사됨";
+        } catch (e) {
+          b.textContent = "복사 실패";
+        }
+        setTimeout(() => { b.textContent = label; }, 1500);
+      });
+      return b;
+    };
+
+    const urlRow = (label, url, note) =>
+      el("div", { class: "mb-3" }, [
+        el("div", { class: "small text-secondary mb-1" }, label),
+        el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+          el("code", {
+            class: "mono border rounded px-2 py-1 flex-grow-1",
+            style: "word-break:break-all",
+          }, url),
+          copyBtn(url),
+        ]),
+        note ? el("div", { class: "form-text small" }, note) : null,
+      ]);
+
+    const renderDocCard = () => {
+      docBody.innerHTML = "";
+
+      // 공개 URL 은 이 대시보드가 열려 있는 origin 에서 유도한다 — Caddy 가
+      // 대시보드와 /llm 을 같은 호스트로 서빙하므로 공개 주소로 볼 때 정확하다.
+      // (127.0.0.1:8701 로 직접 열었다면 그 주소가 나오므로 아래에 명시한다)
+      const publicUrl = `${window.location.origin}/llm/v1/integration`;
+      const isLocal = /^https?:\/\/(127\.0\.0\.1|localhost)/.test(window.location.origin);
+
+      docBody.appendChild(urlRow(
+        "소비자에게 전달할 URL (Bearer 토큰 필요)", publicUrl,
+        isLocal
+          ? "⚠️ 지금 대시보드를 로컬 주소로 열었기 때문에 위 주소도 로컬입니다. "
+            + "외부에 줄 주소는 공인 도메인(https://…/llm/v1/integration)입니다."
+          : "이 대시보드와 같은 호스트 기준입니다."));
+
+      docBody.appendChild(urlRow(
+        "서버 내부용 (hosub·TNM·trading)", "http://127.0.0.1:8603/v1/integration",
+        "Caddy 를 거치지 않습니다. 관리 API(/v1/admin/*)도 이 주소로만 닿습니다."));
+
+      const curl = `curl -H "Authorization: Bearer $LLMGW_TOKEN" \\\n     ${publicUrl}`;
+      docBody.appendChild(el("div", { class: "mb-3" }, [
+        el("div", { class: "small text-secondary mb-1" }, "전달용 명령"),
+        el("pre", {
+          class: "border rounded p-2 mb-1 small mono",
+          style: "white-space:pre-wrap; word-break:break-all",
+        }, curl),
+        el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+          copyBtn(curl, "명령 복사"),
+          el("span", { class: "form-text small mb-0" },
+            "토큰 값은 표시하지 않습니다 — .env 의 서비스별 토큰을 쓰세요."),
+        ]),
+      ]));
+
+      // 문서 원문 — 접힌 상태로 두고 눌렀을 때만 가져온다.
+      // 20KB 가 넘어 기본 노출하면 페이지를 잡아먹는다.
+      const viewBtn = el("button",
+        { class: "btn btn-sm btn-primary", type: "button" }, "문서 보기");
+      const docOut = el("div", { class: "mt-2" });
+      docBody.appendChild(el("div", { class: "d-flex gap-2 flex-wrap" }, [viewBtn]));
+      docBody.appendChild(docOut);
+
+      let shown = false;
+      viewBtn.addEventListener("click", async () => {
+        if (shown) {
+          docOut.innerHTML = "";
+          shown = false;
+          viewBtn.textContent = "문서 보기";
+          return;
+        }
+        viewBtn.disabled = true;
+        docOut.innerHTML = "";
+        docOut.appendChild(spinner("게이트웨이에서 문서를 가져오는 중…"));
+        try {
+          const d = await fetchJSON("/api/llm/integration");
+          docOut.innerHTML = "";
+          if (d.status !== "ok") {
+            docOut.appendChild(alertBox("warning", "문서를 가져오지 못했습니다",
+              d.error || d.reason || d.hint));
+            return;
+          }
+          const sizeBadge = docCard.querySelector("#doc-size");
+          sizeBadge.textContent = `${(d.bytes / 1024).toFixed(1)}KB`;
+          sizeBadge.classList.remove("d-none");
+          // 표·코드펜스가 많은 문서라 마크다운 렌더 대신 원문을 그대로 보여준다.
+          // 반쯤 깨진 표보다 원문이 읽기 쉽고, 그대로 복사해 쓸 수도 있다.
+          docOut.appendChild(el("pre", {
+            class: "border rounded p-3 mb-0 small mono",
+            style: "white-space:pre-wrap; word-break:break-word; "
+              + "max-height:520px; overflow:auto",
+          }, d.markdown || ""));
+          docOut.appendChild(el("div", { class: "mt-2" },
+            copyBtn(d.markdown || "", "문서 전체 복사")));
+          shown = true;
+          viewBtn.textContent = "접기";
+        } catch (e) {
+          docOut.innerHTML = "";
+          if (e.message !== "unauthorized") {
+            docOut.appendChild(alertBox("danger", "문서 조회 실패", e.message));
+          }
+        } finally {
+          viewBtn.disabled = false;
+        }
+      });
+    };
+
     // --- A/B 비교 실행 ---
     const fillAbSelects = (names) => {
       for (const [sel, def] of [[abA, 0], [abB, 1]]) {
@@ -401,6 +534,7 @@ export default {
     instCard.querySelector("#mdl-refresh").addEventListener("click", () =>
       Promise.all([loadInstalled(), loadCatalog()]));
 
+    renderDocCard();   // 정적이라 폴링하지 않는다
     instBody.appendChild(spinner("맥에서 모델 목록을 읽는 중…"));
     await Promise.all([loadInstalled(), loadCatalog()]);
     // 설치가 끝나면 목록에 나타나야 하므로 주기 갱신(카탈로그는 정적이라 제외)

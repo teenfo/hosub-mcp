@@ -353,6 +353,35 @@ def test_llm_generate_passes_system_through(client, monkeypatch):
     assert seen["system"] == ""
 
 
+def test_integration_doc_needs_login(client):
+    assert client.get("/api/llm/integration").status_code == 401
+
+
+def test_integration_doc_proxied_as_markdown(client, monkeypatch):
+    """게이트웨이는 JSON 이 아니라 text/markdown 을 준다 — 전용 경로가 필요하다."""
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "integration_doc", lambda: {
+        "status": "ok", "markdown": "# 소비 프로젝트 통합 가이드\n\n본문", "bytes": 42,
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/llm/integration").json()
+    assert d["status"] == "ok"
+    assert d["markdown"].startswith("# 소비 프로젝트 통합 가이드")
+    assert d["bytes"] == 42
+
+
+def test_integration_doc_surfaces_gateway_error(client, monkeypatch):
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "integration_doc", lambda: {
+        "status": "error", "error": "ConnectError: 연결 실패", "hint": "게이트웨이 확인",
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/llm/integration").json()
+    assert d["status"] == "error" and "연결 실패" in d["error"]
+
+
 def test_catalog_search_passes_query(client, monkeypatch):
     from src import gateway
 
