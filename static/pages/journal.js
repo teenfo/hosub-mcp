@@ -183,10 +183,19 @@ export default {
               [`${fmt(p.entry)} → ${fmt(p.exit)}`,
                p.exit_fill_confirmed ? null
                  : el("span", { class: "text-secondary" }, " ~")]),
-            el("td", {}, el("span", {
-              class: "badge text-bg-" + (p.exit_reason === "target" ? "danger"
-                : p.exit_reason === "stop" ? "primary" : "secondary") },
-              REASON_KO[p.exit_reason] || p.exit_reason)),
+            // 결과(익절/손절)는 **실제 손익 부호**로 정한다 — 사유가 손절이어도
+            // 이익이면 익절이다. 기계적 사유는 그 뒤에 작게 남긴다: 목표에 닿은
+            // 이익과 올라간 손절선에 닿은 이익은 다음에 볼 곳이 다르다.
+            el("td", { class: "text-nowrap" }, [
+              el("span", {
+                class: "badge text-bg-" + (p.outcome === "익절" ? "danger"
+                  : p.outcome === "손절" ? "primary" : "secondary"),
+                title: "실제 손익 부호로 정한 결과" },
+                p.outcome || "—"),
+              el("span", { class: "text-secondary ms-1", style: "font-size:.72rem",
+                title: "청산이 실제로 발동된 기계적 사유" },
+                REASON_KO[p.exit_reason] || p.exit_reason || ""),
+            ]),
             el("td", { class: "text-end fw-semibold " + plCls(p.pnl_pct) },
               `${pct(Number(p.pnl_pct || 0).toFixed(2))} (${won(p.pnl_krw)})`),
           ]));
@@ -194,7 +203,8 @@ export default {
         const tbl = el("table", { class: "table table-sm small mb-0" });
         tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th>" +
           "<th class='text-end'>수량</th><th class='text-end'>진입→청산</th>" +
-          "<th>사유</th><th class='text-end'>손익</th></tr>" }));
+          "<th>결과 <span class='fw-normal text-secondary'>· 사유</span></th>" +
+          "<th class='text-end'>손익</th></tr>" }));
         tbl.appendChild(tb);
         dayBody.appendChild(el("div", { class: "mb-3" }, [
           el("div", { class: "fw-semibold small mb-1" }, "청산 내역"),

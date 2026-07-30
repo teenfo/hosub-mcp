@@ -155,10 +155,28 @@ def facts(entry: dict) -> list[str]:
             f"승률 {t['win_rate']}%, 실현손익 {t['pnl_krw']:,.0f}원, "
             f"건당 기대값 {t['expectancy_pct']:+.2f}%.")
 
+        # 결과를 사유보다 **먼저** 적는다. 사유만 보면 올라간 손절선에서 이익으로
+        # 끝난 건까지 손실로 읽힌다(사용자 지침 2026-07-30).
+        oc = entry.get("by_outcome") or {}
+        if oc:
+            out.append("결과: " + " · ".join(
+                f"{k} {v['trades']}건({v['pnl_krw']:+,.0f}원)"
+                for k, v in oc.items()) + ".")
+
         reasons = entry["by_exit_reason"]
         parts = [f"{k} {v['trades']}건" for k, v in reasons.items()]
         if parts:
-            out.append("청산 사유: " + " · ".join(parts) + ".")
+            out.append("청산 사유(기계적 구분 — 결과와 다를 수 있다): "
+                       + " · ".join(parts) + ".")
+        # 사유는 `stop` 인데 결과는 익절인 건. 라인 추종이 실제로 일한 자리다.
+        won_by_stop = [p for p in entry["positions"]
+                       if p.get("exit_reason") == "stop" and p.get("outcome") == "익절"]
+        if won_by_stop:
+            got = sum(float(p.get("pnl_krw") or 0) for p in won_by_stop)
+            out.append(
+                f"손절선에서 이익으로 끝난 건 {len(won_by_stop)}건({got:+,.0f}원) — "
+                "라인 추종이 손절선을 진입가 위로 올린 결과다. 사유는 손절이지만 "
+                "익절로 센다.")
         eod = reasons.get("eod", {}).get("trades", 0)
         if eod and eod >= t["trades"] / 2:
             out.append(
@@ -265,9 +283,12 @@ def summary_prompt(entry: dict) -> str:
     if entry["positions"]:
         lines += ["", "청산 내역:"]
         for p in entry["positions"][:20]:
+            # 결과(익절/손절)를 앞에, 기계적 사유를 괄호에 둔다. 모델이 사유만
+            # 보고 "손절 N건" 이라 쓰면 이익으로 끝난 건까지 손실로 요약한다.
+            why = p.get("exit_reason") or "?"
             lines.append(
                 f"- {p.get('name') or p.get('symbol')} / {p.get('rule')} / "
-                f"{p.get('exit_reason')} / {p.get('pnl_pct'):+.2f}%")
+                f"{p.get('outcome') or '?'}({why}) / {p.get('pnl_pct'):+.2f}%")
     return "\n".join(lines)
 
 
@@ -299,6 +320,11 @@ def build(day: str | None = None) -> dict:
         "trades": _agg(closed),
         "by_rule": _by(closed, "rule"),
         "by_exit_reason": _by(closed, "exit_reason"),
+        # 결과 구분(익절/손절/본전)은 **실제 손익 부호**로 정한다 — 사유가 `stop`
+        # 이어도 이익이면 익절이다(사용자 지침 2026-07-30, ledger.outcome 참조).
+        # `by_exit_reason` 을 대체하지 않고 나란히 둔다: 사유는 무엇을 고칠지,
+        # 결과는 그날 벌었는지를 답하는 서로 다른 질문이다.
+        "by_outcome": _by(closed, "outcome"),
         "by_hour": {str(h): _agg([r for r in closed if _hour_of(r.get("opened")) == h])
                     for h in sorted({_hour_of(r.get("opened")) for r in closed}
                                     - {None})},

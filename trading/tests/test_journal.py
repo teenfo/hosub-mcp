@@ -83,6 +83,44 @@ def test_build_aggregates_closed_trades(db):
     assert entry["by_rule"]["orb"]["trades"] == 2
 
 
+# --- 결과 구분 — 사유가 손절이어도 이익이면 익절이다 ---
+#
+# 사용자 지침(2026-07-30): "실제 손익이 + 이면, 청산 사유가 손절라인 근접이어도
+# 익절로 표기한다." 라인 추종이 손절선을 진입가 위로 올리면 그 선에 닿아 나온 것도
+# 이익이다. 사유 이름만 세면 "손절이 늘었다" 로 잘못 읽는다.
+
+def test_손절선에서_이익으로_끝나면_익절로_센다(db):
+    ledger.open_position(_order("w1", entry=10_000, stop=9_800), fill=10_000)
+    pid = ledger.positions(status="open")[0]["id"]
+    # 라인 추종이 손절선을 진입가 위로 올린 뒤 그 선에서 청산됐다.
+    # 데스크가 실제로 하는 것과 같은 경로다 — 사유는 stop, 결과는 이익.
+    ledger.set_lines(pid, 10_300, None)
+    ledger.close_position(pid, 10_250, "stop")
+    p = ledger.positions(status="closed")[0]
+    assert p["exit_reason"] == "stop", "기계적 사유는 덮어쓰지 않는다"
+    assert p["pnl_krw"] > 0
+    assert p["outcome"] == "익절"
+
+    day = p["closed"][:10]
+    e = journal.build(day)
+    assert e["by_outcome"]["익절"]["trades"] == 1
+    assert e["by_exit_reason"]["stop"]["trades"] == 1, "사유 집계는 그대로 남는다"
+    assert any("손절선에서 이익" in f for f in e["facts"])
+    assert "익절(stop)" in journal.summary_prompt(e)
+
+
+def test_결과_구분은_손익_부호를_따른다(db):
+    ledger.open_position(_order("l1"), fill=10_000)
+    ledger.monitor(lambda s: 9_700)
+    assert ledger.positions(status="closed")[0]["outcome"] == "손절"
+
+
+def test_청산_전에는_결과가_없다(db):
+    ledger.open_position(_order("o1"), fill=10_000)
+    assert ledger.positions(status="open")[0]["outcome"] is None, \
+        "없는 결과를 만들지 않는다"
+
+
 def test_build_counts_blocked_signals(db):
     journal.record_signal("2026-07-27", _rec(actionable=True))
     journal.record_signal("2026-07-27", _rec(symbol="000660", actionable=False,
