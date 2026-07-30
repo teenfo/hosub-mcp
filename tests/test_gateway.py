@@ -282,3 +282,62 @@ async def test_status_and_roles_tools_use_gateway(mcp_server, monkeypatch):
     assert (await _call(mcp_server, "llm_status", {}))["backend"]["online"] is True
     out = await _call(mcp_server, "llm_list_roles", {})
     assert "roles.yaml" in out["hint"]              # 비었을 때 어디를 고칠지 알려준다
+
+
+# --- 통합 가이드 (유일하게 JSON 이 아닌 엔드포인트) ---
+class MarkdownResponse:
+    """text/markdown 응답. json() 을 부르면 터진다 — 실제 게이트웨이와 같다."""
+
+    def __init__(self, text, status=200):
+        self.text = text
+        self.status_code = status
+        self.content = text.encode()
+
+    def json(self):
+        raise ValueError("not json")
+
+
+class MarkdownClient:
+    text = "# 소비 프로젝트 통합 가이드\n\n한글 본문"
+    status = 200
+    calls: list = []
+
+    def __init__(self, timeout=None):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def request(self, method, url, json=None, headers=None):
+        MarkdownClient.calls.append((method, url, headers))
+        return MarkdownResponse(MarkdownClient.text, MarkdownClient.status)
+
+
+def test_integration_doc_returns_markdown_not_json():
+    MarkdownClient.calls = []
+    MarkdownClient.status = 200
+    out = gateway.integration_doc(client_factory=MarkdownClient)
+    assert out["status"] == "ok"
+    assert out["markdown"].startswith("# 소비 프로젝트 통합 가이드")
+    # 바이트 수는 UTF-8 기준 — 한글이 있으면 글자 수보다 크다
+    assert out["bytes"] == len(MarkdownClient.text.encode("utf-8"))
+    assert out["bytes"] > len(MarkdownClient.text)
+    method, url, headers = MarkdownClient.calls[0]
+    assert method == "GET" and url.endswith("/v1/integration")
+    assert headers["Authorization"].startswith("Bearer ")
+
+
+def test_integration_doc_reports_http_error():
+    MarkdownClient.calls = []
+    MarkdownClient.status = 401
+    out = gateway.integration_doc(client_factory=MarkdownClient)
+    assert out["status"] == "error" and out["http_status"] == 401
+
+
+def test_integration_doc_unconfigured_without_token(monkeypatch):
+    monkeypatch.delenv("LLMGW_TOKEN_HOSUB", raising=False)
+    out = gateway.integration_doc(client_factory=MarkdownClient)
+    assert out["status"] == "unconfigured"
