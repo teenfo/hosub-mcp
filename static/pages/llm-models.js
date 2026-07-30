@@ -92,10 +92,10 @@ export default {
     const docCol = el("div", { class: "col-12" });
     const docCard = el("div", { class: "card shadow-sm" }, [
       el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
-        el("span", { html: '<i class="bi bi-link-45deg"></i> 통합 가이드 URL' }),
+        el("span", { html: '<i class="bi bi-link-45deg"></i> 소비자에게 줄 것' }),
         el("span", { class: "badge text-bg-secondary d-none", id: "doc-size" }),
         el("span", { class: "small text-secondary ms-auto" },
-          "소비 프로젝트에 이 URL 을 주면 항상 최신 계약을 받습니다"),
+          "토큰 하나면 클라이언트·계약·스펙을 스스로 받아갑니다"),
       ]),
     ]);
     const docBody = el("div", { class: "card-body" });
@@ -335,8 +335,97 @@ export default {
         note ? el("div", { class: "form-text small" }, note) : null,
       ]);
 
+    // 문자열을 파일로 저장한다. 게이트웨이 응답은 JSON 에 담겨 오므로
+    // (src/gateway.py 의 모든 함수가 dict 를 돌려준다) 브라우저에서 Blob 으로
+    // 되돌린다 — 대시보드에 다운로드 라우트를 만들지 않는 이유다.
+    const saveText = (filename, text) => {
+      const url = URL.createObjectURL(
+        new Blob([text], { type: "text/plain;charset=utf-8" }));
+      const a = el("a", { href: url, download: filename });
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+
+    const saveBtn = (label, apiPath, filename) => {
+      const b = el("button",
+        { class: "btn btn-sm btn-outline-primary", type: "button" }, label);
+      b.addEventListener("click", async () => {
+        const was = b.textContent;
+        b.disabled = true;
+        b.textContent = "받는 중…";
+        try {
+          const d = await fetchJSON(apiPath);
+          if (d.status !== "ok") throw new Error(d.error || d.reason || d.hint);
+          saveText(filename, d.text || "");
+          b.textContent = "저장됨";
+        } catch (e) {
+          if (e.message !== "unauthorized") b.textContent = "실패";
+        } finally {
+          setTimeout(() => { b.textContent = was; b.disabled = false; }, 1500);
+        }
+      });
+      return b;
+    };
+
+    // 클라이언트 최신성 — 이 카드에서 가장 값어치 있는 정보다.
+    //
+    // llmgw.py 에는 버전 문자열이 없고, 정본(llm-gateway/client/)과 사본 둘
+    // (trading/app/·tnm/app/)을 비교하는 장치가 레포에 없다. 게이트웨이가
+    // 서빙하는 바이트의 sha256 이 사본이 뒤처졌는지 아는 유일한 관측점이다.
+    const renderClientMeta = (host) => {
+      host.innerHTML = "";
+      host.appendChild(spinner("계약 메타데이터를 가져오는 중…"));
+      fetchJSON("/api/llm/meta").then((d) => {
+        host.innerHTML = "";
+        if (d.status !== "ok") {
+          host.appendChild(alertBox("warning", "메타데이터를 가져오지 못했습니다",
+            d.error || d.reason || d.hint));
+          return;
+        }
+        const py = ((d.client || {}).files || {}).python || {};
+        if (!py.available) {
+          host.appendChild(alertBox("warning", "클라이언트 파일이 이미지에 없습니다",
+            "Dockerfile 의 COPY client/ 를 확인하고 게이트웨이를 재빌드하세요."));
+          return;
+        }
+        host.appendChild(el("div", { class: "d-flex gap-3 flex-wrap align-items-center mb-2" }, [
+          el("div", {}, [
+            el("div", { class: "small text-secondary" }, "client/llmgw.py sha256"),
+            el("code", { class: "mono fs-6" }, String(py.sha256).slice(0, 12)),
+          ]),
+          el("div", {}, [
+            el("div", { class: "small text-secondary" }, "크기"),
+            el("span", { class: "mono" }, `${py.bytes} B`),
+          ]),
+          el("div", {}, [
+            el("div", { class: "small text-secondary" }, "계약 버전"),
+            badge(d.contract_version || "?", "secondary"),
+          ]),
+          el("div", { class: "ms-auto d-flex gap-2 flex-wrap" }, [
+            copyBtn(String(py.sha256), "해시 복사"),
+            saveBtn("llmgw.py 저장", "/api/llm/client?name=llmgw.py", "llmgw.py"),
+          ]),
+        ]));
+        host.appendChild(el("div", { class: "form-text small" },
+          "사본이 최신인지: 소비자 쪽에서 sha256sum llmgw.py 를 돌려 위 값과 "
+          + "비교합니다. trading·tnm 의 사본도 같은 방법으로 확인하세요."));
+      }).catch((e) => {
+        host.innerHTML = "";
+        if (e.message !== "unauthorized") {
+          host.appendChild(alertBox("danger", "메타데이터 조회 실패", e.message));
+        }
+      });
+    };
+
     const renderDocCard = () => {
       docBody.innerHTML = "";
+
+      // 최신성 표시를 카드 맨 앞에 둔다 — 다운로드 링크보다 이쪽이 값어치 있다.
+      const metaHost = el("div", { class: "mb-4 pb-3 border-bottom" });
+      docBody.appendChild(metaHost);
+      renderClientMeta(metaHost);
 
       // 공개 URL 은 이 대시보드가 열려 있는 origin 에서 유도한다 — Caddy 가
       // 대시보드와 /llm 을 같은 호스트로 서빙하므로 공개 주소로 볼 때 정확하다.
@@ -354,6 +443,47 @@ export default {
       docBody.appendChild(urlRow(
         "서버 내부용 (hosub·TNM·trading)", "http://127.0.0.1:8603/v1/integration",
         "Caddy 를 거치지 않습니다. 관리 API(/v1/admin/*)도 이 주소로만 닿습니다."));
+
+      // 같은 토큰으로 소비자가 스스로 받아가는 것들.
+      const gwBase = `${window.location.origin}/llm`;
+      docBody.appendChild(urlRow(
+        "파이썬 클라이언트 (한 파일)", `${gwBase}/v1/client/llmgw.py`,
+        "복사해서 쓰는 그 파일입니다. 목 서버는 /v1/client/mock_gateway.py."));
+      docBody.appendChild(urlRow(
+        "기계가 읽는 계약 (JSON)", `${gwBase}/v1/meta`,
+        "역할·한도·오류코드·클라이언트 해시. 엔드포인트 목록의 권위 있는 출처입니다."));
+      docBody.appendChild(urlRow(
+        "OpenAPI 3.1 스펙", `${gwBase}/v1/openapi.json`,
+        "파이썬이 아닌 소비자용. 토큰별로 생성되어 쓸 수 있는 역할만 담깁니다. "
+        + "?download=1 을 붙이면 파일로 내려받습니다."));
+
+      const docsUrl = `${gwBase}/v1/docs`;
+      docBody.appendChild(el("div", { class: "mb-3" }, [
+        el("div", { class: "small text-secondary mb-1" }, "브라우저 API 탐색기"),
+        el("div", { class: "d-flex gap-2 align-items-center flex-wrap" }, [
+          el("code", {
+            class: "mono border rounded px-2 py-1 flex-grow-1",
+            style: "word-break:break-all",
+          }, docsUrl),
+          copyBtn(docsUrl),
+          el("a", {
+            class: "btn btn-sm btn-outline-primary", href: docsUrl,
+            target: "_blank", rel: "noopener",
+          }, "열기"),
+        ]),
+        el("div", { class: "form-text small" },
+          "페이지는 인증 없이 열리고 화면에서 토큰을 받습니다. 개발용입니다 — "
+          + "Try it out 은 실제 요청이라 레이트리밋과 맥 GPU 를 소모합니다."),
+      ]));
+
+      docBody.appendChild(el("div", { class: "d-flex gap-2 flex-wrap mb-3" }, [
+        saveBtn("openapi.json 저장", "/api/llm/openapi?fmt=json",
+          "hosub-llm-gateway.openapi.json"),
+        saveBtn("openapi.yaml 저장", "/api/llm/openapi?fmt=yaml",
+          "hosub-llm-gateway.openapi.yaml"),
+        saveBtn("mock_gateway.py 저장", "/api/llm/client?name=mock_gateway.py",
+          "mock_gateway.py"),
+      ]));
 
       const curl = `curl -H "Authorization: Bearer $LLMGW_TOKEN" \\\n     ${publicUrl}`;
       docBody.appendChild(el("div", { class: "mb-3" }, [

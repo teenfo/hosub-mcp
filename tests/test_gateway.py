@@ -341,3 +341,66 @@ def test_integration_doc_unconfigured_without_token(monkeypatch):
     monkeypatch.delenv("LLMGW_TOKEN_HOSUB", raising=False)
     out = gateway.integration_doc(client_factory=MarkdownClient)
     assert out["status"] == "unconfigured"
+
+
+# --- 메타데이터 · 스펙 · 클라이언트 원본 ---
+#
+# 뒤 둘은 JSON 이 아니므로 _call 을 쓸 수 없다(res.json() 이 터진다).
+# integration_doc 과 같은 방식으로 문자열을 dict 에 감싸 넘긴다 — 모듈 규약이
+# "실패해도 예외 대신 status/error dict" 이기 때문이다.
+def test_meta_goes_through_the_normal_json_path():
+    out = gateway.meta(client_factory=FakeClient)
+    assert out["status"] == "ok"
+    method, url, _json, _headers = FakeClient.calls[-1]
+    assert method == "GET" and url.endswith("/v1/meta")
+
+
+def test_openapi_returns_raw_text():
+    MarkdownClient.calls = []
+    MarkdownClient.status = 200
+    MarkdownClient.text = "openapi: 3.1.0\ninfo:\n  title: 한글\n"
+    out = gateway.openapi("yaml", client_factory=MarkdownClient)
+    assert out["status"] == "ok"
+    assert out["text"].startswith("openapi: 3.1.0")
+    assert out["bytes"] == len(MarkdownClient.text.encode("utf-8"))
+    _method, url, _headers = MarkdownClient.calls[0]
+    assert url.endswith("/v1/openapi.yaml")
+
+
+def test_openapi_rejects_unknown_format():
+    out = gateway.openapi("xml", client_factory=MarkdownClient)
+    assert out["status"] == "error" and "json" in out["error"]
+
+
+def test_client_file_serves_the_two_known_names():
+    for name in ("llmgw.py", "mock_gateway.py"):
+        MarkdownClient.calls = []
+        MarkdownClient.status = 200
+        MarkdownClient.text = '"""공유 LLM 게이트웨이 클라이언트."""\n'
+        out = gateway.client_file(name, client_factory=MarkdownClient)
+        assert out["status"] == "ok", name
+        _method, url, _headers = MarkdownClient.calls[0]
+        assert url.endswith(f"/v1/client/{name}")
+
+
+def test_client_file_rejects_anything_else():
+    """게이트웨이가 리터럴 라우트 둘만 노출하므로 여기서도 허용 목록으로 막는다."""
+    for bad in ("../app/main.py", "secrets.py", "", "llmgw.py?x=1"):
+        out = gateway.client_file(bad, client_factory=MarkdownClient)
+        assert out["status"] == "error", bad
+
+
+def test_text_fetchers_report_http_error():
+    MarkdownClient.calls = []
+    MarkdownClient.status = 404
+    MarkdownClient.text = "not found"
+    out = gateway.client_file("llmgw.py", client_factory=MarkdownClient)
+    assert out["status"] == "error" and out["http_status"] == 404
+
+
+def test_text_fetchers_are_unconfigured_without_a_token(monkeypatch):
+    monkeypatch.delenv("LLMGW_TOKEN_HOSUB", raising=False)
+    assert gateway.openapi("json",
+                           client_factory=MarkdownClient)["status"] == "unconfigured"
+    assert gateway.client_file("llmgw.py",
+                              client_factory=MarkdownClient)["status"] == "unconfigured"

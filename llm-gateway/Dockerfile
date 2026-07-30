@@ -16,6 +16,9 @@ COPY docs/ ./docs/
 # /v1/client/llmgw.py · /v1/client/mock_gateway.py 로 서빙한다.
 COPY client/ ./client/
 COPY tools/ ./tools/
+# 브라우저용 API 탐색기(/v1/docs) + 벤더링한 swagger-ui.
+# 레포 정책이 외부 CDN 금지라 자산을 이미지에 담는다.
+COPY static/ ./static/
 
 ENV LLMGW_CONFIG_DIR=/app/config \
     LLMGW_DB=/data/llmgw.db \

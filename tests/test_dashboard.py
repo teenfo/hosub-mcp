@@ -395,3 +395,85 @@ def test_catalog_search_passes_query(client, monkeypatch):
     client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
     client.get("/api/llm/catalog?q=qwen&kind=embed")
     assert seen == {"query": "qwen", "kind": "embed"}
+
+
+# --- 계약 메타데이터 · 스펙 · 클라이언트 원본 ---
+#
+# 브라우저가 게이트웨이를 직접 부르면 소비자 토큰이 노출되므로 전부 여기서
+# 프록시한다. 순수 읽기라 감사 로그를 남기지 않는다(api_llm_integration 과 같은 취급).
+def test_meta_openapi_client_need_login(client):
+    for path in ("/api/llm/meta", "/api/llm/openapi", "/api/llm/client"):
+        assert client.get(path).status_code == 401, path
+
+
+def test_meta_exposes_the_client_hash(client, monkeypatch):
+    """화면에서 값어치 있는 것은 사본 드리프트를 잡는 sha256 이다."""
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "meta", lambda: {
+        "status": "ok", "contract_version": "1.0",
+        "client": {"files": {"python": {"available": True, "sha256": "abc123",
+                                       "bytes": 13736}}},
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/llm/meta").json()
+    assert d["client"]["files"]["python"]["sha256"] == "abc123"
+
+
+def test_openapi_passes_the_format(client, monkeypatch):
+    from src import gateway
+
+    seen = {}
+
+    def fake(fmt="json"):
+        seen["fmt"] = fmt
+        return {"status": "ok", "text": "openapi: 3.1.0\n", "bytes": 15}
+
+    monkeypatch.setattr(gateway, "openapi", fake)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    assert client.get("/api/llm/openapi?fmt=yaml").json()["status"] == "ok"
+    assert seen["fmt"] == "yaml"
+    client.get("/api/llm/openapi")
+    assert seen["fmt"] == "json"      # 기본값
+
+
+def test_client_source_is_carried_inside_json(client, monkeypatch):
+    """비-JSON 을 그대로 태울 수 없으므로 문자열로 감싸 넘긴다."""
+    from src import gateway
+
+    seen = {}
+
+    def fake(name="llmgw.py"):
+        seen["name"] = name
+        return {"status": "ok", "text": '"""클라이언트."""\n', "bytes": 20}
+
+    monkeypatch.setattr(gateway, "client_file", fake)
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/llm/client?name=mock_gateway.py").json()
+    assert d["text"].startswith('"""클라이언트."""')
+    assert seen["name"] == "mock_gateway.py"
+
+
+def test_contract_reads_are_not_audited(monkeypatch, audit):
+    """조회는 감사 로그를 남기지 않는다 — 변경 계열만 남긴다."""
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "meta", lambda: {"status": "ok"})
+    monkeypatch.setattr(gateway, "openapi", lambda fmt="json": {"status": "ok"})
+    monkeypatch.setattr(gateway, "client_file",
+                        lambda name="llmgw.py": {"status": "ok"})
+    app = build_app(
+        registry=Registry.from_dict(REG),
+        runner=FakeRunner(),
+        audit=audit,
+        mcp_token=TOKEN,
+        dash_password=PASSWORD,
+        session_secret="session-secret-abcdefgh",
+    )
+    with TestClient(app) as c:
+        c.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+        before = len(audit.recent(50))
+        c.get("/api/llm/meta")
+        c.get("/api/llm/openapi")
+        c.get("/api/llm/client")
+    assert len(audit.recent(50)) == before

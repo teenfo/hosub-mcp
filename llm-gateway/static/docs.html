@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<!--
+  API 탐색기. **이 파일에는 서버 데이터가 없다** — 역할 이름도, 모델 이름도,
+  엔드포인트 목록도 없는 정적 껍데기다. 계약은 전부 인증된 fetch 로만 들어온다.
+
+  Swagger UI 를 `url:` 로 부팅하면 스펙 요청에 Authorize 토큰을 붙이지 않는데
+  /v1/openapi.json 은 인증을 요구한다. 그래서 토큰을 먼저 받아 직접 fetch 하고
+  `spec:` 객체로 부팅한다. 번들된 스펙 사본은 두지 않는다 — 화면에 뜨는 것은
+  항상 지금 실행 중인 게이트웨이가 이 토큰 기준으로 생성한 것이다.
+
+  자산은 /v1/docs/static 에서만 온다(CDN 금지). 같은 출처라 CORS 를 열 필요가 없다.
+-->
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>hosub LLM 게이트웨이 — API 탐색기</title>
+<!-- 인라인 파비콘. 없으면 브라우저가 /favicon.ico 를 찾아 404 를 만든다 —
+     공개 경로의 무의미한 요청과 로그를 줄인다. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231f6feb'/%3E%3Ctext x='8' y='12' font-size='10' font-family='sans-serif' fill='%23fff' text-anchor='middle'%3EL%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="docs/static/swagger-ui.css">
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; font: 14px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif;
+         color: #1b1f24; background: #fafbfc; }
+  .gate { max-width: 640px; margin: 8vh auto; padding: 0 20px; }
+  .gate h1 { font-size: 20px; margin: 0 0 6px; }
+  .gate p.sub { color: #57606a; margin: 0 0 20px; }
+  .card { background: #fff; border: 1px solid #d8dee4; border-radius: 8px; padding: 18px; }
+  label { display: block; font-weight: 600; margin-bottom: 6px; }
+  input { width: 100%; box-sizing: border-box; padding: 9px 10px; font-size: 14px;
+          font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          border: 1px solid #d8dee4; border-radius: 6px; }
+  button { margin-top: 12px; padding: 9px 16px; font-size: 14px; font-weight: 600;
+           color: #fff; background: #1f6feb; border: 0; border-radius: 6px; cursor: pointer; }
+  button[disabled] { opacity: .6; cursor: default; }
+  .err { margin-top: 12px; padding: 10px 12px; border-radius: 6px;
+         background: #fff1f0; border: 1px solid #ffc9c4; color: #82071e; }
+  .warn { margin: 18px 0 0; padding: 12px 14px; border-radius: 6px;
+          background: #fff8e6; border: 1px solid #f0d58c; color: #563c00; }
+  .warn ul { margin: 6px 0 0; padding-left: 20px; }
+  .banner { padding: 8px 16px; background: #fff8e6; border-bottom: 1px solid #f0d58c;
+            color: #563c00; font-size: 13px; }
+  .banner b { color: #82071e; }
+  .hide { display: none; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+
+<div class="gate" id="gate">
+  <h1>hosub LLM 게이트웨이 — API 탐색기</h1>
+  <p class="sub">서비스 토큰을 넣으면 <b>그 토큰 기준으로 생성된</b> 지금의 계약이 열린다.
+    쓸 수 있는 역할과 현재 걸린 모델만 보인다.</p>
+
+  <div class="card">
+    <label for="token">서비스 토큰 (Bearer)</label>
+    <input id="token" type="password" autocomplete="off" spellcheck="false"
+           placeholder="관리자에게 받은 값">
+    <button id="go" type="button">계약 열기</button>
+    <div id="err" class="err hide"></div>
+  </div>
+
+  <div class="warn">
+    <b>개발용 탐색기다.</b>
+    <ul>
+      <li>토큰은 이 브라우저 탭에만 남는다(sessionStorage). 서버에 저장하지 않는다.</li>
+      <li><b>프로덕션 코드에서는 브라우저에 토큰을 넣지 말 것.</b> 소비자 코드는
+        자기 서버 사이드 라우트에서만 게이트웨이를 부른다.</li>
+      <li>Try it out 은 <b>실제 요청</b>이다 — 분당 레이트리밋을 소모하고 맥의 GPU 를 쓴다.</li>
+      <li>파이썬이라면 스펙으로 클라이언트를 생성하기보다
+        <code>GET /v1/client/llmgw.py</code> 를 받는 편이 낫다.</li>
+    </ul>
+  </div>
+</div>
+
+<div id="app" class="hide">
+  <div class="banner">
+    개발용 탐색기 · Try it out 은 실제 요청이다(레이트리밋·GPU 소모) ·
+    <b>프로덕션 코드에서 브라우저에 토큰을 넣지 말 것</b>
+  </div>
+  <div id="ui"></div>
+</div>
+
+<script src="docs/static/swagger-ui-bundle.js"></script>
+<script>
+(function () {
+  "use strict";
+  var KEY = "llmgw_docs_token";
+  var gate = document.getElementById("gate");
+  var app = document.getElementById("app");
+  var input = document.getElementById("token");
+  var go = document.getElementById("go");
+  var err = document.getElementById("err");
+
+  try { input.value = sessionStorage.getItem(KEY) || ""; } catch (e) {}
+
+  function fail(msg) {
+    // textContent 만 쓴다 — 서버가 준 문자열을 innerHTML 에 넣지 않는다.
+    err.textContent = msg;
+    err.classList.remove("hide");
+    go.disabled = false;
+    go.textContent = "계약 열기";
+  }
+
+  // 전부 상대경로다. 이 페이지는 /v1/docs 로 열리므로 기준(base)이 /v1/ 이고,
+  // 공개 경로에서는 /llm/v1/docs 라 기준이 /llm/v1/ 이 된다 — 절대경로를 쓰면
+  // Caddy 가 붙이는 /llm 접두사가 날아간다. 자산은 docs/static/..., 스펙은
+  // openapi.json 으로 적어야 두 경우 모두 맞는다.
+  var SPEC_URL = "openapi.json";
+
+  function boot(spec, token) {
+    gate.classList.add("hide");
+    app.classList.remove("hide");
+    SwaggerUIBundle({
+      // url: 이 아니라 spec: 이다 — Swagger UI 는 url 로 받을 때 토큰을 안 붙인다.
+      spec: spec,
+      dom_id: "#ui",
+      deepLinking: true,
+      tryItOutEnabled: true,
+      persistAuthorization: false,
+      defaultModelsExpandDepth: 1,
+      docExpansion: "list",
+      requestInterceptor: function (req) {
+        req.headers = req.headers || {};
+        req.headers.Authorization = "Bearer " + token;
+        return req;
+      },
+    });
+  }
+
+  function open() {
+    var token = (input.value || "").trim();
+    err.classList.add("hide");
+    if (!token) { fail("토큰을 넣어야 한다."); return; }
+    go.disabled = true;
+    go.textContent = "불러오는 중…";
+
+    fetch(SPEC_URL, { headers: { Authorization: "Bearer " + token } })
+      .then(function (res) {
+        if (res.status === 401) throw new Error("토큰이 없거나 틀렸다(401).");
+        if (res.status === 429) throw new Error("레이트리밋(429). 잠시 뒤 다시.");
+        if (!res.ok) throw new Error("스펙을 받지 못했다(HTTP " + res.status + ").");
+        return res.json();
+      })
+      .then(function (spec) {
+        try { sessionStorage.setItem(KEY, token); } catch (e) {}
+        boot(spec, token);
+      })
+      .catch(function (e) { fail(String(e.message || e)); });
+  }
+
+  go.addEventListener("click", open);
+  input.addEventListener("keydown", function (e) { if (e.key === "Enter") open(); });
+})();
+</script>
+</body>
+</html>

@@ -364,6 +364,36 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
             return d
         return JSONResponse(await run_in_threadpool(gateway.integration_doc))
 
+    async def api_llm_meta(request):
+        """기계가 읽는 계약 — 역할·한도·오류코드·클라이언트 해시.
+
+        화면에서 값어치 있는 것은 client.files.python 의 sha256 이다. 정본
+        (llm-gateway/client/llmgw.py)과 사본 둘(trading·tnm)을 비교하는 장치가
+        레포에 없으므로, 이 해시가 사본이 뒤처졌는지 확인하는 유일한 관측점이다.
+        """
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(gateway.meta))
+
+    async def api_llm_openapi(request):
+        """OpenAPI 스펙 원문(JSON·YAML). 브라우저가 Blob 으로 저장한다."""
+        if (d := _require_auth_json(request)):
+            return d
+        fmt = request.query_params.get("fmt", "json")
+        return JSONResponse(await run_in_threadpool(gateway.openapi, fmt))
+
+    async def api_llm_client(request):
+        """파이썬 클라이언트·목 서버 원본.
+
+        integration_doc 과 같은 방식으로 문자열을 JSON 에 담아 넘긴다 — 이 모듈의
+        게이트웨이 호출은 전부 dict 를 돌려준다는 규약(src/gateway.py 맨 위)을
+        지키려면 이 길뿐이다. 저장은 브라우저에서 Blob 으로 한다.
+        """
+        if (d := _require_auth_json(request)):
+            return d
+        name = request.query_params.get("name", "llmgw.py")
+        return JSONResponse(await run_in_threadpool(gateway.client_file, name))
+
     # --- 모델 운영 (게이트웨이 /v1/admin/*) ---
     async def api_llm_installed(request):
         """맥에 설치된 모델 + 용량 + 쓰는 역할 + 최근 사용 + 삭제 차단 사유."""
@@ -567,6 +597,9 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/llm/compare", api_llm_compare, methods=["POST"]),
         Route("/api/llm/compare/{run_id}", api_llm_compare_get),
         Route("/api/llm/integration", api_llm_integration),
+        Route("/api/llm/meta", api_llm_meta),
+        Route("/api/llm/openapi", api_llm_openapi),
+        Route("/api/llm/client", api_llm_client),
         Route("/api/llm/installed", api_llm_installed),
         Route("/api/llm/catalog", api_llm_catalog),
         Route("/api/llm/models/install", api_llm_model_install, methods=["POST"]),

@@ -66,6 +66,7 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `GET /v1/openapi.json` \| `.yaml` | OpenAPI 3.1 스펙. `?download=1` 로 파일 저장 |
 | `GET /v1/client/llmgw.py` | 파이썬 클라이언트 원본 (이미지에 담아 서빙) |
 | `GET /v1/client/mock_gateway.py` | 개발용 목 게이트웨이 원본 |
+| `GET /v1/docs` | 브라우저 API 탐색기 — **페이지만 무인증**(토큰은 화면에서 입력). 벤더링한 swagger-ui, 경계는 설계서 7-3절 |
 | `GET /v1/models/requests` | 모델 설치 요청 목록 |
 | `POST /v1/models/requests` | 승인/거부 — `{"model":…, "action":"approve"\|"reject"}` (admin 서비스만) |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
