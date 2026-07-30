@@ -77,15 +77,40 @@ TGT_REF = (30, 90)
 AT_GRID = (20, 30, 40, 50, 60, 70)
 
 
+# 지금 실서버에 걸려 있는 값 그대로. 격자의 어느 점과도 일치하지 않을 수 있다 —
+# `tighten_at` 을 화면에서 바꾸면 `lock30` 과도 달라진다(실측 2026-07-30: 격자는
+# 0.5 인데 실서버는 0.15 였다). "지금 세팅으로 다시 계산" 은 반복해서 묻게 되는
+# 질문이므로 격자에서 가장 가까운 점으로 대신 답하지 않고 실제 값을 넣는다.
+LIVE = "live"
+
+
 def variants() -> list[str]:
     return [*BASELINES, *(f"lock{n}" for n in LOCK_GRID),
             *(f"tgt{n}" for n in TGT_REF), *(f"at{n}" for n in AT_GRID)]
 
 
-def _cfg_of(variant: str) -> dict | None:
+def live_cfg() -> dict:
+    """런타임 오버라이드까지 반영된 **현재 유효 설정**.
+
+    `trailing` 은 켠 값을 그대로 읽는다 — 꺼져 있으면 `live` 는 `fixed` 와 같은
+    결과가 나오고, 그게 사실이다(지금 세팅으로는 라인이 안 움직인다).
+    호출부가 `desk.STATE_FILE` 을 돌려놓기 **전에** 불러야 한다.
+    """
+    return {"enabled": True, "trailing": bool(desk.trailing()),
+            "trail_target": bool(desk.cfg().get("trail_target", False)),
+            "tighten_at": desk._num("tighten_at"),
+            "lock_gain_pct": desk._num("lock_gain_pct"),
+            "max_gain_pct": desk._num("max_gain_pct")}
+
+
+def _cfg_of(variant: str, live: dict | None = None) -> dict | None:
     """정책별 `desk` 설정. None 이면 라인을 아예 갱신하지 않는다(fixed)."""
     if variant == "fixed":
         return None
+    if variant == LIVE:
+        # 추종이 꺼져 있으면 갱신 자체가 없다 → fixed 와 같은 경로로 보낸다
+        cfg = live if live is not None else live_cfg()
+        return cfg if cfg.get("trailing") else None
     if variant == "trail":
         # 추종만 — 확정은 닿을 수 없는 발동선으로, 상한은 0(비활성)으로 끈다
         return {"enabled": True, "trailing": True, "trail_target": True,
@@ -439,9 +464,12 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
     """
     from ..trade import ledger
 
-    names = names or variants()
+    names = names or [LIVE, *variants()]
     costs = settings.COSTS
     hold_limit = settings.RULES.get("max_hold_min", 0) or 0
+    # 오버라이드 파일을 아직 읽을 수 있는 지금 붙잡아 둔다 — 아래에서 STATE_FILE 을
+    # 없는 경로로 바꾸면 `live` 가 config.yaml 값으로 읽혀 딴 정책이 된다.
+    live = live_cfg()
     rows = [p for p in ledger.positions(status="closed", limit=2000)
             if p.get("exit") and p.get("opened")]
     if day:
@@ -492,7 +520,7 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
                    _above(pos, float(pos["exit"])))
             per_pos = {}
             for v in names:
-                cfg = _cfg_of(v)
+                cfg = _cfg_of(v, live)
                 settings.CONFIG.setdefault("execution", {})["desk"] = \
                     cfg or {"enabled": False}
                 px, why = _project(pos, bars, cfg is not None, hold_limit)
@@ -526,6 +554,7 @@ def analyze_real(names: list[str] | None = None, day: str | None = None) -> dict
                               for k, v in sorted(d["by_reason"].items())}}
 
     return {"trades": used, "no_bars": no_bars, "day": day,
+            "live_cfg": live,
             "as_executed": _fin(base),
             "policies": {v: _fin(out[v]) | {"moves": {
                 k: {"n": m["n"], "delta": round(m["delta"], 0)}
