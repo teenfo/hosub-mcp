@@ -46,6 +46,9 @@ STATE_FILE = Path(settings.DATA_DIR) / "engine.json"
 MODES = ("shadow", "collect", "full")
 MAX_SHRINK = 10        # 한 사이클에 뺄 수 있는 최대 종목 수 — 서킷브레이커
 BACKOFF_BASE = 2       # 연속 실패 시 주기 배수 상한 2^n
+# 연속 0건 경고 주기. 매 폴마다 찍으면 로그가 묻히고, 한 번만 찍으면 놓친다.
+# 60초 주기 소스라면 20회 = 20분마다 한 줄.
+EMPTY_WARN_EVERY = 20
 
 
 def _state() -> dict:
@@ -194,7 +197,17 @@ class Engine:
         now = now if now is not None else asyncio.get_event_loop().time()
         got = 0
         for src in self.sources:
-            if not src.enabled() or not self.due(src.name, now):
+            if not src.enabled():
+                # 꺼진 소스는 '오늘 아직 보고하지 않았다' 로 되돌린다.
+                #
+                # 장중 소스를 마감 후 끄기 시작하면서 생긴 구멍이다: 다음 날 09:00 에
+                # 어제 신호는 TTL(180초)로 이미 만료됐는데 `polled` 에는 남아 있어
+                # `ready()` 가 True 가 된다. 그 상태로 투영하면 장중 소스 점수가
+                # 전부 0 이라 **개장 직후 대량 강등**이 나간다(MAX_SHRINK 가 10건에서
+                # 끊을 뿐이다). 종전에는 밤새 폴링해서 이 창이 없었다.
+                self.polled.discard(src.name)
+                continue
+            if not self.due(src.name, now):
                 continue
             try:
                 signals: list[Signal] = await src.collect()
@@ -206,7 +219,13 @@ class Engine:
                             src.name, fails, wait, e)
                 continue
             store.record(signals)
-            store.mark_ok(src.name, len(signals))
+            empty = store.mark_ok(src.name, len(signals))
+            # 조회 성공 = 소스 정상, 이 아니다. presurge 가 사흘간 `fails: 0` 인 채
+            # 0건이었고 아무 데도 드러나지 않았다(문턱 단위가 틀려 200건을 받아
+            # 전량 탈락). 정당하게 0건인 시간대는 `enabled()` 가 걸러 준다.
+            if empty and empty % EMPTY_WARN_EVERY == 0:
+                log.warning("%s 연속 %d회 0건 — 조회는 성공하는데 통과가 없다."
+                            " 필터 문턱·응답 단위를 확인할 것", src.name, empty)
             self.polled.add(src.name)
             self.next_due[src.name] = now + src.interval_sec()
             got += len(signals)

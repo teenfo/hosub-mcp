@@ -168,7 +168,12 @@ export default {
           const meta = srcMeta(s.name);
           return el("tr", { class: s.enabled ? "" : "opacity-50" }, [
             el("td", {}, el("span", { class: `badge text-bg-${meta.tone}` }, meta.label)),
+            // 조회 성공만 보면 "정상적으로 아무것도 못 찾는" 상태를 놓친다 —
+            // presurge 가 사흘간 실패 0 · 신호 0 인 채 정상으로 보였다.
             el("td", {}, !s.enabled ? badge("꺼짐", "secondary")
+              : s.empty ? el("span", { class: "badge text-bg-warning",
+                  title: "조회는 성공하는데 통과 종목이 없습니다. 필터 문턱이나 응답 단위를 확인하세요." },
+                  `0건 ${fmt(s.empty)}회`)
               : s.polled ? badge("정상", "success") : badge("대기", "warning")),
             el("td", { class: "text-end text-secondary" }, `${s.interval_sec}초`),
             el("td", { class: "text-end" }, s.signals == null ? "—" : fmt(s.signals)),
@@ -328,6 +333,9 @@ export default {
                        `최근 성공 ${String(h.last_ok).replace("T", " ").slice(5, 19)}`) : null,
         h.fails ? el("span", { class: "badge text-bg-danger", title: h.error_msg || "" },
                      `연속 실패 ${h.fails}회 — 백오프 중`) : null,
+        h.empty ? el("span", { class: "badge text-bg-warning",
+                     title: "조회 성공은 소스가 살아 있다는 증거가 아니다. 필터 문턱·응답 단위를 확인할 것." },
+                     `연속 0건 ${fmt(h.empty)}회`) : null,
       ].filter(Boolean);
       const box = el("div", { class: "d-flex gap-2 flex-wrap align-items-center mb-2" }, items);
       if (h.fails && h.error_msg) {

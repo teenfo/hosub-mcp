@@ -35,13 +35,30 @@ def test_rank_strength_degenerate_total():
 
 
 def test_surge_strength_is_logarithmic():
-    """300%와 400%의 차이보다 300%와 3000%의 차이가 커야 한다."""
-    assert model.surge_strength(100) == 0.0        # 급증 아님
-    assert model.surge_strength(50) == 0.0         # 감소는 0
-    near = model.surge_strength(400) - model.surge_strength(300)
-    far = model.surge_strength(3000) - model.surge_strength(2900)
+    """1.5%와 2%의 차이보다 5%와 5.5%의 차이가 작아야 한다."""
+    assert model.surge_strength(1.0) == 0.0        # 급증 아님
+    assert model.surge_strength(0.4) == 0.0        # 문턱 아래는 0
+    near = model.surge_strength(2.0) - model.surge_strength(1.5)
+    far = model.surge_strength(5.5) - model.surge_strength(5.0)
     assert near > far > 0
-    assert model.surge_strength(10_000) == 1.0     # 상한에서 포화
+    assert model.surge_strength(10.0) == 1.0       # SURGE_FULL 에서 포화
+
+
+def test_실제_급증률_범위가_0이_아니다():
+    """**이 소스를 사흘간 죽여 놓은 것이 정확히 이 지점이다.**
+
+    `sdnin_rt` 은 '직전 조회의 누적 거래량 대비 증가율(%)' 이다 — 실측
+    2026-07-30 ka10023: prev 174,076 → now 184,076 · sdnin_qty +10,000 ·
+    sdnin_rt 5.74 (= 10,000/174,076). 분모가 누적이라 장중 현실 범위는 0~10 이고,
+    종전 구현은 `surge_pct <= 100` 을 0 으로 잘라 **전량 0** 이었다.
+
+    아래 값은 그날 상위권 실측치다. 하나라도 0이면 소스가 또 죽는다.
+    """
+    for surge in (5.74, 5.50, 2.83, 2.58, 2.10, 1.81, 1.67):
+        assert model.surge_strength(surge) > 0.0, surge
+    # 순서가 보존돼야 취합에서 의미가 있다
+    vals = [model.surge_strength(s) for s in (1.67, 2.58, 5.74)]
+    assert vals == sorted(vals)
 
 
 @pytest.mark.parametrize("surge", [214_510.95, 718_757.12, 8_738_190.0, 13_605_700.0])
@@ -57,7 +74,13 @@ def test_broken_surge_rate_scores_zero_not_maximum(surge):
 
 
 def test_plausible_surges_still_pass():
-    """상한이 정상 급증까지 자르면 소스를 죽인 것이다 — 같은 날 실측값으로 고정."""
+    """상한이 정상 급증까지 자르면 소스를 죽인 것이다.
+
+    아래 값은 7/28 개장 직후 실측치인데, **지금은 이것들도 분모가 얕은 시각의
+    값이라고 본다**(누적 대비 증가율이 수백 %가 되려면 누적이 거의 없어야 한다).
+    상한(`SURGE_SANE_MAX`)에는 안 걸리므로 0 이 되지 않아야 한다는 것만 고정하고,
+    정상 범위의 근거는 위 `test_실제_급증률_범위가_0이_아니다` 가 든다.
+    """
     for surge in (315.86, 612.43, 925.26, 2621.95, 5185.13):
         assert model.surge_strength(surge) > 0.0
 
