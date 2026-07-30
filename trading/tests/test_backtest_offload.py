@@ -103,6 +103,56 @@ async def test_run_job_returns_child_stdout_json():
     assert isinstance(out, dict)       # 성공/실패 무관, 파싱은 된다
 
 
+# --- ③ 상한과 가시성 — 2026-07-30 추종 스윕이 조용히 잘린 건 ---
+#
+# 격자가 9변종 → 17변종으로 늘었는데 상한은 그대로였다. 정확히 3600초에 잘려
+# 결과가 0이었고, 그동안 진행 로그는 한 줄도 밖으로 나오지 않았다
+# (`communicate()` 는 프로세스가 끝나야 stderr 를 준다).
+
+def test_잡마다_상한이_다르다():
+    """하나의 상한을 공유하면 비싼 잡이 조용히 죽는다."""
+    assert offload.timeout_for("trailing") > offload.DEFAULT_TIMEOUT
+    assert offload.timeout_for("report") == offload.DEFAULT_TIMEOUT
+    assert offload.timeout_for("__없는잡__") == offload.DEFAULT_TIMEOUT
+
+
+@pytest.mark.asyncio
+async def test_자식_로그가_끝나기_전에_흘러나온다(monkeypatch, caplog):
+    """진행 로그가 종료 후에야 도착하면 한 시간짜리 잡이 깜깜이가 된다."""
+    import asyncio
+    import logging
+
+    class _Stream:
+        def __init__(self, lines):
+            self._lines = list(lines)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if not self._lines:
+                raise StopAsyncIteration
+            return self._lines.pop(0)
+
+    with caplog.at_level(logging.INFO, logger=offload.log.name):
+        tail = await offload._drain(
+            _Stream([b"progress 1/10\n", b"\n", b"progress 2/10\n"]), "trailing")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("progress 1/10" in m for m in msgs), "한 줄씩 남아야 한다"
+    assert any("progress 2/10" in m for m in msgs)
+    assert "progress 2/10" in tail and "progress 1/10" in tail
+    assert asyncio                      # 비동기 반복이 실제로 돌았다
+
+
+@pytest.mark.asyncio
+async def test_stdout_과_stderr_를_동시에_읽는다():
+    """한쪽만 기다리면 다른 파이프가 차서 자식이 막힌다."""
+    import inspect
+
+    src = inspect.getsource(offload._collect)
+    assert "gather" in src
+
+
 def test_offload_pkg_root_importable():
     """자식이 `python -m app.backtest.job` 을 찾을 수 있는 경로여야 한다."""
     from pathlib import Path

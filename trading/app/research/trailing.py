@@ -308,21 +308,34 @@ def analyze(symbols: list[str], min_bars: int = 600, limit_days: int = 60,
 
     args = [(s, min_bars, limit_days, sides, names) for s in symbols]
     n = _workers(workers)
+    log.info("추종 스윕 시작: %d종목 × %d변종 / 워커 %d", len(symbols), len(names), n)
     if n <= 1 or len(args) <= 1:
         results = map(_one, args)
     else:
         ctx = mp.get_context("spawn")   # fork 는 부모의 열린 SQLite 핸들을 물려받는다
-        with ctx.Pool(n) as pool:
-            results = pool.map(_one, args, chunksize=2)
-        log.info("추종 스윕: %d종목 / 워커 %d", len(symbols), n)
+        pool = ctx.Pool(n)
+        # `map` 이 아니라 `imap_unordered` 다. `map` 은 전부 끝날 때까지 아무것도
+        # 돌려주지 않아 **한 시간을 폴링해도 진행 상황을 알 수 없다**(실측
+        # 2026-07-30: 3600초 타임아웃에 잘릴 때까지 로그 한 줄 없었다).
+        # 결과 순서는 어차피 쓰지 않는다 — 종목별로 합칠 뿐이다.
+        results = pool.imap_unordered(_one, args, chunksize=2)
 
+    done = 0
+    step = max(1, len(args) // 20)      # 5%마다 한 줄
     for got in results:
+        done += 1
+        if done % step == 0 or done == len(args):
+            log.info("추종 스윕 진행: %d/%d (%.0f%%)", done, len(args),
+                     done / len(args) * 100)
         if got is None:
             skipped += 1
             continue
         used += 1
         for v in names:
             per[v].extend(got[1][v])
+    if n > 1 and len(args) > 1:
+        pool.close()
+        pool.join()
 
     common = set.intersection(*({_key(t) for t in per[v]} for v in names)) \
         if names else set()
