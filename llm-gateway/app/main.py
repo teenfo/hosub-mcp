@@ -12,6 +12,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
@@ -20,6 +21,7 @@ from starlette.routing import Route
 from .auth import RateLimiter, authenticate
 from .catalog import Catalog
 from .config import (
+    MAX_TIMEOUT,
     OVERRIDABLE_FIELDS,
     ROLE_NAME_RE,
     ConfigError,
@@ -29,6 +31,7 @@ from .config import (
     validate_model_name,
     validate_role_fields,
 )
+from .meta import build_meta, build_openapi
 from .notify import SlackNotifier
 from .ollama import BackendError, InputTooLong, OllamaClient
 from .scheduler import LANES, Scheduler
@@ -428,6 +431,103 @@ def build_app(
             return err
         allowed = [r.to_dict() for r in roles.roles if svc.may_use(r.name)]
         return JSONResponse({"roles": allowed, "service": svc.name})
+
+    # --- 기계가 읽는 계약 (메타데이터 · OpenAPI) ---
+    #
+    # 정적 파일로 두지 않고 매번 생성한다. 역할은 런타임에 바뀌고(오버라이드),
+    # 한도는 **살아 있는 스케줄러 인스턴스**에서 읽으며 허용 역할은 토큰마다
+    # 다르다 — 손으로 쓴 스펙은 반드시 어긋나고, 그 어긋남은 소비자가 코드를
+    # 생성한 뒤에야 드러난다. 엔드포인트 목록도 app.routes 에서 유도한다.
+    def _limits() -> dict:
+        """소비자가 큐를 예측하는 데 필요한 값. env 를 다시 읽지 않는다.
+
+        스케줄러가 실제로 들고 있는 값을 낸다 — 테스트가 다른 값으로 주입하면
+        메타데이터도 따라가야 하고, env 를 재파싱하면 그게 갈라진다.
+        """
+        return {
+            "default_wait_seconds": DEFAULT_WAIT,
+            "max_wait_seconds": MAX_WAIT,
+            "max_prompt_chars": MAX_PROMPT_CHARS,
+            "max_embed_batch": MAX_EMBED_BATCH,
+            "max_timeout_seconds": MAX_TIMEOUT,
+            "job_retention_days": scheduler.retention_days,
+            "max_retries": scheduler.max_retries,
+            "retry_backoff_base": scheduler.backoff_base,
+            "starvation_seconds": scheduler.starvation_seconds,
+            "auto_install_models": bool(scheduler.auto_install),
+            "lanes": list(LANES),
+            # 레인마다 동시 1개다(구조적). 소비자가 대기 시간을 가늠하는 근거.
+            "lane_concurrency": 1,
+            "mem_budget_gb": roles.mem_budget_gb,
+            # 기본 레이트리밋이 분당 60이라 1초 폴링은 429 를 부른다.
+            "recommended_poll_seconds": 2,
+        }
+
+    def _servers(request: Request) -> list[dict]:
+        """스펙의 `servers[]`.
+
+        공개 경로는 Caddy 가 `/llm/*` 을 벗겨 넘기므로 게이트웨이는 자기 앞의
+        접두사를 모른다. `/llm` 이 빠진 주소를 내면 **생성된 클라이언트가 404 를
+        맞는다.** 세 겹으로 정한다:
+
+        1. `LLMGW_PUBLIC_URL` — 운영자가 .env 에 박아 두는 확정값
+        2. `X-Forwarded-Prefix` — 프록시가 알려 주면 붙인다(지금 Caddy 는 안 보낸다)
+        3. `request.base_url` — 내부(127.0.0.1) 호출은 이게 맞다
+
+        내부 주소를 둘째 항목으로 함께 낸다 — 대시보드·MCP 가 생성한 클라이언트도
+        같은 스펙으로 동작해야 한다.
+        """
+        public = (os.environ.get("LLMGW_PUBLIC_URL") or "").rstrip("/")
+        if not public:
+            base = str(request.base_url).rstrip("/")
+            prefix = (request.headers.get("x-forwarded-prefix") or "").strip("/")
+            public = f"{base}/{prefix}" if prefix else base
+        out = [{"url": public or "/", "description": "소비자용 공개 주소"}]
+        internal = (os.environ.get("LLMGW_INTERNAL_URL")
+                    or "http://127.0.0.1:8603").rstrip("/")
+        if internal and internal != public:
+            out.append({"url": internal, "description": "hosub 내부(대시보드·MCP)"})
+        return out
+
+    def _attachment(request: Request, filename: str) -> dict:
+        """`?download=1` 일 때만 파일로 내린다.
+
+        항상 attachment 를 붙이면 브라우저 탐색기와 `openapi-generator -i <URL>`
+        이 스펙을 인라인으로 못 읽는다.
+        """
+        if request.query_params.get("download") in ("1", "true", "yes"):
+            return {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return {}
+
+    def _spec(request: Request, svc) -> dict:
+        return build_openapi(roles=roles, svc=svc, limits=_limits(),
+                             servers=_servers(request), routes=request.app.routes)
+
+    async def meta(request: Request):
+        svc, err = _auth(request)
+        if err:
+            return err
+        return JSONResponse(build_meta(roles=roles, svc=svc, limits=_limits(),
+                                       routes=request.app.routes))
+
+    async def openapi_json(request: Request):
+        svc, err = _auth(request)
+        if err:
+            return err
+        return JSONResponse(
+            _spec(request, svc),
+            headers=_attachment(request, "hosub-llm-gateway.openapi.json"),
+        )
+
+    async def openapi_yaml(request: Request):
+        svc, err = _auth(request)
+        if err:
+            return err
+        text = yaml.safe_dump(_spec(request, svc), allow_unicode=True, sort_keys=False)
+        return PlainTextResponse(
+            text, media_type="application/yaml; charset=utf-8",
+            headers=_attachment(request, "hosub-llm-gateway.openapi.yaml"),
+        )
 
     async def integration_doc(request: Request):
         """소비 프로젝트용 통합 가이드를 마크다운으로 돌려준다.
@@ -1027,6 +1127,9 @@ def build_app(
         Route("/v1/models/requests", list_model_requests, methods=["GET"]),
         Route("/v1/models/requests", decide_model_request, methods=["POST"]),
         Route("/v1/integration", integration_doc, methods=["GET"]),
+        Route("/v1/meta", meta, methods=["GET"]),
+        Route("/v1/openapi.json", openapi_json, methods=["GET"]),
+        Route("/v1/openapi.yaml", openapi_yaml, methods=["GET"]),
         # 관리 전용 — Caddy 가 공개 경로에서 404 로 잘라낸다(deploy/Caddyfile)
         Route("/v1/admin/roles", admin_list_roles, methods=["GET"]),
         Route("/v1/admin/roles", admin_set_role, methods=["POST"]),
