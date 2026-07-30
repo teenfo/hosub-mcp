@@ -642,8 +642,8 @@ export default {
      *
      * 평단(계좌)과 진입가(원장)는 다를 수 있다. 판정은 **원장 진입가**로 하므로
      * 그 기준을 쓰고, 원장이 없으면 평단으로 대체한다. */
-    const entryProgress = (h, p) => {
-      const cur = Number(h.cur_price || 0);
+    const entryProgress = (h, p, px) => {
+      const cur = Number(px ?? h.cur_price ?? 0);
       const entry = Number((p && p.entry) || h.avg_price || 0);
       if (!(cur > 0 && entry > 0)) return '<span class="text-secondary">—</span>';
       const pct = (cur / entry - 1) * 100;
@@ -666,6 +666,42 @@ export default {
              + `</span>`;
       }
       return out;
+    };
+
+    /** 계좌 보유 표의 2초 갱신 대상. `loadPositions` 가 표를 그릴 때 채운다.
+     *
+     *  왜 필요한가: 이 표는 `/api/account`(키움 잔고)로만 갱신되고 그 호출은
+     *  15초 폴링 + **서버 30초 캐시**다. 데스크는 2초마다 판정하는데 화면 숫자는
+     *  최대 30초 낡아 있었다 — 사용자가 "가격이 고정돼 보인다"고 지적한 것 중
+     *  이 표는 데스크 폴백 수정의 영향을 받지 않는 별도 배관이었다.
+     *
+     *  추가 API 콜은 0이다. `/api/prices` 를 이미 2초마다 부르고 있고, 보유 종목은
+     *  감시목록에 반드시 있으므로 그 응답에 값이 들어 있다. */
+    const holdRows = [];
+
+    /** 2초 값으로 현재가·진입가 대비·평가손익을 다시 칠한다.
+     *
+     *  **평가손익을 `(현재가 − 평단) × 수량` 으로 다시 계산하지 않는다.** 키움의
+     *  `evltv_prft` 는 제반비용을 반영한 값이다 — 실측(서산 18주 · 평단 4,100 ·
+     *  현재가 4,075)에서 계좌 −616원 vs 단순계산 −450원, 차이 166원이 비용이다.
+     *  모델 비용으로 손익을 다시 만들면 그 차이를 잃는다(2026-07-29 대사에서
+     *  모델 비용이 손실을 1,796원 과대계상하고 있었던 것과 같은 함정이다).
+     *
+     *  그래서 **잔고 값에 가격 변화분만 더한다** — 비용 성분은 그대로 보존되고
+     *  숫자는 2초마다 움직인다. 잔고가 다시 오면(15초) 그 값이 기준점을 갱신한다. */
+    const paintHold = (r, px) => {
+      const price = Number(px);
+      if (!(price > 0)) return;
+      r.cur.textContent = fmt(price);
+      r.prog.innerHTML = entryProgress(r.h, r.p, price);
+      const qty = Number(r.h.qty || 0);
+      const base = Number(r.h.cur_price || 0);
+      const cost = Number(r.h.avg_price || 0) * qty;
+      if (!(qty > 0 && base > 0 && cost > 0)) return;
+      const pl = Number(r.h.pl_amt || 0) + (price - base) * qty;
+      const rt = pl / cost * 100;
+      r.pl.className = pl >= 0 ? "text-danger" : "text-primary";   // 한국식
+      r.pl.textContent = `${won(pl)} (${rt.toFixed(2)}%)`;
     };
 
     // --- 보유 포지션 · 청산 관리 ---
@@ -886,6 +922,7 @@ export default {
       try { acct = await fetchJSON("/api/trading/account"); } catch (e) { acct = null; }
       if (!changed("positions", [perf, acct])) return;
       posBody.innerHTML = "";
+      holdRows.length = 0;             // 표를 다시 그리므로 셀 참조도 버린다
       const open = (perf && perf.open) || [];
       const holds = (acct && acct.ok && acct.holdings) || [];
       const holdBy = {};
@@ -914,7 +951,7 @@ export default {
         `계좌 보유 ${holds.length}건` + (acct && acct.ok ? ` · 평가 ${won(acct.total_eval)} · 손익 ${won(acct.total_pl)}` : "")));
       if (holds.length) {
         const t = el("table", { class: "table table-sm align-middle mb-3 small" });
-        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>수량</th><th>평단</th><th>현재가</th><th>진입가 대비</th><th>평가손익</th><th>손절/목표</th><th></th></tr>" }));
+        t.appendChild(el("thead", { html: '<tr><th>종목</th><th>수량</th><th>평단</th><th title="2초마다 갱신됩니다(감시목록 실시간 시세). 나머지 열은 계좌 조회 주기입니다">현재가 <i class="bi bi-broadcast"></i></th><th>진입가 대비</th><th>평가손익</th><th>손절/목표</th><th></th></tr>' }));
         const tb = el("tbody");
         for (const h of holds) {
           const p = trackBy[h.code];
@@ -933,6 +970,10 @@ export default {
           }
           tr.appendChild(td);
           tb.appendChild(tr);
+          // 셀 참조를 들고 있어야 표 재렌더 없이 값만 갱신할 수 있다 — 표를 다시
+          // 그리면 [청산] 버튼이 흔들리고 누르는 중에 사라진다(신호 표와 같은 이유).
+          const cells = tr.children;
+          holdRows.push({ h, p, cur: cells[3], prog: cells[4], pl: cells[5] });
         }
         t.appendChild(tb);
         posBody.appendChild(el("div", { class: "table-responsive" }, t));
@@ -1306,6 +1347,10 @@ export default {
         if (p == null) return;   // 값 없으면 직전 표시 유지
         priceCellHTML(cell, p, cell.getAttribute("data-entry"));
       });
+      // 계좌 보유 표도 같은 응답으로 갱신한다. 이 표는 키움 잔고(15초 폴링 +
+      // 서버 30초 캐시)로만 움직였는데, 데스크는 2초마다 판정한다 — 판정에 쓰는
+      // 값과 화면 값이 최대 30초 어긋나 있었다.
+      for (const r of holdRows) paintHold(r, prices[r.h.code]);
     };
 
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadRisk()]);
