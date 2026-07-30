@@ -10,12 +10,41 @@
 #
 # size_gb 는 **런타임 메모리** 기준 추정이다(디스크보다 크다). 이 값이
 # MEM_BUDGET_GB 를 넘으면 설치 전에 거부된다.
+#
+# ⚠️ qwen3 이후 계열(3, 3.5, 3.6)은 **hybrid thinking** 모델이다. Ollama 에서
+#    thinking 을 켠 채로 JSON structured output 을 쓰면 출력이 깨진다는 미해결
+#    이슈가 있다(ollama#10929, #10538). classify_news 처럼 스키마를 지켜야 하는
+#    역할에 올릴 때는 프롬프트에 `/no_think` 를 붙이거나 thinking 을 끄고,
+#    **바꾸기 전에 JSON 준수율을 따로 검증**할 것.
 
 models:
+  # ---------- 최신 계열 (2026) ----------
+  # 같은 파라미터 수 대비 지시 따르기(IFEval)가 크게 개선됐고 컨텍스트가 256K 다.
+  # 다만 한국어 전용 벤치마크(KMMLU)는 공개 수치가 없어 실측 비교가 필요하다.
+  - name: qwen3.5
+    family: qwen
+    kinds: [generate]
+    description: 2026-02. 256K 컨텍스트·멀티모달. IFEval 95.0 (2.5-32B 는 82.7)
+    tags:
+      - { tag: "qwen3.5:0.8b", size_gb: 1.5, context: 262144 }
+      - { tag: "qwen3.5:2b",   size_gb: 3.5, context: 262144 }
+      - { tag: "qwen3.5:4b",   size_gb: 4.5, context: 262144 }
+      - { tag: "qwen3.5:9b",   size_gb: 8,   context: 262144 }
+      - { tag: "qwen3.5:27b",  size_gb: 19,  context: 262144 }
+
+  - name: qwen3.6
+    family: qwen
+    kinds: [generate]
+    description: 2026-04, 최신 오픈웨이트. 코딩 강세. 35b 는 MoE(A3B)
+    tags:
+      - { tag: "qwen3.6:27b", size_gb: 19, context: 262144 }
+      - { tag: "qwen3.6:35b", size_gb: 27, context: 262144 }
+
+  # ---------- 현재 운영 계열 ----------
   - name: qwen2.5
     family: qwen
     kinds: [generate]
-    description: 범용 한국어·영어. 이 게이트웨이의 기본 계열
+    description: 2024-09. 지금 모든 역할이 쓰는 계열 — 한국어 실적이 검증돼 있다
     tags:
       - { tag: "qwen2.5:7b",  size_gb: 5,  context: 32768 }
       - { tag: "qwen2.5:14b", size_gb: 10, context: 32768 }
@@ -33,7 +62,7 @@ models:
   - name: qwen3
     family: qwen
     kinds: [generate]
-    description: qwen2.5 후속. 추론(thinking) 모드 지원
+    description: 2025-05. 3.5 로 대체됐다 — 새로 고를 이유는 없다
     tags:
       - { tag: "qwen3:8b",  size_gb: 6,  context: 32768 }
       - { tag: "qwen3:14b", size_gb: 10, context: 32768 }
