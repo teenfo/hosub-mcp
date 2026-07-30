@@ -113,6 +113,8 @@ ENDPOINT_SUMMARIES: dict[tuple[str, str], str] = {
     ("POST", "/v1/admin/compare"): "[관리] 모델 A/B 비교 실행",
     ("GET", "/v1/admin/compare"): "[관리] 비교 이력",
     ("GET", "/v1/admin/compare/{run_id}"): "[관리] 비교 결과",
+    ("GET", "/v1/admin/services"): "[관리] 소비자 등록 현황 (토큰은 마스킹)",
+    ("GET", "/v1/admin/services/{name}/token"): "[관리] 소비자 토큰 전체 값 1건 (감사 기록)",
     ("GET", "/v1/admin/audit"): "[관리] 관리 작업 감사 로그",
 }
 
