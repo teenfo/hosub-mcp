@@ -16,8 +16,9 @@ from pathlib import Path
 import yaml
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
-from starlette.routing import Route
+from starlette.responses import JSONResponse, PlainTextResponse, Response
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from .auth import RateLimiter, authenticate
 from .catalog import Catalog
@@ -114,6 +115,26 @@ def _client_file_meta() -> dict[str, dict]:
         if meta:
             out[name] = meta
     return out
+
+
+# 브라우저용 API 탐색기(Swagger UI). 자산은 벤더링해 이미지에 담는다 — 레포
+# 정책이 외부 CDN 금지다(docs/requests/dashboard-bootstrap5-admin.md).
+STATIC_DIR = Path(os.environ.get("LLMGW_STATIC_DIR") or _ROOT / "static")
+DOCS_PAGE = STATIC_DIR / "docs.html"
+SWAGGER_DIR = STATIC_DIR / "swagger-ui"
+
+# 벤더 자산은 버전 고정이라 오래 캐시해도 안전하다. 이 경로는 무인증이므로
+# 레이트리밋이 걸리지 않는다 — 캐시가 실질적인 방어다(대시보드와 같은 값).
+_VENDOR_CACHE = "public, max-age=604800"
+
+
+class _CachedStatic(StaticFiles):
+    """벤더 자산에 장기 캐시 헤더를 붙인다."""
+
+    def file_response(self, full_path, stat_result, scope, status_code: int = 200):
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers.setdefault("Cache-Control", _VENDOR_CACHE)
+        return response
 
 
 async def _json_body(request: Request) -> dict:
@@ -594,6 +615,27 @@ def build_app(
         if err:
             return err
         return _serve_source(request, "mock_gateway.py")
+
+    # --- API 탐색기 (Swagger UI) ---
+    #
+    # ⚠️ 이 페이지는 **무인증**이다. 브라우저는 최상위 내비게이션에 Bearer 헤더를
+    # 싣지 못하므로 껍데기를 열어 줘야 토큰 입력 폼을 보여줄 수 있다. 대신
+    # 껍데기에 서버 데이터를 하나도 담지 않는다 — 역할·모델·엔드포인트 이름이
+    # 없고(테스트가 단언한다), 계약은 전부 인증된 fetch 로만 들어온다.
+    # 자세한 경계와 이 결정이 뒤집는 것은 docs/requests/llm-gateway-service.md 참고.
+    async def docs_page(request: Request):
+        try:
+            html = DOCS_PAGE.read_text(encoding="utf-8")
+        except OSError as exc:
+            log.warning("탐색기 페이지를 읽을 수 없음 %s: %s", DOCS_PAGE, exc)
+            return JSONResponse(
+                {"error": "not_found",
+                 "detail": f"탐색기가 없습니다({DOCS_PAGE}). "
+                           "Dockerfile 의 COPY static/ 와 재빌드를 확인하세요."},
+                status_code=404,
+            )
+        return Response(html, media_type="text/html; charset=utf-8",
+                        headers={"Cache-Control": "no-cache"})
 
     async def openapi_json(request: Request):
         svc, err = _auth(request)
@@ -1218,6 +1260,9 @@ def build_app(
         # 리터럴 두 개다 — 경로 파라미터를 두면 경로 탐색 표면이 생긴다.
         Route("/v1/client/llmgw.py", client_llmgw, methods=["GET"]),
         Route("/v1/client/mock_gateway.py", client_mock, methods=["GET"]),
+        # 탐색기. /v1/ 아래여야 Caddy 의 @api 접두사 매처가 그대로 커버한다
+        # (맨 /docs 는 공개 경로에서 게이트웨이에 닿지 않는다).
+        Route("/v1/docs", docs_page, methods=["GET"]),
         # 관리 전용 — Caddy 가 공개 경로에서 404 로 잘라낸다(deploy/Caddyfile)
         Route("/v1/admin/roles", admin_list_roles, methods=["GET"]),
         Route("/v1/admin/roles", admin_set_role, methods=["POST"]),
@@ -1231,6 +1276,18 @@ def build_app(
         Route("/v1/admin/compare/{run_id}", admin_compare_get, methods=["GET"]),
         Route("/v1/admin/audit", admin_audit, methods=["GET"]),
     ]
+
+    # 벤더 자산은 이미지에 있을 때만 마운트한다. 디렉터리가 없으면 StaticFiles 가
+    # 기동 시점에 터져 게이트웨이 전체가 안 뜬다 — 탐색기 자산 때문에 추론이
+    # 멈추면 안 된다(탐색기는 /v1/docs 가 재빌드 힌트 404 를 준다).
+    if SWAGGER_DIR.is_dir():
+        routes.append(
+            Mount("/v1/docs/static", app=_CachedStatic(directory=SWAGGER_DIR),
+                  name="docs-static")
+        )
+    else:
+        log.warning("탐색기 자산이 없어 /v1/docs/static 을 마운트하지 않는다: %s",
+                    SWAGGER_DIR)
 
     @asynccontextmanager
     async def lifespan(_app):

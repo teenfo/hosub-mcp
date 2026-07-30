@@ -445,6 +445,7 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 | `GET /v1/openapi.yaml` | 같은 스펙(YAML) |
 | `GET /v1/client/llmgw.py` | 파이썬 클라이언트 원본 |
 | `GET /v1/client/mock_gateway.py` | 개발용 목 게이트웨이 원본 |
+| `GET /v1/docs` | 브라우저 API 탐색기 (페이지는 무인증, 토큰은 화면에서 입력) |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
 
 > 이 표는 손으로 관리한다 — 권위 있는 목록은 **`GET /v1/meta` 의 `endpoints`** 다.

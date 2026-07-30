@@ -214,6 +214,62 @@ def integration_doc(*, client_factory=httpx.Client) -> dict:
     return {"status": "ok", "markdown": text, "bytes": len(text.encode("utf-8"))}
 
 
+def meta(*, client_factory=httpx.Client) -> dict:
+    """기계가 읽는 계약(역할·한도·오류코드·클라이언트 해시).
+
+    JSON 이므로 평범하게 _call 을 쓴다.
+    """
+    return _call("GET", "/v1/meta", client_factory=client_factory)
+
+
+def _fetch_text(path: str, *, client_factory=httpx.Client) -> dict:
+    """JSON 이 아닌 응답을 dict 로 감싸 돌려준다.
+
+    integration_doc 과 같은 이유로 _call 을 쓰지 않는다 — OpenAPI(YAML)·파이썬
+    소스는 res.json() 이 터진다. 모듈 규약(맨 위 docstring)이 "예외 대신
+    status/error dict" 이므로 호출부가 분기할 필요가 없게 여기서 감싼다.
+    """
+    token = _token()
+    if not token:
+        return _unconfigured()
+    url = f"{base_url()}{path}"
+    try:
+        with client_factory(timeout=TIMEOUT) as client:
+            res = client.request("GET", url,
+                                 headers={"Authorization": f"Bearer {token}"})
+            if res.status_code >= 400:
+                return {"status": "error", "http_status": res.status_code,
+                        "error": res.text[:200]}
+            text = res.text
+    except Exception as exc:
+        return {
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "hint": f"게이트웨이({base_url()})가 떠 있는지 확인하세요.",
+        }
+    return {"status": "ok", "text": text, "bytes": len(text.encode("utf-8"))}
+
+
+def openapi(fmt: str = "json", *, client_factory=httpx.Client) -> dict:
+    """OpenAPI 스펙 원문. fmt 는 json|yaml."""
+    if fmt not in ("json", "yaml"):
+        return {"status": "error", "error": "fmt 는 json|yaml 입니다."}
+    return _fetch_text(f"/v1/openapi.{fmt}", client_factory=client_factory)
+
+
+def client_file(name: str, *, client_factory=httpx.Client) -> dict:
+    """파이썬 클라이언트·목 서버 원본.
+
+    게이트웨이가 리터럴 라우트 두 개만 노출하므로 여기서도 허용 목록으로 막는다
+    (임의 경로를 만들어 주지 않는다).
+    """
+    allowed = {"llmgw.py", "mock_gateway.py"}
+    if name not in allowed:
+        return {"status": "error",
+                "error": f"name 은 {' | '.join(sorted(allowed))} 입니다."}
+    return _fetch_text(f"/v1/client/{name}", client_factory=client_factory)
+
+
 def get_comparison(run_id: str, *, client_factory=httpx.Client) -> dict:
     return _call("GET", f"/v1/admin/compare/{quote(run_id, safe='')}",
                  client_factory=client_factory)

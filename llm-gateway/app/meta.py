@@ -89,6 +89,7 @@ ENDPOINT_SUMMARIES: dict[tuple[str, str], str] = {
     ("GET", "/healthz"): "헬스체크(인증 불필요)",
     ("GET", "/v1/client/llmgw.py"): "파이썬 클라이언트 원본",
     ("GET", "/v1/client/mock_gateway.py"): "개발용 목 게이트웨이 원본",
+    ("GET", "/v1/docs"): "브라우저용 API 탐색기(인증 불필요, 토큰은 화면에서 입력)",
     ("POST", "/v1/generate"): "생성. wait 초까지 기다림(0이면 즉시 pending)",
     ("POST", "/v1/embed"): "임베딩 벡터. 유일하게 잡 큐를 타지 않는다",
     ("GET", "/v1/jobs"): "잡 목록(본인 서비스)",
@@ -120,8 +121,13 @@ ENDPOINT_SUMMARIES: dict[tuple[str, str], str] = {
 # 요구한다(main.decide_model_request). 접두사만 보면 이걸 소비자 API 로 오해한다.
 INLINE_ADMIN: set[tuple[str, str]] = {("POST", "/v1/models/requests")}
 
-# 인증이 필요 없는 경로
-PUBLIC_ROUTES: set[tuple[str, str]] = {("GET", "/healthz")}
+# 인증이 필요 없는 경로.
+#
+# /v1/docs 가 여기 있는 것은 의도된 예외다 — 브라우저는 최상위 내비게이션에
+# Bearer 헤더를 싣지 못하므로 껍데기를 열어 줘야 토큰 입력 폼을 보여줄 수 있다.
+# 껍데기에는 서버 데이터가 하나도 없고, 계약과 실행은 여전히 토큰 뒤에 있다.
+# 이 결정이 뒤집는 것과 새 경계는 docs/requests/llm-gateway-service.md 7-3절.
+PUBLIC_ROUTES: set[tuple[str, str]] = {("GET", "/healthz"), ("GET", "/v1/docs")}
 
 # 소비자가 실제로 쓰는 인터페이스는 HTTP 가 아니라 **파일 하나**다.
 #
@@ -615,6 +621,18 @@ def _consumer_paths(limits: dict, gen_roles: list[str], emb_roles: list[str]) ->
                                   "content": {"text/x-python": {"schema": {"type": "string"}}}},
                           "404": _err("이미지에 파일이 없다(재빌드 필요)"),
                           **errs},
+        }},
+        "/v1/docs": {"get": {
+            "operationId": "getDocsExplorer",
+            "summary": "브라우저용 API 탐색기",
+            "description": "정적 HTML 껍데기다(인증 불필요) — 서버 데이터가 없고, "
+                           "화면에서 토큰을 받아 이 스펙을 인증된 fetch 로 불러 "
+                           "부팅한다. 개발용이다: 프로덕션 코드에서 브라우저에 "
+                           "토큰을 넣지 말 것.",
+            "security": [],
+            "responses": {"200": {"description": "HTML",
+                                  "content": {"text/html": {"schema": {"type": "string"}}}},
+                          "404": _err("이미지에 자산이 없다(재빌드 필요)")},
         }},
         "/healthz": {"get": {
             "operationId": "healthz", "summary": "헬스체크(인증 불필요)",
