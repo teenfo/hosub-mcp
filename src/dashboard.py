@@ -27,7 +27,7 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from . import gateway, service_ops, sysinfo
+from . import gateway, jw, service_ops, sysinfo
 from .context import AppContext
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -394,6 +394,74 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         name = request.query_params.get("name", "llmgw.py")
         return JSONResponse(await run_in_threadpool(gateway.client_file, name))
 
+    # --- jw-mcp (별개 프로세스, 127.0.0.1:8604) ---
+    #
+    # jw-mcp 의 /api/dash/* 는 루프백 전용이다 — Caddy 가 /jw/* 만 공개하고
+    # 그 경로는 라우팅하지 않는다(공인에서 404). 브라우저가 직접 못 부르므로
+    # 여기서 서버사이드로 프록시한다. trading/tnm 과 같은 구조다.
+    async def api_jw_summary(request):
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(jw.summary))
+
+    async def api_jw_users(request):
+        if (d := _require_auth_json(request)):
+            return d
+        return JSONResponse(await run_in_threadpool(jw.users))
+
+    async def api_jw_usage(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            days = int(request.query_params.get("days", 7))
+        except ValueError:
+            days = 7
+        return JSONResponse(await run_in_threadpool(jw.usage, days))
+
+    async def api_jw_calls(request):
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            limit = int(request.query_params.get("limit", 50))
+        except ValueError:
+            limit = 50
+        return JSONResponse(await run_in_threadpool(jw.calls, limit))
+
+    async def api_jw_user_status(request):
+        """사용자 승인·비활성화 — 조회 전용 대시보드의 두 번째 의도된 예외.
+
+        경계는 세 겹이다: (1) jw-mcp 의 /api/dash/* 는 루프백 전용이라 이
+        프로세스에서만 닿고, (2) 대시보드 자체가 비밀번호 세션 뒤에 있으며,
+        (3) 모든 변경이 감사 로그에 남는다.
+
+        ⚠️ active 가 아닌 값으로 바꾸면 그 사용자의 OAuth 토큰이 즉시 전부
+        폐기된다 — 커넥터를 다시 연결해야 살아난다. 되돌릴 수 없는 쪽이므로
+        화면에서 확인 단계를 거치고, 여기서도 감사에 risk 를 남긴다.
+        """
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        user_id = (body.get("user_id") or "").strip()
+        status = (body.get("status") or "").strip()
+        if not user_id or not status:
+            return JSONResponse(
+                {"status": "rejected", "reason": "user_id 와 status 가 필요합니다."},
+                status_code=400)
+        result = await run_in_threadpool(jw.set_user_status, user_id, status)
+        ctx.audit.log(
+            tool="jw_set_user_status",
+            # 이메일·표시이름은 남기지 않는다 — user_id 로 충분히 추적된다.
+            params={"user_id": user_id, "status": status, "via": "dashboard"},
+            # 토큰 폐기가 따라오고 사용자가 재연결해야 하므로 high 다.
+            risk="high" if status != "active" else "medium",
+            outcome=result.get("status", "error"),
+            result_summary=str(result.get("error") or result.get("user") or "")[:300],
+        )
+        return JSONResponse(result)
+
     # --- 모델 운영 (게이트웨이 /v1/admin/*) ---
     async def api_llm_installed(request):
         """맥에 설치된 모델 + 용량 + 쓰는 역할 + 최근 사용 + 삭제 차단 사유."""
@@ -608,6 +676,11 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/weather", api_weather),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),
         Route("/api/tnm/{path:path}", api_tnm, methods=["GET", "POST"]),
+        Route("/api/jw/summary", api_jw_summary),
+        Route("/api/jw/users", api_jw_users),
+        Route("/api/jw/usage", api_jw_usage),
+        Route("/api/jw/calls", api_jw_calls),
+        Route("/api/jw/users/status", api_jw_user_status, methods=["POST"]),
         Route("/static/{path:path}", static_file),
     ]
 

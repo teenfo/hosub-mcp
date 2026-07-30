@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 
 import pytest
@@ -477,3 +478,95 @@ def test_contract_reads_are_not_audited(monkeypatch, audit):
         c.get("/api/llm/openapi")
         c.get("/api/llm/client")
     assert len(audit.recent(50)) == before
+
+
+# --- jw-mcp (별개 프로세스, 루프백 전용 API) ---
+#
+# 브라우저는 jw-mcp 를 직접 못 부른다(Caddy 가 /api/dash/* 를 라우팅하지 않음).
+# 그래서 대시보드가 서버사이드로 프록시하고, 그 경계를 여기서 지킨다.
+def test_jw_routes_need_login(client):
+    for path in ("/api/jw/summary", "/api/jw/users", "/api/jw/usage", "/api/jw/calls"):
+        assert client.get(path).status_code == 401, path
+    assert client.post("/api/jw/users/status",
+                       json={"user_id": "u_" + "0" * 24, "status": "active"}
+                       ).status_code == 401
+
+
+def test_jw_summary_passes_sections_through(client, monkeypatch):
+    """sections 를 해석하지 않는다 — jw-mcp 가 지표를 바꿔도 이쪽은 그대로다."""
+    from src import jw
+
+    monkeypatch.setattr(jw, "summary", lambda: {
+        "status": "ok", "version": "2.0.0",
+        "sections": [{"title": "사용자", "icon": "bi-people",
+                      "items": [{"label": "승인 대기", "value": 1, "tone": "warn"}]}],
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    d = client.get("/api/jw/summary").json()
+    assert d["sections"][0]["items"][0]["tone"] == "warn"
+
+
+def test_jw_usage_and_calls_pass_their_bounds(client, monkeypatch):
+    from src import jw
+
+    seen = {}
+    monkeypatch.setattr(jw, "usage", lambda days=7: seen.update(days=days) or {"status": "ok"})
+    monkeypatch.setattr(jw, "calls", lambda limit=50: seen.update(limit=limit) or {"status": "ok"})
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    client.get("/api/jw/usage?days=30")
+    client.get("/api/jw/calls?limit=5")
+    assert seen == {"days": 30, "limit": 5}
+    # 숫자가 아니면 기본값으로 떨어진다(500 이 아니라)
+    client.get("/api/jw/usage?days=abc")
+    client.get("/api/jw/calls?limit=abc")
+    assert seen == {"days": 7, "limit": 50}
+
+
+def test_jw_service_down_is_reported_not_crashed(client, monkeypatch):
+    """jw-mcp 는 따로 죽는다 — 그때 대시보드가 500 을 내면 안 된다."""
+    from src import jw
+
+    monkeypatch.setattr(jw, "summary", lambda: {
+        "status": "error", "error": "ConnectError: 연결 실패",
+        "hint": "systemctl status jw-mcp",
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.get("/api/jw/summary")
+    assert r.status_code == 200
+    assert r.json()["status"] == "error" and "연결 실패" in r.json()["error"]
+
+
+def test_jw_status_change_requires_both_fields(client):
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    for body in ({}, {"user_id": "u_" + "0" * 24}, {"status": "active"}):
+        r = client.post("/api/jw/users/status", json=body)
+        assert r.status_code == 400, body
+        assert r.json()["status"] == "rejected"
+
+
+def test_jw_status_change_is_audited(monkeypatch, audit):
+    """변경 계열이므로 감사에 남긴다. 비활성화는 토큰을 폐기하므로 risk=high."""
+    from src import jw
+
+    monkeypatch.setattr(jw, "set_user_status",
+                        lambda uid, st: {"status": "ok", "user": {"user_id": uid}})
+    app = build_app(
+        registry=Registry.from_dict(REG),
+        runner=FakeRunner(),
+        audit=audit,
+        mcp_token=TOKEN,
+        dash_password=PASSWORD,
+        session_secret="session-secret-abcdefgh",
+    )
+    uid = "u_4196f60425d3fcb8eb59f26b"
+    with TestClient(app) as c:
+        c.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+        c.post("/api/jw/users/status", json={"user_id": uid, "status": "disabled"})
+        c.post("/api/jw/users/status", json={"user_id": uid, "status": "active"})
+
+    rows = [r for r in audit.recent(50) if r["tool"] == "jw_set_user_status"]
+    assert len(rows) == 2
+    risks = {json.loads(r["params_json"])["status"]: r["risk"] for r in rows}
+    assert risks == {"disabled": "high", "active": "medium"}
+    # 이메일·표시이름은 감사에 남기지 않는다 — user_id 로 충분히 추적된다
+    assert all("email" not in r["params_json"] for r in rows)
