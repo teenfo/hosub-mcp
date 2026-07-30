@@ -22,21 +22,32 @@ curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/integration
 > 자세한 내용과 나머지 변경(모델 삭제 가능, `model` 필드는 관리 전용, `/v1/admin/*`
 > 는 공개 경로에서 404)은 **[6-1절](#6-1-역할의-모델은-런타임에-바뀔-수-있다-️)**.
 
-> **저장소 접근이 없다면 1절을 건너뛰고 [1-A](#1-a-저장소-없이-시작-http-만으로)로 가라.**
-> 1~3절은 이 저장소의 파일(`client/llmgw.py`, `tools/mock_gateway.py`)을 쓰는 지름길이고,
-> 그 파일들은 이 엔드포인트로 받을 수 없다. HTTP 만으로 필요한 건 전부 된다 —
-> 7절에 전체 계약이 있다.
+> **저장소 접근이 없어도 1절을 그대로 쓸 수 있다.** 1~3절이 쓰는 두 파일
+> (`client/llmgw.py`, `tools/mock_gateway.py`)을 게이트웨이가 직접 서빙한다:
+>
+> ```bash
+> curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/client/llmgw.py -o llmgw.py
+> curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/client/mock_gateway.py -o mock_gateway.py
+> ```
+>
+> 파이썬이 아니라면 [1-A](#1-a-저장소-없이-시작-http-만으로)로 가거나
+> `GET /v1/openapi.json` 으로 타입 있는 클라이언트를 생성하라.
 
 ---
 
-## 1. 5분 만에 시작 (저장소 접근이 있을 때)
+## 1. 5분 만에 시작 (파이썬)
 
 ```bash
-# 1) 클라이언트 한 파일을 자기 레포에 복사
+# 1) 클라이언트 한 파일을 자기 레포에 가져온다
+#    저장소가 있으면:
 cp llm-gateway/client/llmgw.py <내_프로젝트>/lib/
+#    없으면 게이트웨이에서 받는다 (토큰만 있으면 된다):
+curl -H "Authorization: Bearer $LLMGW_TOKEN" \
+  https://hosub.duckdns.org/llm/v1/client/llmgw.py -o <내_프로젝트>/lib/llmgw.py
 
 # 2) 게이트웨이 없이 개발 시작 — 목 서버를 띄운다
 python llm-gateway/tools/mock_gateway.py
+#    (목 서버도 받을 수 있다: $LLMGW_URL/v1/client/mock_gateway.py)
 
 # 3) 호출
 export LLMGW_URL=http://127.0.0.1:8603 LLMGW_TOKEN=dev
@@ -52,11 +63,35 @@ print(gw.run("summarize", 긴_문서))    # 끝까지 기다려 텍스트만
 실서버로 옮길 때 바뀌는 것은 **`LLMGW_URL` 과 `LLMGW_TOKEN` 두 값뿐**이다.
 응답 계약이 같다는 것은 회귀 테스트(`tests/test_client_contract.py`)가 보장한다.
 
+### 내 사본이 최신인가
+
+`llmgw.py` 에는 버전 문자열이 없다. **해시로 확인한다** — 게이트웨이가 서빙하는
+바이트에서 계산한 값을 `GET /v1/meta` 가 알려 준다:
+
+```bash
+# 내 사본
+sha256sum lib/llmgw.py
+# 게이트웨이가 들고 있는 것
+curl -sH "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/meta \
+  | python3 -c 'import json,sys; c=json.load(sys.stdin)["client"]["files"]["python"]; print(c["sha256"], c["bytes"])'
+```
+
+같으면 최신이다. 다르면 `GET /v1/client/llmgw.py` 로 다시 받는다.
+`/v1/meta` 의 `client.files.python` 에는 `entrypoints`·`exceptions`·`notes` 도 함께
+온다 — **OpenAPI 로는 표현되지 않는 것들**(폴링 루프, `wait+15` 타임아웃 자동
+확대, 미지 필드 무시, `cancel()` 이 오류를 삼켜 `False` 를 주는 것)이 거기 적혀 있다.
+
 ---
 
-## 1-A. 저장소 없이 시작 (HTTP 만으로)
+## 1-A. HTTP 만으로 시작 (파이썬이 아닐 때)
 
 라이브러리도 목 서버도 필요 없다. 알아야 할 것은 **토큰 하나와 엔드포인트 네 개**다.
+타입 있는 클라이언트를 만들려면 스펙을 그대로 코드 생성기에 먹인다:
+
+```bash
+curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/openapi.json -o gw.json
+# 스펙은 이 토큰 기준으로 생성된다 — role enum 에 쓸 수 있는 역할만 들어 있다
+```
 
 ```bash
 export LLMGW_URL=https://hosub.duckdns.org/llm
@@ -93,6 +128,12 @@ curl -H "Authorization: Bearer $LLMGW_TOKEN" $LLMGW_URL/v1/jobs/<job_id>
 | 429 | 레이트리밋 | 간격을 늘려 재시도 |
 | 503 | 백엔드 일시 불가·모델 설치 대기 | **나중에 재시도** |
 | 5xx 기타 | 게이트웨이 오류 | 백오프 후 재시도 |
+
+> ⚠️ **`error` 필드로 분기하지 말 것.** 검증·권한 오류에서는 기계 코드
+> (`unauthorized`·`unknown_role` 등, 전체 목록은 `/v1/meta` 의 `error_codes`)가
+> 오지만, **모델 미설치·백엔드 장애·실패한 잡에서는 사람이 읽는 문장이 온다.**
+> 분기는 **HTTP 상태와 `retryable`** 로 하라. `/v1/embed` 의 실패 본문은
+> `{status, error, retryable}` 모양이고 `status:"failed"` 를 함께 들고 온다.
 
 2절의 파이썬 클라이언트는 위 규칙을 감싼 것일 뿐이다. 직접 구현해도 동일하다.
 
@@ -399,7 +440,15 @@ gw.model_requests()   # [{"model": "qwen3:32b", "status": "pending", ...}]
 | `GET /v1/models/requests` | 모델 설치 요청 (승인은 hosub 만) |
 | `POST /v1/embed` | 임베딩 벡터. **유일하게 잡이 아닌 엔드포인트** |
 | `GET /v1/integration` | **이 문서** (마크다운). 계약의 최신본 |
+| `GET /v1/meta` | 기계가 읽는 계약 — 역할·한도·오류코드·클라이언트 해시 |
+| `GET /v1/openapi.json` | OpenAPI 3.1 스펙. `?download=1` 로 파일 저장 |
+| `GET /v1/openapi.yaml` | 같은 스펙(YAML) |
+| `GET /v1/client/llmgw.py` | 파이썬 클라이언트 원본 |
+| `GET /v1/client/mock_gateway.py` | 개발용 목 게이트웨이 원본 |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
+
+> 이 표는 손으로 관리한다 — 권위 있는 목록은 **`GET /v1/meta` 의 `endpoints`** 다.
+> 그쪽은 실행 중인 라우터에서 만들어지므로 어긋날 수 없다.
 
 요청 본문:
 
