@@ -580,6 +580,50 @@ def force_close_eod(price_of) -> int:
     return closed
 
 
+WIN, LOSS, FLAT = "익절", "손절", "본전"
+
+
+def outcome(row) -> str | None:
+    """**실제 손익 부호로 정한 결과 구분.** 청산 사유와 별개다.
+
+    사용자 지침(2026-07-30):
+    > 실제 손익이 + 이면, 청산 사유가 손절라인 근접이어도 익절로 표기한다.
+
+    라인 추종을 켜면 손절선이 진입가 위로 올라간다. 그 선에 닿아 나온 것은
+    기계적 사유로는 `stop` 이지만 **결과는 이익**이다. 사유 이름만 보면
+    "손절이 늘었다" 로 잘못 읽힌다 — 추종 투사에서 이미 같은 함정을 만나
+    `stop+`/`stop-` 로 나눠 세고 있었다(research/trailing.py `_tally`).
+    그 구분을 원장·일지·화면에도 같은 이름으로 올린다.
+
+    **`exit_reason` 을 덮어쓰지 않는다.** 기계적 사유는 진단의 입력이다 —
+    목표에 닿아 나온 것과 올라간 손절선에 닿아 나온 것은 같은 이익이어도
+    다음에 고칠 것이 다르다(전자는 목표를, 후자는 확정률을 본다).
+
+    기준값은 `pnl_krw` 다. 대사가 끝난 건은 `apply_actual_costs()` 가 이 칸을
+    증권사 실비용 기준으로 덮어쓰므로, 그 뒤에는 이 값이 곧 실제 손익이다.
+    아직 안 붙은 건은 모델값이고 부호가 뒤집힐 수 있어 화면이 `~` 로 표시한다.
+
+    청산 전(`open`)이거나 손익이 없으면 None — 없는 결과를 만들지 않는다.
+    """
+    if row is None:
+        return None
+    krw = row["pnl_krw"] if not isinstance(row, dict) else row.get("pnl_krw")
+    if krw is None:
+        return None
+    try:
+        krw = float(krw)
+    except (TypeError, ValueError):
+        return None
+    return WIN if krw > 0 else LOSS if krw < 0 else FLAT
+
+
+def _row(r) -> dict:
+    """원장 행 → 화면·일지가 쓰는 dict. 파생 필드는 여기 한 곳에서 붙인다."""
+    d = dict(r)
+    d["outcome"] = outcome(d)
+    return d
+
+
 def positions(status: str | None = None, limit: int = 100) -> list[dict]:
     """status 미지정이면 **void 를 뺀** 전체. void 를 보려면 명시해야 한다."""
     with _conn() as conn:
@@ -591,7 +635,7 @@ def positions(status: str | None = None, limit: int = 100) -> list[dict]:
             rows = conn.execute(
                 "SELECT * FROM positions WHERE status!='void' "
                 "ORDER BY opened DESC LIMIT ?", (limit,)).fetchall()
-    return [dict(r) for r in rows]
+    return [_row(r) for r in rows]
 
 
 # --------------------------------------------------------------------------
@@ -730,6 +774,7 @@ def marks_for(symbol: str, day: str) -> dict:
                 marks.append({
                     "time": t, "price": round(float(r["exit"]), 2), "kind": "exit",
                     "reason": r["exit_reason"], "qty": r["qty"], "rule": r["rule"],
+                    "outcome": outcome(r),
                     "pnl_pct": r["pnl_pct"], "pnl_krw": r["pnl_krw"],
                     "confirmed": bool(r["exit_fill_confirmed"]),
                 })

@@ -356,8 +356,13 @@ export function createProChart(host, opts = {}) {
         lines.push([`▲ 매수 ${mk.qty}주 @ ${fmt(mk.price)} (${mk.rule})`, "#7a5cff"]);
       } else {
         const col = (mk.pnl_pct || 0) >= 0 ? UP : DOWN;
-        lines.push([`▼ ${EXIT_KO[mk.reason] || mk.reason || "청산"} @ ${fmt(mk.price)}` +
-                    ` ${fmt2(mk.pnl_pct || 0)}%`, col]);
+        // 결과(익절/손절)는 실제 손익 부호로 정한다 — 사유가 손절이어도 이익이면
+        // 익절이다. 기계적 사유는 괄호로 남긴다(올라간 손절선에서 나온 이익과
+        // 목표 도달 이익은 다음에 볼 곳이 다르다).
+        const why = EXIT_KO[mk.reason] || mk.reason || "청산";
+        const label = mk.outcome && mk.outcome !== why
+          ? `${mk.outcome}(${why})` : why;
+        lines.push([`▼ ${label} @ ${fmt(mk.price)} ${fmt2(mk.pnl_pct || 0)}%`, col]);
       }
     }
     g.font = "11px sans-serif";
