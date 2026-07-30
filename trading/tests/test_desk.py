@@ -733,3 +733,50 @@ async def test_아무_일도_없으면_요약을_남기지_않는다(env, caplog
         await desk.tick(spy.fresh, spy.rest, spy.execute,
                         now=NOW + timedelta(seconds=90))
     assert not [r for r in caplog.records if "데스크 요약" in r.message]
+
+
+# --- REST 폴백 결과를 공유해야 화면 가격이 움직인다 (2026-07-30) ---
+
+def test_rest_price_reaches_the_shared_snapshot():
+    """데스크가 조회한 시세를 화면도 봐야 한다.
+
+    종전에는 데스크만 쓰고 버려서, WS 틱이 오지 않는 종목(실측: ETF)은
+    `_price_of` 의 스냅샷이 계속 비고 DB 분봉 종가로 폴백했다 — 데스크가 2초마다
+    조회하는데 화면 가격은 백필 주기까지 고정됐다.
+    """
+    from app.data.collector import BarAggregator
+
+    agg = BarAggregator()
+    assert agg.snapshot("005930") is None
+    agg.apply_rest_price("005930", 70_000)
+    snap = agg.snapshot("005930")
+    assert snap and snap["close"] == 70_000
+
+
+def test_rest_price_does_not_fake_ws_freshness():
+    """`_seen` 을 갱신하면 데스크 요약의 `WS x · REST y` 가 거짓이 된다.
+
+    그러면 WS 가 죽었는지 살았는지 못 가린다 — 그 로그가 전환 관찰의 유일한
+    진단 수단이다.
+    """
+    from app.data.collector import BarAggregator
+
+    agg = BarAggregator()
+    agg.apply_rest_price("005930", 70_000)
+    assert agg.age_sec("005930") is None, "REST 주입이 WS 틱으로 세이면 안 된다"
+    assert agg.fresh_price("005930", 5.0) is None
+
+
+def test_rest_price_does_not_inflate_volume():
+    """REST 는 누적 거래량을 준다 — 틱처럼 더하면 봉 거래량이 폭증한다."""
+    import asyncio
+
+    from app.data.collector import BarAggregator
+
+    agg = BarAggregator()
+    asyncio.run(agg.on_tick("005930", 70_000, 100, ""))
+    agg.apply_rest_price("005930", 70_500)
+    snap = agg.snapshot("005930")
+    assert snap["volume"] == 100          # 늘지 않는다
+    assert snap["close"] == 70_500        # 가격은 갱신된다
+    assert snap["high"] == 70_500

@@ -165,6 +165,16 @@ async def apply(decisions: list[dict]) -> int:
     return applied
 
 
+# ka10095 한 콜에 넣을 종목 수 상한. 89종목은 실측으로 확인했고(2026-07-30),
+# 그 위는 아직 안 재봤다 — 모르는 한도에 기대는 대신 여유를 두고 나눈다.
+WATCH_INFO_CHUNK = 80
+
+
+def _chunks(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
 class Engine:
     def __init__(self) -> None:
         self.sources = [cls() for cls in ALL]
@@ -226,19 +236,32 @@ class Engine:
         if not settings.KIWOOM_APP_KEY or not promote.in_session(now):
             return 0
         from ..kiwoom.client import client
-        from ..kiwoom.quote import parse_quote
+        from ..kiwoom.quote import parse_watch_info
 
+        targets = [c for c in self.candidates
+                   if cur.tier.get(c.code) == promote.COLLECT]
+        if not targets:
+            return 0
+        # **한 콜로 묶는다.** 종목당 1콜(ka10006)이던 시절 full 전환 직후
+        # mrkcond 가 분당 72~85콜까지 올라 전체 예산의 절반을 먹었다(실측
+        # 2026-07-30). ka10095 는 89종목을 1콜로 받는다.
+        #
+        # 한 콜이라 실패도 전부 함께 실패한다 — 그게 맞다. 시세를 못 받으면
+        # price_fresh 가 False 로 남고 `_tradable` 이 이번 사이클 승격을
+        # 보류한다. 30초 뒤 다시 온다.
         got = 0
-        for c in self.candidates:
-            if cur.tier.get(c.code) != promote.COLLECT:
-                continue
+        for chunk in _chunks([c.code for c in targets], WATCH_INFO_CHUNK):
             try:
-                c.quote = parse_quote(await client.quote(c.code))
+                quotes = parse_watch_info(await client.watch_info(chunk))
             except Exception as e:  # noqa: BLE001 - 못 받으면 승격을 미룬다
-                log.warning("현재가 조회 실패 %s — 이번 사이클 매매 승격 보류: %s",
-                            c.code, e)
+                log.warning("현재가 묶음 조회 실패 %d종목 — 이번 사이클 매매 승격 "
+                            "보류: %s", len(chunk), e)
                 continue
-            got += 1 if c.quote else 0
+            for c in targets:
+                q = quotes.get(c.code)
+                if q:
+                    c.quote = q
+                    got += 1
         return got
 
     def project(self, now: datetime | None = None, cur=None) -> list[dict]:

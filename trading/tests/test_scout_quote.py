@@ -167,3 +167,58 @@ def test_decision_without_a_quote_carries_no_observation_fields():
     """실측이 없으면 빈 값을 지어내지 않는다 — 0 과 '모름' 은 다르다."""
     d = _plan([_c(["volume"])])[0]
     assert "change_pct" not in d and "cntr_str" not in d
+
+
+# --- 시세 조회를 한 콜로 묶는다 (2026-07-30 실측 대응) ---
+
+def test_watch_info_parses_to_the_same_shape_as_quote():
+    """단건(ka10006)과 묶음(ka10095)의 반환 모양이 같아야 한다.
+
+    다르면 호출부에 분기가 생기고, 그 분기가 곧 '어느 쪽이 맞나' 문제가 된다.
+    """
+    from app.kiwoom.quote import parse_watch_info
+
+    got = parse_watch_info({"return_code": 0, "atn_stk_infr": [
+        {"stk_cd": "005930", "stk_nm": "삼성전자", "cur_prc": "-208500",
+         "flu_rt": "-5.23", "cntr_str": "107.0", "trde_qty": "65555523",
+         "trde_prica": "13726155"},
+        {"stk_cd": "000660", "stk_nm": "SK하이닉스", "cur_prc": "+1401000",
+         "flu_rt": "+2.10", "cntr_str": "105.8", "trde_qty": "1000",
+         "trde_prica": "17560826"},
+    ]})
+    assert set(got) == {"005930", "000660"}
+    # 가격의 +/- 는 전일대비 방향이다 — 절댓값으로 읽어야 한다
+    assert got["005930"]["price"] == 208500 and got["005930"]["change_pct"] == -5.23
+    assert got["000660"]["price"] == 1401000
+    assert got["005930"]["cntr_str"] == 107.0
+    assert got["005930"]["trde_prica"] == 13726155
+
+
+def test_watch_info_skips_unusable_rows():
+    """가격 0·코드 없음은 '조회됨' 으로 세면 안 된다 — 승격 게이트가 오판한다."""
+    from app.kiwoom.quote import parse_watch_info
+
+    got = parse_watch_info({"return_code": 0, "atn_stk_infr": [
+        {"stk_cd": "999999", "stk_nm": "", "cur_prc": "0"},
+        {"stk_cd": "", "cur_prc": "1000"},
+        {"stk_cd": "005930", "stk_nm": "삼성전자", "cur_prc": "-208500"},
+    ]})
+    assert list(got) == ["005930"]
+
+
+def test_watch_info_error_is_empty_not_partial():
+    from app.kiwoom.quote import parse_watch_info
+
+    assert parse_watch_info({"return_code": 1, "return_msg": "오류"}) == {}
+    assert parse_watch_info({}) == {}
+
+
+def test_chunking_respects_the_measured_limit():
+    """89종목은 실측했고 그 위는 안 재봤다 — 모르는 한도에 기대지 않는다."""
+    from app.scout.engine import WATCH_INFO_CHUNK, _chunks
+
+    assert WATCH_INFO_CHUNK <= 89
+    codes = [f"{i:06d}" for i in range(200)]
+    parts = list(_chunks(codes, WATCH_INFO_CHUNK))
+    assert sum(len(p) for p in parts) == 200
+    assert all(len(p) <= WATCH_INFO_CHUNK for p in parts)

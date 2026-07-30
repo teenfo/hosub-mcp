@@ -45,6 +45,35 @@ class BarAggregator:
         bar["c"] = price
         bar["v"] += volume
 
+    def apply_rest_price(self, symbol: str, price: float) -> None:
+        """REST 로 받은 현재가를 형성 중인 봉에 반영한다 (WS 틱이 아니다).
+
+        데스크가 폴백으로 조회한 시세를 화면·`_price_of` 도 볼 수 있게 하려고
+        둔다. 종전에는 데스크만 쓰고 버려서, WS 틱이 오지 않는 종목은 화면
+        가격이 분봉 백필 주기까지 고정됐다(실측 2026-07-30 ETF).
+
+        **`_seen` 을 건드리지 않는 것이 핵심이다.** 갱신하면 다음 사이클에
+        `fresh_price` 가 이 값을 '신선한 WS 값' 으로 돌려주고, 데스크 요약의
+        `WS x · REST y` 가 거짓이 된다 — WS 가 죽었는지 살았는지 못 가리게 된다.
+        그 로그가 오늘 전환의 유일한 진단 수단이다.
+
+        거래량은 더하지 않는다. REST 는 누적 거래량을 주므로 틱처럼 더하면
+        봉의 거래량이 폭증한다.
+        """
+        now = datetime.now(KST)
+        minute = now.replace(second=0, microsecond=0)
+        bar = self._current.get(symbol)
+        if bar and bar["minute"] != minute:
+            self._flush(symbol, bar)
+            bar = None
+        if bar is None:
+            self._current[symbol] = {"minute": minute, "o": price, "h": price,
+                                     "l": price, "c": price, "v": 0}
+            return
+        bar["h"] = max(bar["h"], price)
+        bar["l"] = min(bar["l"], price)
+        bar["c"] = price
+
     def snapshot(self, symbol: str) -> dict | None:
         """형성 중인 현재 분봉 (차트 실시간 표시용)."""
         bar = self._current.get(symbol)

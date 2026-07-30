@@ -60,3 +60,35 @@ def parse_quote(raw: dict) -> dict | None:
         "cntr_str": _num(raw.get("cntr_str")),
         "volume": _num(raw.get("trde_qty"), int),
     }
+
+
+def parse_watch_info(raw: dict) -> dict[str, dict]:
+    """ka10095(관심종목정보) → {code: {price, change_pct, cntr_str, volume}}.
+
+    `parse_quote` 와 **같은 모양**을 낸다. 호출부가 단건(ka10006)과 묶음(ka10095)을
+    바꿔 쓸 때 형태가 달라지면 그 자리에서 분기가 생긴다.
+
+    묶음으로 받는 이유는 콜 수다. ka10006 은 종목당 1콜이라 승격 후보가 늘면
+    선형으로 증가한다 — 실측 2026-07-30 full 전환 직후 mrkcond 가 분당 72~85콜
+    까지 올라 전체 예산의 절반을 먹었다. ka10095 는 89종목을 1콜로 받는다.
+
+    필드명이 ka10006 과 다르다: 현재가가 `close_pric` 이 아니라 `cur_prc` 이고
+    거래대금(`trde_prica`)이 추가로 온다. 가격에 붙는 +/- 는 전일대비 **방향**
+    이므로 절댓값으로 읽는다.
+    """
+    if raw.get("return_code") not in (0, "0", None):
+        return {}
+    out: dict[str, dict] = {}
+    for row in raw.get("atn_stk_infr") or []:
+        code = str(row.get("stk_cd", "")).strip()
+        price = abs(_num(row.get("cur_prc")))
+        if not code or price <= 0:
+            continue
+        out[code] = {
+            "price": price,
+            "change_pct": _num(row.get("flu_rt")),
+            "cntr_str": _num(row.get("cntr_str")),
+            "volume": _num(row.get("trde_qty"), int),
+            "trde_prica": _num(row.get("trde_prica"), int),
+        }
+    return out

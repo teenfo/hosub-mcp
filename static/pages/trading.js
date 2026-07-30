@@ -625,6 +625,45 @@ export default {
                 [el("span", { html: stockHTML(symbol, name) }), chart]);
     };
 
+    // 데스크 설정(추종 발동선 계산용). renderDesk 가 갱신한다 — 보유 표와
+    // 데스크 카드가 같은 값을 봐야 "발동" 표시가 실제 동작과 일치한다.
+    let deskState = {};
+
+    /** 진입가 대비 현재가 위치 + 익절선 추종 발동선까지의 거리.
+     *
+     * 왜 % 하나로 안 되는가: 추종 발동 조건은 **진입가 대비 %가 아니라
+     * 진입→목표 갭 대비 비율**(`tighten_at`)이다. 목표가가 종목마다 다르므로
+     * 같은 +1.5% 가 어떤 종목에서는 발동이고 어떤 종목에서는 아니다.
+     * 그래서 둘을 같이 보여준다 — 진입가 대비 %(직관)와 갭 진행률(실제 조건).
+     *
+     * 평단(계좌)과 진입가(원장)는 다를 수 있다. 발동 판정은 **원장 진입가**로
+     * 하므로 그 기준을 쓰고, 원장이 없으면 평단으로 대체한다. */
+    const entryProgress = (h, p) => {
+      const cur = Number(h.cur_price || 0);
+      const entry = Number((p && p.entry) || h.avg_price || 0);
+      if (!(cur > 0 && entry > 0)) return '<span class="text-secondary">—</span>';
+      const pct = (cur / entry - 1) * 100;
+      const tone = pct > 0 ? "text-danger" : pct < 0 ? "text-primary" : "";
+      let out = `<span class="${tone}">${pct > 0 ? "+" : ""}${pct.toFixed(2)}%</span>`;
+      // 추종이 꺼져 있으면 발동선을 말할 이유가 없다 — 없는 기능을 있는 것처럼
+      // 보여주지 않는다.
+      const d = deskState || {};
+      const target = Number((p && (p.target_live ?? p.target)) || 0);
+      const at = Number(d.tighten_at ?? 0);
+      if (d.trailing && target > entry && at > 0) {
+        const gap = target - entry;
+        const trigger = entry + gap * at;
+        const prog = (cur - entry) / gap * 100;
+        out += ` <span class="text-secondary" style="font-size:.72rem">`
+             + `갭 ${prog.toFixed(0)}%`
+             + (cur >= trigger
+                 ? ' <span class="badge text-bg-warning">추종 발동</span>'
+                 : ` · 발동 ${fmt(trigger)}`)
+             + `</span>`;
+      }
+      return out;
+    };
+
     // --- 보유 포지션 · 청산 관리 ---
     // 실제 계좌 보유(키움)와 시스템 추적 포지션(손절/목표 감시 대상)을 나란히 본다.
     // 둘이 어긋나면(체결 실패·수동 매매 등) 경고를 띄운다 — 유령 포지션 감시 방지.
@@ -829,7 +868,7 @@ export default {
         `계좌 보유 ${holds.length}건` + (acct && acct.ok ? ` · 평가 ${won(acct.total_eval)} · 손익 ${won(acct.total_pl)}` : "")));
       if (holds.length) {
         const t = el("table", { class: "table table-sm align-middle mb-3 small" });
-        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>수량</th><th>평단</th><th>현재가</th><th>평가손익</th><th>손절/목표</th><th></th></tr>" }));
+        t.appendChild(el("thead", { html: "<tr><th>종목</th><th>수량</th><th>평단</th><th>현재가</th><th>진입가 대비</th><th>평가손익</th><th>손절/목표</th><th></th></tr>" }));
         const tb = el("tbody");
         for (const h of holds) {
           const p = trackBy[h.code];
@@ -837,6 +876,7 @@ export default {
           const tr = el("tr", { html:
             `<td>${stockHTML(h.code, h.name)}</td><td>${fmt(h.qty)}</td><td>${fmt(h.avg_price)}</td>` +
             `<td>${fmt(h.cur_price)}</td>` +
+            `<td>${entryProgress(h, p)}</td>` +
             `<td class="${tone}">${won(h.pl_amt)} (${(h.pl_rt ?? 0).toFixed(2)}%)</td>` +
             `<td>${p ? lineCell(p) : '<span class="text-warning">감시 없음</span>'}</td>` });
           const td = el("td");
@@ -916,6 +956,7 @@ export default {
         }
         return;
       }
+      deskState = s.desk || {};
       renderDesk(s.desk);
       let a = null;
       try { a = await fetchJSON("/api/trading/account"); } catch (e) { a = null; }
