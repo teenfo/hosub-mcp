@@ -560,6 +560,29 @@ def test_오버라이드는_준_값만_바꾼다(env):
     assert desk._num("interval_sec") == 3.0
 
 
+def test_라인_추종은_런타임으로_켜고_끌_수_있다(env):
+    """마스터 스위치다. 화면에 토글이 없어 배지로만 보이던 것을 고쳤으므로
+    (2026-07-30), 그 토글이 실제로 반영되는 경로를 못박아 둔다."""
+    desk.set_state(trailing=False)
+    assert desk.trailing() is False
+    desk.set_state(trailing=True)
+    assert desk.trailing() is True
+
+
+def test_추종이_꺼지면_하위_파라미터가_전부_무효다(env, monkeypatch):
+    """발동·확정·익절선 추종을 어떻게 놓아도 라인이 움직이지 않는다.
+
+    화면이 이 사실을 감춰서 실제로 오래 헛돌았다 — 라인 추종 OFF 인데 발동·확정
+    입력칸이 열려 있고 익절선 추종이 ON 이었다. 값이 무효라는 것을 코드로 고정해
+    두면, 화면이 다시 어긋났을 때 여기가 기준이 된다."""
+    monkeypatch.setitem(settings.CONFIG, "execution", {"desk": {
+        "enabled": True, "trailing": False,
+        "tighten_at": 0.1, "lock_gain_pct": 90, "trail_target": True}})
+    pos = {"side": "long", "entry": 10_000.0, "stop": 9_800.0, "target": 10_400.0,
+           "stop_live": None, "target_live": None}
+    assert desk.update_lines(pos, 10_390) is None, "추종 OFF 면 갱신 없음"
+
+
 def test_추종_파라미터는_범위를_벗어나지_못한다(env):
     """실거래 청산선을 정하는 값이다 — 오타 하나가 손절선을 엉뚱한 곳에 놓는다."""
     got = desk.set_state(tighten_at=5, lock_gain_pct=150, max_gain_pct=-1)
