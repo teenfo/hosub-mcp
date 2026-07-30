@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -61,6 +62,58 @@ MAX_EMBED_BATCH = 256
 DOCS_DIR = Path(
     os.environ.get("LLMGW_DOCS_DIR") or Path(__file__).resolve().parent.parent / "docs"
 )
+
+_ROOT = Path(__file__).resolve().parent.parent
+
+# 소비자가 실제로 쓰는 인터페이스는 HTTP 가 아니라 **이 파일들**이다. 문서에도
+# 그렇게 적혀 있는데(1절: "클라이언트 한 파일을 자기 레포에 복사") 정작 이미지에
+# 없어서 저장소 접근이 없는 소비자는 받을 수 없었다. 이제 서빙한다.
+#
+# 경로 파라미터를 두지 않는다 — 리터럴 두 개다. /v1/integration 이 세운 선례이고
+# 파일 하나만 노출하면 경로 탐색 여지가 아예 없다.
+CLIENT_SOURCES = {
+    "llmgw.py": Path(os.environ.get("LLMGW_CLIENT_DIR") or _ROOT / "client") / "llmgw.py",
+    "mock_gateway.py": Path(
+        os.environ.get("LLMGW_TOOLS_DIR") or _ROOT / "tools") / "mock_gateway.py",
+}
+
+# 경로 → ((mtime_ns, size), {sha256, bytes})
+_FILE_META_CACHE: dict[Path, tuple[tuple[int, int], dict]] = {}
+
+
+def _file_meta(path: Path) -> dict | None:
+    """서빙할 바이트에서 sha256·크기를 계산한다. 없으면 None.
+
+    **하드코딩하지 않는다.** 소비자는 자기 사본을 `sha256sum` 해서 이 값과
+    비교해 최신인지 판단한다 — 사본 셋(정본·trading·tnm)을 비교하는 장치가
+    레포에 없으므로 이게 유일한 드리프트 탐지기다. mtime+size 로 캐시해
+    매 요청 해싱을 피한다.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (st.st_mtime_ns, st.st_size)
+    cached = _FILE_META_CACHE.get(path)
+    if cached and cached[0] == key:
+        return cached[1]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    meta = {"sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)}
+    _FILE_META_CACHE[path] = (key, meta)
+    return meta
+
+
+def _client_file_meta() -> dict[str, dict]:
+    """이미지에 실제로 있는 파일만 담아 돌려준다(있는 척하지 않는다)."""
+    out = {}
+    for name, path in CLIENT_SOURCES.items():
+        meta = _file_meta(path)
+        if meta:
+            out[name] = meta
+    return out
 
 
 async def _json_body(request: Request) -> dict:
@@ -508,7 +561,39 @@ def build_app(
         if err:
             return err
         return JSONResponse(build_meta(roles=roles, svc=svc, limits=_limits(),
-                                       routes=request.app.routes))
+                                       routes=request.app.routes,
+                                       file_meta=_client_file_meta()))
+
+    # --- 클라이언트 원본 서빙 ---
+    #
+    # 인증을 요구한다. 발급된 그 토큰이 온보딩 키이고, 누가 언제 받아 갔는지
+    # 접근 로그에 남는다. 공개 경로(/llm/v1/*)라 무인증으로 열 이유가 없다.
+    def _serve_source(request: Request, name: str):
+        path = CLIENT_SOURCES[name]
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            log.warning("클라이언트 원본을 읽을 수 없음 %s: %s", path, exc)
+            return JSONResponse(
+                {"error": "not_found",
+                 "detail": f"{name} 이 이미지에 없습니다({path}). "
+                           "Dockerfile 의 COPY client/·tools/ 와 재빌드를 확인하세요."},
+                status_code=404,
+            )
+        return PlainTextResponse(source, media_type="text/x-python; charset=utf-8",
+                                 headers=_attachment(request, name))
+
+    async def client_llmgw(request: Request):
+        _svc, err = _auth(request)
+        if err:
+            return err
+        return _serve_source(request, "llmgw.py")
+
+    async def client_mock(request: Request):
+        _svc, err = _auth(request)
+        if err:
+            return err
+        return _serve_source(request, "mock_gateway.py")
 
     async def openapi_json(request: Request):
         svc, err = _auth(request)
@@ -1130,6 +1215,9 @@ def build_app(
         Route("/v1/meta", meta, methods=["GET"]),
         Route("/v1/openapi.json", openapi_json, methods=["GET"]),
         Route("/v1/openapi.yaml", openapi_yaml, methods=["GET"]),
+        # 리터럴 두 개다 — 경로 파라미터를 두면 경로 탐색 표면이 생긴다.
+        Route("/v1/client/llmgw.py", client_llmgw, methods=["GET"]),
+        Route("/v1/client/mock_gateway.py", client_mock, methods=["GET"]),
         # 관리 전용 — Caddy 가 공개 경로에서 404 로 잘라낸다(deploy/Caddyfile)
         Route("/v1/admin/roles", admin_list_roles, methods=["GET"]),
         Route("/v1/admin/roles", admin_set_role, methods=["POST"]),

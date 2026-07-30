@@ -87,6 +87,8 @@ ERROR_CODES = [
 # 사람이 읽는 한 줄만 채운다. 라우트가 있는데 여기 없으면 테스트가 실패한다.
 ENDPOINT_SUMMARIES: dict[tuple[str, str], str] = {
     ("GET", "/healthz"): "헬스체크(인증 불필요)",
+    ("GET", "/v1/client/llmgw.py"): "파이썬 클라이언트 원본",
+    ("GET", "/v1/client/mock_gateway.py"): "개발용 목 게이트웨이 원본",
     ("POST", "/v1/generate"): "생성. wait 초까지 기다림(0이면 즉시 pending)",
     ("POST", "/v1/embed"): "임베딩 벡터. 유일하게 잡 큐를 타지 않는다",
     ("GET", "/v1/jobs"): "잡 목록(본인 서비스)",
@@ -121,9 +123,51 @@ INLINE_ADMIN: set[tuple[str, str]] = {("POST", "/v1/models/requests")}
 # 인증이 필요 없는 경로
 PUBLIC_ROUTES: set[tuple[str, str]] = {("GET", "/healthz")}
 
-# 소비자 `paths` 에 스키마를 쓰지 않는 경로(재고에는 있으나 OpenAPI 문서 대상이
-# 아닌 것). 관리 계열은 x-admin-endpoints 로 가므로 여기 넣지 않는다.
-_NO_SPEC: set[tuple[str, str]] = set()
+# 소비자가 실제로 쓰는 인터페이스는 HTTP 가 아니라 **파일 하나**다.
+#
+# 여기 담는 것은 OpenAPI 로 표현할 수 없는 것들이다 — 폴링 루프, HTTP 타임아웃
+# 자동 확대, 미지 필드 무시, cancel() 이 모든 오류를 삼켜 False 를 돌려주는 것.
+# 스펙으로 생성한 클라이언트에는 이게 전부 없다. sha256·bytes 는 여기 적지 않고
+# 서빙할 바이트에서 계산해 넣는다(하드코딩하면 파일을 고칠 때마다 어긋난다).
+CLIENT_FILES: dict[str, dict] = {
+    "python": {
+        "file": "llmgw.py",
+        "path": "client/llmgw.py",
+        "download": "/v1/client/llmgw.py",
+        "language": "python",
+        "python": ">=3.10",
+        "requires": ["httpx>=0.27"],
+        "entrypoints": ["LLMGateway", "AsyncLLMGateway", "Job"],
+        "exceptions": {
+            "AuthError": "401·403 — 토큰·권한 문제. 재시도 무의미",
+            "RoleError": "404·413 — 없는 역할·입력 초과. 코드를 고쳐야 한다",
+            "GatewayError": "429·5xx·기타 — 백오프 후 재시도",
+            "JobFailed": "잡이 failed 로 끝났다. .job 에 잡이 담겨 있다",
+            "JobTimeout": "wait_for 의 벽시계 한도를 넘었다. 잡은 계속 돌 수 있다",
+        },
+        "notes": [
+            "자동 재시도가 없다 — 재시도는 호출자 책임이다.",
+            "wait_for 의 기본 폴링 간격은 2초다(레이트리밋이 분당 60이라 1초는 429).",
+            "generate 는 HTTP 타임아웃을 자동으로 wait+15 초로 넓힌다.",
+            "embed 의 타임아웃은 120초 고정이다.",
+            "Job.from_dict 는 모르는 필드를 버린다 — 서버가 필드를 늘려도 안 깨진다.",
+            "cancel 은 모든 오류를 삼켜 False 를 돌려준다 — 인증 실패도 False 다.",
+            "환경변수 LLMGW_URL·LLMGW_TOKEN 을 읽는다. 공개 주소에는 /llm 을 붙일 것.",
+        ],
+    },
+    "mock": {
+        "file": "mock_gateway.py",
+        "path": "tools/mock_gateway.py",
+        "download": "/v1/client/mock_gateway.py",
+        "language": "python",
+        "requires": ["starlette", "uvicorn"],
+        "notes": [
+            "게이트웨이 없이 개발할 때 쓴다: python mock_gateway.py",
+            "응답 키 집합이 실서버와 같은지는 회귀 테스트가 지킨다.",
+            "--deny <역할> 로 권한 없는 역할의 403 을 재현할 수 있다.",
+        ],
+    },
+}
 
 
 def route_inventory(routes) -> list[dict]:
@@ -167,11 +211,40 @@ def _role_entry(role) -> dict:
     return d
 
 
-def build_meta(*, roles, svc, limits: dict, routes=()) -> dict:
+def _client_block(file_meta: dict | None, paths: set[str]) -> dict:
+    """클라이언트 파일 메타데이터.
+
+    `file_meta` 는 파일명 → `{sha256, bytes}` 다. **이미지에 파일이 없으면
+    `available: false` 를 낸다** — 있는 척하면 소비자가 404 를 받고서야 안다
+    (`client/` 가 이미지에 없던 시절이 정확히 그랬다).
+    """
+    files = {}
+    for key, info in CLIENT_FILES.items():
+        entry = {k: v for k, v in info.items() if k != "file"}
+        measured = (file_meta or {}).get(info["file"])
+        entry["available"] = bool(measured)
+        if measured:
+            entry.update(measured)
+        files[key] = entry
+    out = {
+        "contract_version": CONTRACT_VERSION,
+        "files": files,
+        "openapi": {"json": "/v1/openapi.json", "yaml": "/v1/openapi.yaml"},
+        "how_to_check": "받은 파일의 sha256 이 여기 값과 같으면 최신이다 "
+                        "(sha256sum llmgw.py).",
+    }
+    # 탐색기는 있을 때만 알린다 — 없는 경로를 약속하지 않는다.
+    if "/v1/docs" in paths:
+        out["docs"] = "/v1/docs"
+    return out
+
+
+def build_meta(*, roles, svc, limits: dict, routes=(), file_meta=None) -> dict:
     """`GET /v1/meta` 본문. 코드 생성·입력 검증에 필요한 사실만 담는다."""
     allowed = [r for r in roles.roles if svc.may_use(r.name)]
     inventory = route_inventory(routes)
     consumer = [e for e in inventory if not e["admin"]]
+    live_paths = {e["path"] for e in inventory}
     return {
         "contract_version": CONTRACT_VERSION,
         "service": svc.name,
@@ -191,11 +264,13 @@ def build_meta(*, roles, svc, limits: dict, routes=()) -> dict:
                                  "summary": e["summary"]}
                                 for e in inventory if e["admin"]]}
            if svc.admin else {}),
+        # 소비자가 실제로 쓰는 인터페이스는 HTTP 가 아니라 이 파일이다.
+        "client": _client_block(file_meta, live_paths),
         "links": {
             "integration_markdown": "/v1/integration",
             "openapi_json": "/v1/openapi.json",
             "openapi_yaml": "/v1/openapi.yaml",
-            "docs": "/v1/docs",
+            **({"docs": "/v1/docs"} if "/v1/docs" in live_paths else {}),
         },
         "notes": [
             "역할의 모델은 운영자가 런타임에 바꿀 수 있다. 모델 이름을 "
@@ -207,6 +282,9 @@ def build_meta(*, roles, svc, limits: dict, routes=()) -> dict:
             "실패한 잡의 error 와 임베딩 백엔드 오류의 error 는 **사람이 읽는 "
             "문장**이다. error_codes 의 코드가 아니므로 문자열로 분기하지 말고 "
             "HTTP 상태와 retryable 을 보라.",
+            "파이썬이라면 스펙으로 클라이언트를 생성하지 말고 client 블록의 "
+            "llmgw.py 를 받아 쓰는 편이 낫다 — 폴링·타임아웃 확대·예외 구분이 "
+            "이미 들어 있고 스펙으로는 그게 표현되지 않는다.",
             "generate 의 model 필드는 관리 전용이다(소비자가 보내면 403).",
             "/v1/admin/* 은 공개 경로에서 404 다.",
         ],
@@ -393,14 +471,15 @@ def _consumer_paths(limits: dict, gen_roles: list[str], emb_roles: list[str]) ->
         "401": _err("unauthorized"), "403": _err("forbidden"),
         "429": _err("rate_limited"),
     }
+    file_dl_param = {"name": "download", "in": "query", "required": False,
+                     "schema": {"type": "string", "enum": ["1"]},
+                     "description": "붙이면 Content-Disposition: attachment 로 내린다"}
     spec_get = {
         "responses": {"200": {"description": "OpenAPI 3.1 스펙",
                               "content": {"application/json": {
                                   "schema": {"type": "object", "additionalProperties": True}}}},
                       **errs},
-        "parameters": [{"name": "download", "in": "query", "required": False,
-                        "schema": {"type": "string", "enum": ["1"]},
-                        "description": "붙이면 Content-Disposition: attachment 로 내린다"}],
+        "parameters": [file_dl_param],
     }
 
     return {
@@ -512,6 +591,29 @@ def _consumer_paths(limits: dict, gen_roles: list[str], emb_roles: list[str]) ->
             "summary": "사람이 읽는 통합 가이드(마크다운)",
             "responses": {"200": {"description": "마크다운",
                                   "content": {"text/markdown": {"schema": {"type": "string"}}}},
+                          **errs},
+        }},
+        # 파이썬 소비자에게는 이게 스펙보다 값어치 있다 — 폴링·타임아웃 확대·
+        # 예외 구분이 이미 들어 있고 코드 생성으로는 그게 나오지 않는다.
+        "/v1/client/llmgw.py": {"get": {
+            "operationId": "getPythonClient",
+            "summary": "파이썬 클라이언트 원본(단일 파일)",
+            "description": "받아서 자기 레포에 복사한다. 최신인지는 GET /v1/meta 의 "
+                           "client.files.python.sha256 과 비교해 확인한다.",
+            "parameters": [file_dl_param],
+            "responses": {"200": {"description": "파이썬 소스",
+                                  "content": {"text/x-python": {"schema": {"type": "string"}}}},
+                          "404": _err("이미지에 파일이 없다(재빌드 필요)"),
+                          **errs},
+        }},
+        "/v1/client/mock_gateway.py": {"get": {
+            "operationId": "getMockGateway",
+            "summary": "개발용 목 게이트웨이 원본(단일 파일)",
+            "description": "게이트웨이 없이 개발할 때 띄운다: python mock_gateway.py",
+            "parameters": [file_dl_param],
+            "responses": {"200": {"description": "파이썬 소스",
+                                  "content": {"text/x-python": {"schema": {"type": "string"}}}},
+                          "404": _err("이미지에 파일이 없다(재빌드 필요)"),
                           **errs},
         }},
         "/healthz": {"get": {

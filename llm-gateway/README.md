@@ -62,9 +62,18 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `GET /v1/roles` | 쓸 수 있는 역할·모델 |
 | `GET /v1/status` | 백엔드·레인 큐·사용량 |
 | `GET /v1/integration` | 소비자용 통합 가이드(마크다운) — 레포 접근 없이 최신 계약 |
+| `GET /v1/meta` | 기계가 읽는 계약 — 역할·한도·오류코드·엔드포인트·클라이언트 해시 |
+| `GET /v1/openapi.json` \| `.yaml` | OpenAPI 3.1 스펙. `?download=1` 로 파일 저장 |
+| `GET /v1/client/llmgw.py` | 파이썬 클라이언트 원본 (이미지에 담아 서빙) |
+| `GET /v1/client/mock_gateway.py` | 개발용 목 게이트웨이 원본 |
 | `GET /v1/models/requests` | 모델 설치 요청 목록 |
 | `POST /v1/models/requests` | 승인/거부 — `{"model":…, "action":"approve"\|"reject"}` (admin 서비스만) |
 | `GET /healthz` | 헬스체크 (인증 불필요) |
+
+> **이 표는 손으로 관리한다 — 그래서 어긋난다**(실제로 `/v1/meta` 계열이 한동안
+> 빠져 있었다). 권위 있는 목록은 `GET /v1/meta` 의 `endpoints` 이고, 그쪽은
+> 실행 중인 라우터에서 유도되므로 라우트를 추가하면 자동으로 따라온다.
+> 관리 경로는 admin 토큰에만 `x-admin-endpoints` 로 나온다.
 
 **관리 전용** — `127.0.0.1:8603` 으로만 닿는다. Caddy 가 공개 경로에서 404 로 잘라내고,
 앱 안에서도 `admin: true` 서비스만 통과시킨다(두 겹).
