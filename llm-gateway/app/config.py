@@ -487,6 +487,9 @@ class Service:
     rate_limit_per_min: int = 60
     # 모델 설치 요청을 승인/거부할 수 있는가. hosub(MCP·대시보드)에만 준다.
     admin: bool = False
+    # 값이 아니라 **어느 환경변수에서 왔는가**. 운영 화면이 "이 서비스가 죽은 건
+    # .env 의 어느 줄이 비어서인가" 를 짚어 줄 수 있어야 한다.
+    token_env: str = ""
 
     def may_use(self, role: str) -> bool:
         return "*" in self.allow_roles or role in self.allow_roles
@@ -540,6 +543,7 @@ class ServiceConfig:
                 allow_roles=tuple(str(a) for a in allow),
                 rate_limit_per_min=int(cfg.get("rate_limit_per_min", 60)),
                 admin=bool(cfg.get("admin", False)),
+                token_env=str(token_env),
             )
         if not services:
             raise ConfigError("services 가 비어 있습니다")

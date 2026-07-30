@@ -90,7 +90,15 @@ later = httpx.get(f"{GW}/v1/jobs/{job['job_id']}", headers=H).json()
 | `GET /v1/admin/catalog?q=` | 내장 카탈로그 검색 |
 | `POST /v1/admin/compare` | 모델 A/B — `{"prompt":…, "models":["a","b"]}` |
 | `GET /v1/admin/compare[/{id}]` | 비교 결과·이력 |
+| `GET /v1/admin/services` | 소비자 등록 현황 — 권한·한도·마지막 사용 + **마스킹된** 토큰 |
+| `GET /v1/admin/services/{name}/token` | 소비자 토큰 전체 값 **1건**. `admin_audit` 에 열람 기록 |
 | `GET /v1/admin/audit` | 관리 작업 감사 로그 |
+
+> 토큰 값을 그대로 내보내는 경로는 위 하나뿐이다. 목록에는 절대 실리지 않고,
+> 한 번에 한 서비스만 주며, 열람은 게이트웨이와 대시보드 양쪽 감사에 남는다
+> (값은 어디에도 남기지 않는다). 경계와 이 결정이 뒤집는 것은 설계서 7-4절.
+> **발급·회전·폐기는 여전히 없다** — 새 소비자는 `services.yaml` PR → `.env` →
+> 재기동이다.
 
 ## 역할 모델을 재배포 없이 바꾼다
 

@@ -10,7 +10,7 @@ import json
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 _SCHEMA = """
@@ -372,6 +372,33 @@ class Store:
                 (limit_services,),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def usage_by_service(self, days: int = 7) -> dict[str, dict]:
+        """서비스별 마지막 사용 시각 + 최근 N일 호출 수.
+
+        `usage_summary` 를 확장하지 않고 따로 둔다 — 그쪽은 `/v1/status` 응답에
+        그대로 실려 나가므로 키를 늘리면 소비자 계약이 바뀐다.
+        `last_at` 은 전 기간, `calls` 는 창(window) 안이다.
+        """
+        since = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days)))).isoformat()
+        with self._lock, self._connect() as conn:
+            totals = conn.execute(
+                "SELECT service, MAX(ts) last_at, COUNT(*) total FROM usage"
+                " GROUP BY service"
+            ).fetchall()
+            recent = conn.execute(
+                "SELECT service, COUNT(*) c FROM usage WHERE ts >= ? GROUP BY service",
+                (since,),
+            ).fetchall()
+        window = {r["service"]: int(r["c"]) for r in recent}
+        return {
+            r["service"]: {
+                "last_at": r["last_at"],
+                "calls_total": int(r["total"]),
+                "calls_window": window.get(r["service"], 0),
+            }
+            for r in totals
+        }
 
     def counts_by_status(self) -> dict:
         with self._lock, self._connect() as conn:

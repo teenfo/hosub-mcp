@@ -214,6 +214,29 @@ def integration_doc(*, client_factory=httpx.Client) -> dict:
     return {"status": "ok", "markdown": text, "bytes": len(text.encode("utf-8"))}
 
 
+def list_services(days: int = 7, *, client_factory=httpx.Client) -> dict:
+    """소비자 등록 현황. **토큰은 마스킹된 값만 온다.**
+
+    전 서비스 토큰이 한 응답에 실려 나가는 상황을 만들지 않는다 — 전체 값은
+    reveal_token 이 한 번에 하나씩만 준다.
+    """
+    days = max(1, min(int(days or 7), 90))
+    return _call("GET", f"/v1/admin/services?days={days}",
+                 client_factory=client_factory)
+
+
+def reveal_token(name: str, *, client_factory=httpx.Client) -> dict:
+    """소비자 토큰 **한 개**의 전체 값.
+
+    ⚠️ 비밀을 그대로 가져오는 유일한 경로다. 게이트웨이가 열람을 admin_audit 에
+    남기고, 대시보드도 자기 감사에 남긴다(두 곳 다).
+    """
+    if not name or not name.replace("_", "").replace("-", "").isalnum():
+        return {"status": "error", "error": "서비스 이름이 올바르지 않습니다."}
+    return _call("GET", f"/v1/admin/services/{quote(name, safe='')}/token",
+                 client_factory=client_factory)
+
+
 def meta(*, client_factory=httpx.Client) -> dict:
     """기계가 읽는 계약(역할·한도·오류코드·클라이언트 해시).
 

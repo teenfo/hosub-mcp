@@ -394,6 +394,47 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         name = request.query_params.get("name", "llmgw.py")
         return JSONResponse(await run_in_threadpool(gateway.client_file, name))
 
+    # --- 소비자 토큰 (게이트웨이 /v1/admin/services) ---
+    async def api_llm_services(request):
+        """등록된 소비자와 토큰 상태. 값은 마스킹된 것만 온다."""
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            days = int(request.query_params.get("days", 7))
+        except ValueError:
+            days = 7
+        return JSONResponse(await run_in_threadpool(gateway.list_services, days))
+
+    async def api_llm_token_reveal(request):
+        """소비자 토큰 전체 값 1건.
+
+        ⚠️ 조회 전용 대시보드가 **비밀을 화면에 내보내는 유일한 지점**이다.
+        이전 원칙("토큰 값은 표시하지 않는다", PR #219)을 뒤집는 것이므로 경계를
+        좁게 잡는다: 한 번에 한 서비스만, POST 로만(링크·프리페치로 새지 않게),
+        그리고 누가 언제 무엇을 열었는지 대시보드 감사와 게이트웨이 admin_audit
+        양쪽에 남는다. 근거는 docs/requests/llm-gateway-service.md 7-4절.
+        """
+        if (d := _require_auth_json(request)):
+            return d
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = (body.get("service") or "").strip()
+        if not name:
+            return JSONResponse({"status": "rejected", "reason": "service 가 필요합니다."},
+                                status_code=400)
+        result = await run_in_threadpool(gateway.reveal_token, name)
+        ctx.audit.log(
+            tool="llm_token_reveal",
+            params={"service": name, "via": "dashboard"},
+            risk="high",
+            outcome=result.get("status", "error"),
+            # 값은 절대 남기지 않는다 — 감사 로그가 비밀 저장소가 되면 안 된다
+            result_summary=str(result.get("error") or "revealed")[:200],
+        )
+        return JSONResponse(result)
+
     # --- jw-mcp (별개 프로세스, 127.0.0.1:8604) ---
     #
     # jw-mcp 의 /api/dash/* 는 루프백 전용이다 — Caddy 가 /jw/* 만 공개하고
@@ -668,6 +709,8 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/llm/meta", api_llm_meta),
         Route("/api/llm/openapi", api_llm_openapi),
         Route("/api/llm/client", api_llm_client),
+        Route("/api/llm/services", api_llm_services),
+        Route("/api/llm/services/reveal", api_llm_token_reveal, methods=["POST"]),
         Route("/api/llm/installed", api_llm_installed),
         Route("/api/llm/catalog", api_llm_catalog),
         Route("/api/llm/models/install", api_llm_model_install, methods=["POST"]),

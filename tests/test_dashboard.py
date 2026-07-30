@@ -570,3 +570,63 @@ def test_jw_status_change_is_audited(monkeypatch, audit):
     assert risks == {"disabled": "high", "active": "medium"}
     # 이메일·표시이름은 감사에 남기지 않는다 — user_id 로 충분히 추적된다
     assert all("email" not in r["params_json"] for r in rows)
+
+
+# --- 소비자 토큰 ---
+#
+# 대시보드가 비밀을 화면에 내보내는 유일한 지점이다. 목록에는 마스킹만 실리고,
+# 전체 값은 POST 로 한 번에 하나씩만, 열람은 감사에 남는다.
+def test_token_routes_need_login(client):
+    assert client.get("/api/llm/services").status_code == 401
+    assert client.post("/api/llm/services/reveal",
+                       json={"service": "roxlogy"}).status_code == 401
+
+
+def test_services_listing_carries_no_full_token(client, monkeypatch):
+    from src import gateway
+
+    monkeypatch.setattr(gateway, "list_services", lambda days=7: {
+        "status": "ok", "usage_days": days, "orphan_usage": [],
+        "services": [{"name": "roxlogy", "token_env": "LLMGW_TOKEN_ROXLOGY",
+                      "token_set": True, "token_masked": "ed5b3d…d58784",
+                      "token_sha256": "aabbccddeeff", "allow_roles": ["summarize"],
+                      "rate_limit_per_min": 30, "admin": False,
+                      "last_used_at": None, "calls_total": 0, "calls_window": 0}],
+    })
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    body = client.get("/api/llm/services?days=30").text
+    assert "…" in body and "token_masked" in body
+    assert "token\":" not in body.replace("token_masked", "").replace("token_set", "") \
+        .replace("token_sha256", "").replace("token_env", "")
+
+
+def test_reveal_requires_a_service_name(client):
+    client.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+    r = client.post("/api/llm/services/reveal", json={})
+    assert r.status_code == 400 and r.json()["status"] == "rejected"
+
+
+def test_reveal_is_audited_at_high_risk_without_the_value(monkeypatch, audit):
+    from src import gateway
+
+    secret = "s" * 64
+    monkeypatch.setattr(gateway, "reveal_token",
+                        lambda name: {"status": "ok", "service": name, "token": secret})
+    app = build_app(
+        registry=Registry.from_dict(REG),
+        runner=FakeRunner(),
+        audit=audit,
+        mcp_token=TOKEN,
+        dash_password=PASSWORD,
+        session_secret="session-secret-abcdefgh",
+    )
+    with TestClient(app) as c:
+        c.post("/login", data={"password": PASSWORD}, follow_redirects=False)
+        d = c.post("/api/llm/services/reveal", json={"service": "roxlogy"}).json()
+    assert d["token"] == secret          # 화면에는 전체 값이 간다
+
+    rows = [r for r in audit.recent(50) if r["tool"] == "llm_token_reveal"]
+    assert len(rows) == 1 and rows[0]["risk"] == "high"
+    assert json.loads(rows[0]["params_json"])["service"] == "roxlogy"
+    # 감사 로그는 비밀 저장소가 아니다
+    assert secret not in json.dumps(rows[0], default=str)

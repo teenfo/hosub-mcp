@@ -1,4 +1,5 @@
 import { fetchJSON, el, badge } from "../app.js";
+import { postJSON } from "./tradelib.js";
 
 // LLM 모델 페이지: 맥에 설치된 모델(용량·사용 이력·삭제) + 카탈로그 검색·설치.
 //
@@ -102,6 +103,24 @@ export default {
     docCard.appendChild(docBody);
     docCol.appendChild(docCard);
     row.appendChild(docCol);
+
+    // --- 소비자 토큰 ---
+    //
+    // 토큰 값은 게이트웨이만 들고 있다(services.yaml 은 env 변수 이름만, 값은
+    // gitignore 된 .env). 그래서 "누가 등록돼 있고 토큰이 살아 있는가" 를 볼 수
+    // 있는 곳이 여기뿐이다.
+    const svcCol = el("div", { class: "col-12" });
+    const svcCard = el("div", { class: "card shadow-sm" }, [
+      el("div", { class: "card-header d-flex align-items-center gap-2 flex-wrap" }, [
+        el("span", { html: '<i class="bi bi-key"></i> 소비자 토큰' }),
+        el("span", { class: "small text-secondary ms-auto" },
+          "기본은 마스킹 — 전체 값은 열람 시 감사에 남습니다"),
+      ]),
+    ]);
+    const svcBody = el("div", { class: "card-body" });
+    svcCard.appendChild(svcBody);
+    svcCol.appendChild(svcCard);
+    row.appendChild(svcCol);
 
     // --- A/B 비교 ---
     const abCol = el("div", { class: "col-12" });
@@ -419,6 +438,131 @@ export default {
       });
     };
 
+    // --- 소비자 토큰 렌더 ---
+    //
+    // ⚠️ 이 카드가 대시보드에서 비밀을 화면에 내보내는 유일한 지점이다. 기본은
+    // 마스킹이고, 전체 값은 버튼을 눌러야 나오며 그 열람이 감사에 남는다.
+    const ago = (iso) => {
+      if (!iso) return null;
+      const s = (Date.now() - Date.parse(iso)) / 1000;
+      if (!isFinite(s)) return null;
+      if (s < 3600) return `${Math.max(1, Math.floor(s / 60))}분 전`;
+      if (s < 86400) return `${Math.floor(s / 3600)}시간 전`;
+      return `${Math.floor(s / 86400)}일 전`;
+    };
+
+    const revealCell = (svc) => {
+      const cell = el("div", { class: "d-flex gap-2 align-items-center flex-wrap" });
+      const shown = el("code", { class: "mono small" }, svc.token_masked || "—");
+      cell.appendChild(shown);
+      if (!svc.token_set) return cell;
+
+      const btn = el("button",
+        { class: "btn btn-sm btn-outline-secondary", type: "button" }, "전체 보기");
+      let open = false;
+      btn.addEventListener("click", async () => {
+        if (open) {
+          shown.textContent = svc.token_masked;
+          shown.classList.remove("text-danger");
+          btn.textContent = "전체 보기";
+          cell.querySelectorAll(".reveal-extra").forEach((n) => n.remove());
+          open = false;
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = "여는 중…";
+        try {
+          const d = await postJSON("/api/llm/services/reveal", { service: svc.name });
+          if (d.status !== "ok" || !d.token) {
+            throw new Error(d.error || d.detail || d.reason || "실패");
+          }
+          shown.textContent = d.token;
+          shown.classList.add("text-danger");
+          cell.appendChild(el("span",
+            { class: "reveal-extra" }, copyBtn(d.token, "복사")));
+          cell.appendChild(el("span",
+            { class: "reveal-extra small text-secondary" }, "열람 기록됨"));
+          btn.textContent = "숨기기";
+          open = true;
+        } catch (e) {
+          if (e.message !== "unauthorized") btn.textContent = "실패";
+          setTimeout(() => { btn.textContent = "전체 보기"; }, 2000);
+        } finally {
+          btn.disabled = false;
+        }
+      });
+      cell.appendChild(btn);
+      return cell;
+    };
+
+    const renderServicesCard = () => {
+      svcBody.innerHTML = "";
+      svcBody.appendChild(spinner("소비자 목록을 가져오는 중…"));
+      fetchJSON("/api/llm/services?days=7").then((d) => {
+        svcBody.innerHTML = "";
+        if (d.status !== "ok") {
+          svcBody.appendChild(alertBox("warning", "소비자 목록을 가져오지 못했습니다",
+            d.error || d.reason || d.hint));
+          return;
+        }
+        const list = d.services || [];
+        const dead = list.filter((s) => !s.token_set);
+        if (dead.length) {
+          svcBody.appendChild(alertBox("danger",
+            `토큰이 비어 있는 서비스 ${dead.length}개 — 조용히 비활성 상태입니다`,
+            dead.map((s) => `${s.name}: llm-gateway/.env 의 ${s.token_env} 를 채우세요`)
+              .join(" · ")));
+        }
+        if ((d.orphan_usage || []).length) {
+          svcBody.appendChild(alertBox("warning", "사용 이력만 남은 이름",
+            `${d.orphan_usage.join(", ")} — services.yaml 에서 지웠거나 이름을 바꿨습니다.`));
+        }
+
+        const tbl = el("table", { class: "table table-sm align-middle mb-0" });
+        tbl.appendChild(el("thead", {}, el("tr", {}, [
+          el("th", {}, "서비스"), el("th", {}, "쓸 수 있는 역할"),
+          el("th", { class: "text-end" }, "분당"),
+          el("th", {}, "토큰"), el("th", {}, "마지막 사용"),
+          el("th", { class: "text-end" }, "7일"),
+        ])));
+        const tb = el("tbody");
+        for (const s of list) {
+          const last = ago(s.last_used_at);
+          const staleDays = s.last_used_at
+            ? (Date.now() - Date.parse(s.last_used_at)) / 86400000 : Infinity;
+          tb.appendChild(el("tr", { class: s.token_set ? null : "table-danger" }, [
+            el("td", {}, [
+              el("div", { class: "d-flex gap-2 align-items-center" }, [
+                el("span", { class: "fw-medium mono" }, s.name),
+                s.admin ? badge("admin", "primary") : null,
+              ]),
+              el("div", { class: "small text-secondary mono" }, s.token_env),
+            ]),
+            el("td", { class: "small" },
+               (s.allow_roles || []).includes("*") ? "전체" : (s.allow_roles || []).join(", ")),
+            el("td", { class: "text-end" }, s.rate_limit_per_min),
+            el("td", {}, revealCell(s)),
+            el("td", { class: "small" }, [
+              last ? el("span", { class: staleDays > 30 ? "text-warning" : "" }, last)
+                   : el("span", { class: "text-secondary" }, "사용 이력 없음"),
+            ]),
+            el("td", { class: "text-end small text-secondary" }, s.calls_window ?? 0),
+          ]));
+        }
+        tbl.appendChild(tb);
+        svcBody.appendChild(el("div", { class: "table-responsive" }, tbl));
+        svcBody.appendChild(el("div", { class: "form-text small" },
+          "토큰 값은 llm-gateway/.env 에만 있습니다(레포에 없음). 새 소비자를 "
+          + "추가하려면 services.yaml 에 PR 을 올려 역할·한도를 정한 뒤 .env 에 "
+          + "값을 넣고 게이트웨이를 재기동합니다."));
+      }).catch((e) => {
+        svcBody.innerHTML = "";
+        if (e.message !== "unauthorized") {
+          svcBody.appendChild(alertBox("danger", "소비자 목록 조회 실패", e.message));
+        }
+      });
+    };
+
     const renderDocCard = () => {
       docBody.innerHTML = "";
 
@@ -664,7 +808,8 @@ export default {
     instCard.querySelector("#mdl-refresh").addEventListener("click", () =>
       Promise.all([loadInstalled(), loadCatalog()]));
 
-    renderDocCard();   // 정적이라 폴링하지 않는다
+    renderDocCard();       // 정적이라 폴링하지 않는다
+    renderServicesCard();  // 사용 이력이 붙지만 자주 안 바뀐다 — 진입 시 1회
     instBody.appendChild(spinner("맥에서 모델 목록을 읽는 중…"));
     await Promise.all([loadInstalled(), loadCatalog()]);
     // 설치가 끝나면 목록에 나타나야 하므로 주기 갱신(카탈로그는 정적이라 제외)

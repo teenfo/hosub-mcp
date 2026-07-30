@@ -404,3 +404,26 @@ def test_text_fetchers_are_unconfigured_without_a_token(monkeypatch):
                            client_factory=MarkdownClient)["status"] == "unconfigured"
     assert gateway.client_file("llmgw.py",
                               client_factory=MarkdownClient)["status"] == "unconfigured"
+
+
+# --- 소비자 토큰 관측 ---
+def test_list_services_clamps_the_window():
+    for given, expected in ((7, 7), (0, 7), (1, 1), (90, 90), (999, 90)):
+        gateway.list_services(given, client_factory=FakeClient)
+        assert FakeClient.calls[-1][1].endswith(f"/v1/admin/services?days={expected}")
+
+
+def test_reveal_token_targets_one_service():
+    gateway.reveal_token("roxlogy", client_factory=FakeClient)
+    method, url, _json, _headers = FakeClient.calls[-1]
+    assert method == "GET"
+    assert url.endswith("/v1/admin/services/roxlogy/token")
+
+
+def test_reveal_token_rejects_odd_names_before_the_network():
+    """대시보드가 임의 경로를 만들어 주지 않는다."""
+    before = len(FakeClient.calls)
+    for bad in ("", "../admin/roles", "a b", "roxlogy/../hosub", "x?y=1"):
+        out = gateway.reveal_token(bad, client_factory=FakeClient)
+        assert out["status"] == "error", bad
+    assert len(FakeClient.calls) == before

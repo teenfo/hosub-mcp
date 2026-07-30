@@ -1183,6 +1183,89 @@ def build_app(
         return JSONResponse({"runs": [_ab_snapshot(r)
                                       for r in store.list_ab_runs(limit=10)]})
 
+    # --- 소비자 토큰 관측 ---
+    #
+    # 토큰 값은 게이트웨이만 들고 있다(services.yaml 은 env 변수 **이름**만 담고,
+    # 값은 gitignore 된 .env 에 있다). 그래서 "어떤 소비자가 등록돼 있고 토큰이
+    # 살아 있는가" 를 볼 수 있는 곳이 여기뿐이다.
+    #
+    # 목록에는 **마스킹된 값만** 넣는다. 전 서비스 토큰이 한 응답에 실려 나가는
+    # 상황을 만들지 않는다 — 전체 값은 아래 별도 경로에서 한 번에 하나씩만 준다.
+    def _mask(token: str) -> str:
+        if not token:
+            return ""
+        if len(token) <= 14:
+            return token[:2] + "…"
+        return f"{token[:6]}…{token[-6:]}"
+
+    async def admin_services(request: Request):
+        _svc, err = _require_admin(request)
+        if err:
+            return err
+        try:
+            days = int(request.query_params.get("days", 7))
+        except ValueError:
+            days = 7
+        days = max(1, min(days, 90))
+        usage = store.usage_by_service(days)
+        out = []
+        for name in services.names:
+            s = services.get(name)
+            u = usage.get(name) or {}
+            out.append({
+                "name": name,
+                "token_env": s.token_env,
+                # 값 자체는 여기 없다. 설정 여부·지문·마스킹만.
+                "token_set": bool(s.token),
+                "token_masked": _mask(s.token),
+                "token_len": len(s.token),
+                "token_sha256": (hashlib.sha256(s.token.encode()).hexdigest()[:12]
+                                 if s.token else None),
+                "allow_roles": list(s.allow_roles),
+                "rate_limit_per_min": s.rate_limit_per_min,
+                "admin": bool(s.admin),
+                "last_used_at": u.get("last_at"),
+                "calls_total": u.get("calls_total", 0),
+                "calls_window": u.get("calls_window", 0),
+            })
+        # services.yaml 에서 사라졌는데 사용 이력만 남은 이름. 이름을 바꿨거나
+        # 지운 흔적이라 눈에 띄어야 한다.
+        orphans = sorted(set(usage) - set(services.names))
+        return JSONResponse({
+            "services": out, "usage_days": days, "orphan_usage": orphans,
+        })
+
+    async def admin_service_token(request: Request):
+        """소비자 토큰 **한 개**의 전체 값.
+
+        ⚠️ 비밀을 그대로 내보내는 유일한 경로다. 그래서 (1) 목록이 아니라
+        한 번에 하나만 주고, (2) 관리 토큰만 통과하며(공개 경로에서는 Caddy 가
+        404), (3) 누가 언제 무엇을 열람했는지 admin_audit 에 남긴다.
+        """
+        svc, err = _require_admin(request)
+        if err:
+            return err
+        name = request.path_params["name"]
+        target = services.get(name)
+        if target is None:
+            return JSONResponse({"error": "not_found", "service": name},
+                                status_code=404)
+        if not target.token:
+            store.record_audit(actor=svc.name, action="token_reveal", target=name,
+                               detail={"token_env": target.token_env}, outcome="empty")
+            return JSONResponse(
+                {"error": "not_found",
+                 "detail": f"{target.token_env} 가 비어 있어 이 서비스는 비활성입니다.",
+                 "service": name, "token_env": target.token_env},
+                status_code=404)
+        # 값은 남기지 않는다 — 어느 서비스를 언제 열었는지만.
+        store.record_audit(actor=svc.name, action="token_reveal", target=name,
+                           detail={"token_env": target.token_env})
+        log.warning("토큰 열람: service=%s by=%s", name, svc.name)
+        return JSONResponse({
+            "service": name, "token_env": target.token_env, "token": target.token,
+        })
+
     async def admin_audit(request: Request):
         _svc, err = _require_admin(request)
         if err:
@@ -1274,6 +1357,8 @@ def build_app(
         Route("/v1/admin/compare", admin_compare, methods=["POST"]),
         Route("/v1/admin/compare", admin_compare_list, methods=["GET"]),
         Route("/v1/admin/compare/{run_id}", admin_compare_get, methods=["GET"]),
+        Route("/v1/admin/services", admin_services, methods=["GET"]),
+        Route("/v1/admin/services/{name}/token", admin_service_token, methods=["GET"]),
         Route("/v1/admin/audit", admin_audit, methods=["GET"]),
     ]
 
