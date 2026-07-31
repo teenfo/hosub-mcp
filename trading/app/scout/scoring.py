@@ -35,6 +35,24 @@ from .model import GROUP, GROUPS, MANUAL, NEWS, NIGHTLY, Signal
 # 지금 값을 손대는 것은 실측을 무시하는 일이다.
 WEIGHT = 1.0
 
+# **점수에 넣지 않는 그룹.** 사용자 결정(2026-07-31):
+# > 수동 입력은 단순 관심 종목일 수 있으므로 특별 가중치를 두지 않는다.
+# > 다만 관련 정보를 계속 수집한다는 의미로 둔다.
+#
+# 종전 `human` 그룹(manual)은 세기 1.0 고정 · TTL 없음 · 감쇠 없음이라
+# **영구 만점**이었다. 게다가 그룹을 혼자 쓰므로, 장중 3소스가 동시에 1위를
+# 해도(그룹 내 max 로 1.0) 사람이 한 번 찍은 것과 점수가 같았다. 그 점수가
+# 매매 tier 상한 초과 시 '누구를 뺄지' 정렬의 최상위로 가서 자리를 영구
+# 점유했다 — 실측 2026-07-31: 매매 tier 28 중 22가 수동/seed 였다.
+#
+# 이제 수동은 **점수가 아니라 고정핀**이다. 감시목록에서 빠지지 않아 뉴스·공시·
+# 리포트가 계속 붙지만(`Current.pinned`), 매매 자리를 예약하지는 않는다.
+# 여전히 게이트(유동성·체결가능성·probation)를 통과하면 매매 tier 로 올라간다 —
+# 점수가 아니라 게이트로 판정하므로 불리해지지 않는다.
+#
+# `by_group` 에는 그대로 남긴다. 화면이 "어느 소스가 지목했나" 를 보여줘야 한다.
+UNSCORED = frozenset({"human"})
+
 
 # 가격이 **낡은** 소스. 장중 소스는 스캔 응답의 현재가(60초 이내)를 싣지만
 # 이 둘은 각각 발굴 배치일 종가와 뉴스 수집 시점 가격이다. 실측 2026-07-28:
@@ -113,12 +131,16 @@ def aggregate(signals: list[Signal], now: datetime | None = None) -> list[Candid
         # 그룹 내 max — 같은 팩터를 두 번 세지 않는다
         c.by_group[g] = max(c.by_group.get(g, 0.0), WEIGHT * eff)
     for c in by_code.values():
-        c.score = round(sum(c.by_group.values()), 4)
+        c.score = round(sum(v for g, v in c.by_group.items()
+                            if g not in UNSCORED), 4)
         c.sources.sort()
         c.signals.sort(key=lambda s: (s.source, s.observed_at))
     return sorted(by_code.values(), key=lambda c: (-c.score, c.code))
 
 
 def max_possible() -> float:
-    """이론상 최대 점수 — 화면의 임계선을 비율로 그릴 때 쓴다."""
-    return float(len(GROUPS)) * WEIGHT
+    """이론상 최대 점수 — 화면의 임계선을 비율로 그릴 때 쓴다.
+
+    점수에 안 들어가는 그룹은 빼야 화면의 비율이 실제와 맞는다.
+    """
+    return float(len(set(GROUPS) - UNSCORED)) * WEIGHT

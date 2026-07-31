@@ -82,9 +82,38 @@ def test_decay_lowers_the_contribution():
 
 
 def test_manual_signal_does_not_decay():
+    """수동 신호는 여전히 만료·감쇠하지 않는다 — 바뀐 것은 **점수 반영**뿐이다."""
     old = NOW - timedelta(days=30)
     c = scoring.aggregate([_s(source=model.MANUAL, strength=1.0, at=old)], NOW)[0]
-    assert c.score == pytest.approx(1.0)
+    assert c.by_group["human"] == pytest.approx(1.0), "관측은 그대로 남는다"
+    assert c.score == 0.0, "점수에는 안 들어간다"
+
+
+# --- ②-2 수동은 점수가 아니라 고정핀이다 (사용자 결정 2026-07-31) ---
+#
+# > 수동 입력은 단순 관심 종목일 수 있으므로 특별 가중치를 두지 않는다.
+# > 다만 관련 정보를 계속 수집한다는 의미로 둔다.
+#
+# 종전 `human` 그룹은 세기 1.0 · TTL 없음 · 감쇠 없음이라 **영구 만점**이었고,
+# 그룹을 혼자 쓰므로 장중 3소스가 동시에 1위를 해도(그룹 내 max) 사람이 한 번
+# 찍은 것과 점수가 같았다. 그 점수가 매매 상한 초과 시 '누구를 뺄지' 정렬의
+# 최상위로 가서 자리를 영구 점유했다 — 실측: 매매 tier 28 중 22가 수동/seed.
+
+def test_수동은_점수를_올리지_않는다():
+    only_manual = scoring.aggregate([_s(source=model.MANUAL, strength=1.0)], NOW)[0]
+    assert only_manual.score == 0.0
+    # 다른 소스가 있으면 그 소스의 점수만 남는다
+    both = scoring.aggregate([_s(source=model.MANUAL, strength=1.0),
+                              _s(source=model.VOLUME, strength=0.4)], NOW)[0]
+    assert both.score == pytest.approx(0.4)
+
+
+def test_수동도_소스로는_남는다():
+    """화면이 '어느 소스가 지목했나' 를 보여줘야 한다 — 기록까지 지우지 않는다."""
+    c = scoring.aggregate([_s(source=model.MANUAL, strength=1.0),
+                           _s(source=model.NEWS, strength=0.6)], NOW)[0]
+    assert model.MANUAL in c.sources
+    assert set(c.by_group) == {"human", "news"}
 
 
 # --- ③ 정렬이 결정적이다 ---
@@ -114,13 +143,16 @@ def test_weights_are_flat():
     측정 없이 손으로 정한 것이다.
     """
     assert scoring.WEIGHT == 1.0
+    scored = [s for s in model.SOURCES if model.GROUP[s] not in scoring.UNSCORED]
     same = [scoring.aggregate([_s(source=src, strength=0.5)], NOW)[0].score
-            for src in model.SOURCES]
-    assert same == [pytest.approx(0.5)] * len(model.SOURCES)
+            for src in scored]
+    assert same == [pytest.approx(0.5)] * len(scored)
 
 
 def test_max_possible_is_group_count():
-    assert scoring.max_possible() == float(len(model.GROUPS))
+    """점수에 안 들어가는 그룹은 빼야 화면의 임계선 비율이 실제와 맞는다."""
+    assert scoring.max_possible() == float(len(set(model.GROUPS) - scoring.UNSCORED))
+    assert scoring.max_possible() == 3.0
 
 
 # --- ⑤ 부가 정보 ---

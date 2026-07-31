@@ -31,7 +31,7 @@
   - seed/manual — 사용자 의도를 엔진이 덮어쓰지 않는다.
 """
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -72,8 +72,18 @@ class Current:
     """지금 감시목록의 상태 — 투영기의 입력."""
     tier: dict[str, str]              # code → none|collect|trade
     since: dict[str, datetime]        # code → 현재 tier 진입 시각
-    protected: frozenset              # 보유·seed/manual — 강등 금지
-    names: dict[str, str]
+    # 감시목록에서 **빼지 않는다**(drop 금지). 보유 + seed/manual.
+    protected: frozenset
+    # 그중 **매매 tier 에서도 내리지 않는** 것 — 보유 종목만.
+    #
+    # 둘을 나눈 이유(사용자 결정 2026-07-31): 수동 편입은 단순 관심 종목일 수
+    # 있으므로 매매 자리를 예약하지 않는다. 감시목록에는 남아 정보가 계속
+    # 붙지만, 상한이 모자라면 수집전용으로 내려간다.
+    #
+    # 보유는 다르다 — 매매 tier 에서 빠지면 장중 분봉 백필 대상에서 제외되고
+    # (`_collect_targets`), 청산 감시의 가격 폴백이 낡는다.
+    held: frozenset = frozenset()
+    names: dict[str, str] = field(default_factory=dict)
 
 
 def _tradable(c: Candidate, cap: float) -> tuple[bool, str]:
@@ -202,13 +212,17 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     #
     # 보호 종목은 강등할 수 없으므로, 그것이 상한을 채우면 비보호가 0까지
     # 밀려난다. 그게 정직한 결말이다 — 상한을 넘긴 채 잠기는 것보다 낫다.
-    in_trade = [code for code in live
-                if cur.tier.get(code) == TRADE and code not in dropped]
+    # **수동/seed 는 매매 자리를 예약하지 않는다**(사용자 결정 2026-07-31).
+    # `live` 대신 tier 를 직접 훑되 `held`(보유)만 뺀다 — 보유는 매매 tier 에서
+    # 내리면 분봉 백필 대상에서 빠져 청산 감시의 가격 폴백이 낡는다.
+    # 수동은 감시목록에는 남으므로(drop 보호는 유지) 정보 수집이 끊기지 않는다.
+    in_trade = [code for code, t in cur.tier.items()
+                if t == TRADE and code not in dropped and code not in cur.held]
     in_trade.sort(key=lambda code: (by_code[code].score if code in by_code else 0.0,
                                     code))
-    prot_trade = sum(1 for code, t in cur.tier.items()
-                     if t == TRADE and code in cur.protected)
-    over_t = len(in_trade) + prot_trade - int(conf["max_trade"])
+    held_trade = sum(1 for code, t in cur.tier.items()
+                     if t == TRADE and code in cur.held)
+    over_t = len(in_trade) + held_trade - int(conf["max_trade"])
     for code in in_trade[:max(0, over_t)]:
         c = by_code.get(code)
         out.append({"code": code, "name": (c.name if c else None)
