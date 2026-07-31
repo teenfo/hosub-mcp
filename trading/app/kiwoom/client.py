@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .. import settings
+from . import venue
 from .auth import token_manager
 
 # --- TR ID 초안 (모의투자에서 검증 필요) ---
@@ -286,13 +287,19 @@ class KiwoomClient:
         }
         return await self._call(PATH_ORDER, tr, body)
 
-    async def trade_value_rank(self, market: str = "000") -> dict:
+    async def trade_value_rank(self, market: str = "000",
+                               stex_tp: str = venue.TP_KRX) -> dict:
         """거래대금 상위. market: 000 전체 / 001 코스피 / 101 코스닥.
-        stex_tp 값은 문서 미상 — 모의투자 호출로 검증 필요."""
+
+        `stex_tp` 를 실호출로 확정했다(2026-07-31, `kiwoom/venue.py` 참조):
+        1=KRX · 2=NXT(`005930_NX`) · 3=통합(`000660_AL`). 기본값은 KRX 라
+        기존 호출부는 동작이 바뀌지 않는다. NXT 는 **관측 경로만** 쓴다 —
+        응답 코드에 접미사가 붙으므로 정규화 없이 매매 경로에 넣으면 안 된다.
+        """
         return await self._call(
             PATH_RANK,
             TR_TRADE_VALUE_RANK,
-            {"mrkt_tp": market, "mang_stk_incls": "0", "stex_tp": "1"},
+            {"mrkt_tp": market, "mang_stk_incls": "0", "stex_tp": stex_tp},
         )
 
     async def volume_surge_rank(self, market: str = "000", sort: str = "2") -> dict:

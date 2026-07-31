@@ -149,6 +149,23 @@ def _conn() -> sqlite3.Connection:
         -- 그래서 창을 여는 대신 그 시각의 시장 상태를 남긴다. 4주 뒤 물을 것은
         -- "개장 창 진입의 성적이 이 값들로 갈리는가" 다 — 갈리면 시장 방향
         -- 필터가 분산을 줄인다는 뜻이고, 안 갈리면 이 창은 그냥 베타다.
+        -- NXT 프리마켓(08:00~08:50) 관측 — 시점별로 쌓는다.
+        --
+        -- 우리는 지금까지 KRX 만 보고 있었다(`stex_tp: "1"`). NXT 는 08:00 부터
+        -- 실제 체결이 일어나므로, "09:02~09:03 에 엣지가 몰린다" 고 잰 그 시점에
+        -- 가격 발견은 이미 한 시간 진행돼 있었다. 그 한 시간이 무엇이었는지가
+        -- 지금 어디에도 남지 않는다.
+        --
+        -- 접지 않는 이유는 투자자별 매매와 같다 — 프리마켓 50분의 **경로**가
+        -- 질문이지 평균이 아니다.
+        CREATE TABLE IF NOT EXISTS premarket_obs (
+            ts TEXT NOT NULL, code TEXT NOT NULL, venue TEXT NOT NULL,
+            name TEXT, rank INTEGER,
+            price REAL, change_pct REAL, trade_value INTEGER, volume INTEGER,
+            PRIMARY KEY (ts, code, venue)
+        );
+        CREATE INDEX IF NOT EXISTS ix_premarket_obs_code ON premarket_obs (code, ts);
+
         CREATE TABLE IF NOT EXISTS opening_obs (
             d TEXT PRIMARY KEY,
             n INTEGER NOT NULL,          -- 관측 종목 수
@@ -297,6 +314,36 @@ def record_vi(rows: list[dict], now: datetime | None = None) -> int:
               ts.isoformat(timespec="seconds")) for r in rows],
         )
     return len(rows)
+
+
+def record_premarket(rows: list[dict], now: datetime | None = None) -> int:
+    """NXT 프리마켓 순위를 시점별로 쌓는다. 반환: 적재 행 수.
+
+    `code` 는 **접미사를 벗긴 6자리**이고 거래소는 `venue` 로 따로 둔다.
+    `005930_NX` 를 그대로 두면 감시목록·분봉·주문 어디에도 이을 수 없고,
+    벗기기만 하면 KRX 행과 구분이 사라진다 — 둘 다 필요하다.
+    """
+    if not rows:
+        return 0
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="minutes")
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO premarket_obs (ts, code, venue, name, rank,"
+            " price, change_pct, trade_value, volume) VALUES (?,?,?,?,?,?,?,?,?)",
+            [(ts, r["code"], r["venue"], r.get("name"), r.get("rank"),
+              r.get("price"), r.get("change_pct"), r.get("trade_value"),
+              r.get("volume")) for r in rows],
+        )
+    return len(rows)
+
+
+def premarket_days(limit: int = 30) -> list[dict]:
+    """프리마켓 관측 요약 — 날짜별 스냅샷 수·종목 수(분석용 읽기 전용)."""
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT substr(ts,1,10) AS d, COUNT(DISTINCT ts) AS snapshots,"
+            " COUNT(DISTINCT code) AS codes, COUNT(*) AS rows_"
+            " FROM premarket_obs GROUP BY 1 ORDER BY 1 DESC LIMIT ?", (limit,))]
 
 
 def record_opening(day: str, stats: dict, now: datetime | None = None) -> bool:
