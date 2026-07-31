@@ -441,10 +441,20 @@ class KiwoomClient:
             PATH_SHORT, TR_SHORT_TREND,
             {"stk_cd": code, "tm_tp": "1", "strt_dt": start, "end_dt": end})
 
-    async def trade_detail(self, code: str, start: str) -> dict:
-        """일별 거래상세 (ka10015) — 장전/장중/장후 거래량 비중."""
-        return await self._call(PATH_STOCK_INFO, TR_TRADE_DETAIL,
-                                {"stk_cd": code, "strt_dt": start})
+    async def trade_detail(self, code: str, anchor: str = "") -> dict:
+        """일별 거래상세 (ka10015) — 장전/장중/장후 거래량 비중.
+
+        **`strt_dt` 는 이름과 달리 '시작일' 이 아니라 '기준일' 이다.** 그 날짜
+        에서 **과거로** 100일치를 돌려준다. 범위 시작으로 알고 10일 전을
+        넘겼더니 그보다 최근 날짜가 하나도 안 왔다(실측 2026-07-31:
+        `strt_dt=20260721` → 07-21, 07-20 … 순으로만 응답).
+
+        그래서 최근을 원하면 **오늘**을 넘겨야 한다. 안 넘기면 오늘로 채운다.
+        """
+        return await self._call(
+            PATH_STOCK_INFO, TR_TRADE_DETAIL,
+            {"stk_cd": code,
+             "strt_dt": anchor or datetime.now(KST).strftime("%Y%m%d")})
 
     async def daily_realized(self, start: str, end: str) -> dict:
         """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.
