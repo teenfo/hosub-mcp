@@ -131,6 +131,14 @@ def score_strength(score: float, max_score: float = 3.0) -> float:
     return _clamp(score / max_score)
 
 
+# 무작위 표본의 강도. **확신값이 아니다** — 무작위 추출에는 확신이 없다.
+# 관측 팔이 존재하려면 `promote_collect`(0.35)를 넘어야 하고, 동시에 점수 표본
+# (score_strength(2.0) = 0.667)보다는 낮아야 사유가 있는 후보가 자리를 먼저
+# 가져간다. 후보 목록은 (-점수, 코드) 순이므로 무작위 표본은 **남는 자리만**
+# 채운다 — 상한(max_total)에 걸리면 조용히 못 들어온다.
+RANDOM_STRENGTH = 0.4
+
+
 def news_strength(score: float) -> float:
     """TNM 뉴스 점수 0~100 → 0~1."""
     return _clamp(score / 100.0)

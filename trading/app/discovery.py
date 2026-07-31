@@ -13,7 +13,9 @@
 import asyncio
 import json
 import logging
+import random
 import sqlite3
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -40,6 +42,25 @@ def _conn() -> sqlite3.Connection:
             PRIMARY KEY (date, code)
         )"""
     )
+    # 전종목 차트 지표 원장. 매일 3,900여 종목의 피처를 계산하고 있었지만
+    # `picks` 에 살아남는 것은 6~11건이고 나머지는 CSV 로 내보내고 버렸다.
+    # "평가 대상을 전체 종목 베이스로" 의 실체가 이 표다 — 4주 뒤 어느 지표가
+    # 실현 R 과 상관있는지 물으려면 그날 그 값이 얼마였는지가 남아 있어야 한다.
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS chart_obs (
+            date TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            score REAL, feats TEXT,
+            PRIMARY KEY (date, code)
+        )"""
+    )
+    conn.execute("CREATE INDEX IF NOT EXISTS ix_chart_obs_code ON chart_obs (code, date)")
+    # 표본 구분 — `score`(3규칙 상위) 인가 `random`(유동성 유니버스 무작위) 인가.
+    # 1.5단계 실측에서 무작위가 모든 랭킹을 이겼다(random -0.184R vs score -0.502R).
+    # 그 결과를 실거래에서 다시 확인하려면 두 표본이 **같은 게이트**를 통과해
+    # 나란히 돌아야 한다. 이 컬럼이 그 대조를 가능하게 한다.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(picks)")}
+    if "pick_kind" not in have:
+        conn.execute("ALTER TABLE picks ADD COLUMN pick_kind TEXT")
     return conn
 
 
@@ -74,6 +95,48 @@ def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:
     if f is None or not f["liquid"]:
         return 0.0, []
     return f["score"], f["reasons"]
+
+
+def _select(scored: list[dict], pool: list[dict], cfg: dict, day: str) -> list[dict]:
+    """그날 내보낼 발굴 후보 — 점수 표본 + **무작위 표본**.
+
+    ## 왜 무작위를 섞나
+
+    유입 깔때기 실측 2026-07-31: 상장 3,925 → 유동성 통과 1,165 → `min_score`
+    2점 이상 **8종목**. 전종목을 평가하는 유일한 경로가 하루 8건을 내놓고
+    있었고, 5거래일 실거래 50종목 중 이 경로 기여는 7종목이었다. 나머지는
+    전부 '상위 N' API(거래대금·등락률) 라 매일 같은 종목이 돌아온다 —
+    "비슷한 종목이 순환한다" 는 관찰의 실체가 이것이다.
+
+    그런데 **점수 순으로 자리를 늘리는 것은 근거가 없다.** 1.5단계 실측
+    (736,291행 / 3,907종목 / 191거래일): 무작위 -0.184R · 매수가능 무작위
+    -0.283R · 현행 점수 -0.502R · 차트지표 합성(walk-forward) -0.683R.
+    **어느 랭킹도 무작위를 못 이겼고 점수는 적극적으로 해로웠다.**
+
+    그래서 자리를 늘리되 늘린 자리는 유동성 통과 유니버스에서 무작위로 채운다.
+    측정상 가장 나은 선택법이고, 풀을 최대로 다양하게 만들며, 부수적으로
+    **점수 표본 vs 무작위 표본을 같은 게이트 아래 나란히 돌리는 실거래
+    대조군**이 된다(`pick_kind`). 1.5단계 결론을 일봉 근사가 아니라 실제
+    체결로 다시 묻는 셈이다.
+
+    시드는 날짜에서 만든다 — 같은 날 재실행하면 같은 표본이 나와야 배포·재시작이
+    측정을 흔들지 않는다(1.5단계 `random` 재현성 요건과 같은 이유).
+    """
+    n = int(cfg.get("top_n", 20) or 0)
+    top = sorted(scored, key=lambda x: (-x["score"], x["code"]))[:n]
+    for p in top:
+        p["pick_kind"] = "score"
+    fill = int(cfg.get("random_fill", 0) or 0)
+    if fill <= 0:
+        return top
+    taken = {p["code"] for p in top}
+    rest = sorted((p for p in pool if p["code"] not in taken), key=lambda x: x["code"])
+    if not rest:
+        return top
+    rng = random.Random(f"{day}:discovery")
+    for p in rng.sample(rest, min(fill, len(rest))):
+        top.append({**p, "pick_kind": "random"})
+    return top
 
 
 def _median(xs: list[float]) -> float:
@@ -204,6 +267,8 @@ class Discovery:
 
             feature_rows: list[dict] = []   # 전종목 피처 (파일 내보내기용)
             scored: list[dict] = []         # 발굴 후보 (유동성 게이트 통과 + 점수)
+            pool: list[dict] = []           # 유동성 통과 전량 — 무작위 표본의 모집단
+            obs: list[tuple] = []           # 차트 지표 원장 (전종목 베이스)
             for i, s in enumerate(symbols):
                 if i % 100 == 0:
                     self.progress = f"수집 중 {i}/{len(symbols)}"
@@ -223,15 +288,19 @@ class Discovery:
                     {"code": s["code"], "name": s["name"], **f, "etf_etn": int(etf)}
                 )
                 # 발굴 후보(카드·자동편입)에서는 ETF/ETN/리츠/채권형 제외
-                if not etf and f["liquid"] and f["score"] >= cfg.get("min_score", 2):
-                    scored.append(
-                        {"code": s["code"], "name": s["name"],
-                         "close": f["close"], "score": f["score"],
-                         "reasons": f["reasons"]}
-                    )
-            scored.sort(key=lambda x: -x["score"])
-            top = scored[: cfg.get("top_n", 20)]
+                if etf or not f["liquid"]:
+                    continue
+                cand = {"code": s["code"], "name": s["name"],
+                        "close": f["close"], "score": f["score"],
+                        "reasons": f["reasons"]}
+                pool.append(cand)
+                obs.append((s["code"], s["name"], f["score"],
+                            json.dumps({k: v for k, v in f.items() if k != "reasons"},
+                                       ensure_ascii=False)))
+                if f["score"] >= cfg.get("min_score", 2):
+                    scored.append(cand)
             today = datetime.now(KST).date().isoformat()
+            top = _select(scored, pool, cfg, today)
             # 시장 국면(breadth) + 상대강도(RS) + 하락(숏) 후보 점수 산출
             market = compute_market(feature_rows, cfg)
             self.market = market
@@ -244,12 +313,23 @@ class Discovery:
             with _conn() as conn:
                 conn.execute("DELETE FROM picks WHERE date=?", (today,))
                 conn.executemany(
-                    "INSERT OR REPLACE INTO picks VALUES (?,?,?,?,?,?)",
+                    "INSERT OR REPLACE INTO picks "
+                    "(date, code, name, close, score, reasons, pick_kind) "
+                    "VALUES (?,?,?,?,?,?,?)",
                     [(today, p["code"], p["name"], p["close"], p["score"],
-                      json.dumps(p["reasons"], ensure_ascii=False)) for p in top],
+                      json.dumps(p["reasons"], ensure_ascii=False),
+                      p.get("pick_kind", "score")) for p in top],
+                )
+                # 차트 지표 원장은 후보 선정과 무관하게 **유동성 통과 전량**을 남긴다.
+                conn.executemany(
+                    "INSERT OR REPLACE INTO chart_obs VALUES (?,?,?,?,?)",
+                    [(today, *o) for o in obs],
                 )
             await self.apply_auto_watch(top, cfg)
-            self.progress = f"완료: {len(symbols)}종목 분석 → {len(top)}종목 발굴"
+            kinds = Counter(p.get("pick_kind", "score") for p in top)
+            self.progress = (f"완료: {len(symbols)}종목 분석 → 유동성 {len(pool)} → "
+                             f"후보 {len(top)} (점수 {kinds['score']} · 무작위 "
+                             f"{kinds['random']}) · 지표 원장 {len(obs)}행")
             self.last_run = datetime.now(KST).isoformat(timespec="seconds")
             log.info("야간 발굴 %s", self.progress)
             return len(top)
