@@ -193,8 +193,10 @@ def test_감시목록_상한을_지킨다(db, monkeypatch):
 
     monkeypatch.setattr(flows, "collect_symbol", fake_symbol)
     monkeypatch.setattr(flows, "_cfg", lambda: {"max_symbols": 2})
+    # `settings.WATCHLIST` 는 dict[str, str] — 값이 **종목명 문자열**이다.
+    # 이걸 dict 로 흉내 냈다가 실서버에서 AttributeError 로 500 이 났다.
     monkeypatch.setattr(settings, "WATCHLIST",
-                        {"A": {}, "B": {}, "C": {}}, raising=False)
+                        {"A": "가나다", "B": "라마바", "C": "사아자"}, raising=False)
     out = asyncio.run(flows.collect_once(datetime(2026, 7, 31, tzinfo=KST)))
     assert out["symbols"] == 2 and len(seen) == 2
 
@@ -223,3 +225,28 @@ def test_일별주가는_조회일이_필수다():
     sent.clear()
     _aio.run(Probe().daily_price("005930", "20260731"))
     assert sent["qry_dt"] == "20260731"
+
+
+def test_감시목록_값은_종목명_문자열이다(db, monkeypatch):
+    """실서버 회귀 — dict 로 읽고 `.get("name")` 을 부르면 루프 전체가 죽는다.
+    픽스처가 현실과 다르면 그건 검사가 아니다."""
+    seen = []
+
+    async def fake_symbol(code, name, day):
+        seen.append((code, name))
+        return {"detail": 0, "short": 0, "session": 0}
+
+    monkeypatch.setattr(flows, "collect_symbol", fake_symbol)
+    monkeypatch.setattr(flows, "_cfg", lambda: {})
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"}, raising=False)
+    asyncio.run(flows.collect_once(datetime(2026, 7, 31, tzinfo=KST)))
+    assert seen == [("005930", "삼성전자")]
+
+
+@pytest.mark.parametrize("val, want", [
+    ("삼성전자", "삼성전자"),
+    ({"name": "삼성전자"}, "삼성전자"),   # 예전 모양도 받아 준다
+    ("", None), (None, None), (123, None),
+])
+def test_이름_추출은_모양을_가리지_않는다(val, want):
+    assert flows._name_of(val) == want

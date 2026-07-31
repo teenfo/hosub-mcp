@@ -48,6 +48,19 @@ def enabled() -> bool:
     return bool(_cfg().get("enabled", True))
 
 
+def _name_of(v) -> str | None:
+    """감시목록 값에서 종목명. 문자열이 정상이고 dict 도 받아 준다.
+
+    이름을 못 얻는 것은 관측을 멈출 이유가 아니다 — `flow_obs.name` 은
+    사람이 읽으려고 두는 칸이고 코드가 이미 키다.
+    """
+    if isinstance(v, str):
+        return v or None
+    if isinstance(v, dict):
+        return v.get("name")
+    return None
+
+
 async def collect_symbol(code: str, name: str | None, day: datetime) -> dict:
     """감시목록 한 종목의 세부 수급 3종. 반환: 소스별 반영 일자 수.
 
@@ -83,8 +96,11 @@ async def collect_once(now: datetime | None = None) -> dict:
     codes = list(watch)[:cap]
     total = {"symbols": 0, "detail": 0, "short": 0, "session": 0}
     for code in codes:
-        meta = watch.get(code) or {}
-        got = await collect_symbol(code, (meta or {}).get("name"), ts)
+        # `settings.WATCHLIST` 는 `dict[str, str]` — 값이 **종목명 문자열**이다.
+        # dict 로 읽고 `.get("name")` 을 부르면 AttributeError 로 루프 전체가
+        # 죽는다(실측 2026-07-31, `/api/flows/run` 500). 테스트가 값을 dict 로
+        # 흉내 냈던 탓에 통과했다 — 픽스처가 현실과 다르면 검사가 아니다.
+        got = await collect_symbol(code, _name_of(watch.get(code)), ts)
         total["symbols"] += 1
         for k in ("detail", "short", "session"):
             total[k] += got[k]
@@ -98,17 +114,22 @@ async def loop(interval_sec: int = 300) -> None:
 
     `eod_backfill_after`(15:35)보다 **뒤에** 둔다 — 마감 백필이 그날 분봉을
     확정하는 동안 예산을 나눠 쓰면 둘 다 늘어진다.
+
+    완료 표시는 디스크에 남긴다(`store.job_done`). 지역변수로 들고 있으면
+    재시작마다 초기화돼 배포가 잦은 날 같은 배치가 여러 번 돈다.
     """
-    done_for = ""
+    from ..data import store as bars_store
+
     while True:
         try:
             now = datetime.now(store.KST)
             today = now.date().isoformat()
             if (enabled() and settings.KIWOOM_APP_KEY and now.weekday() < 5
                     and now.strftime("%H:%M") >= str(_cfg().get("after", "15:50"))
-                    and done_for != today):
+                    and not await asyncio.to_thread(
+                        bars_store.job_done, "flows", today)):
                 await collect_once(now)
-                done_for = today
+                await asyncio.to_thread(bars_store.mark_job_done, "flows", today)
         except Exception:  # noqa: BLE001
             log.exception("수급 관측 루프 오류")
         await asyncio.sleep(interval_sec)
