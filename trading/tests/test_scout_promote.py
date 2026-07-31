@@ -197,6 +197,56 @@ def test_trade_cap_blocks_new_trade_promotions():
     assert _by(rows, "promote_trade") == []
 
 
+# --- ④-2 보호 종목도 매매 상한을 차지한다 (2026-07-31 교착) ---
+#
+# 승격은 매매 tier **전체**를 세고, 강등은 `live`(보호 제외)만 셌다. 그 비대칭이
+# 들어올 수도 나갈 수도 없는 상태를 만들었다:
+#   실측 — 매매 tier 28 · 보호 22 · 비보호 6 · max_trade 25
+#   승격: 28 >= 25 → 차단  /  강등: 6 - 25 = -19 → 0건
+# `promote_trade` 결정이 7/29 이후 0건이었고 같은 종목만 며칠씩 돌았다
+# (5일 106거래 / 고유 50종목, 상위 5종목이 27%·−34,642원).
+
+def test_보호_종목이_매매_상한을_차지한다():
+    """보호가 상한을 채우면 비보호는 0까지 밀린다 — 강등할 수 없는 쪽이 이긴다."""
+    codes = ["000001", "000002", "000003"]
+    cur = _cur(tier={c: TRADE for c in codes},
+               since={c: LONG_AGO for c in codes},
+               protected={"000001", "000002"})
+    cands = [_c(code=c, score=0.9) for c in codes]
+    rows = _plan(cands, cur, max_trade=2)
+    # 보호 2 + 비보호 1 = 3 > 상한 2 → 비보호 1건이 내려간다
+    assert [r["code"] for r in _by(rows, "demote")] == ["000003"]
+
+
+def test_보호만으로_상한이_찼으면_비보호는_전부_내려간다():
+    cur = _cur(tier={"000001": TRADE, "000002": TRADE, "000003": TRADE},
+               since={c: LONG_AGO for c in ("000001", "000002", "000003")},
+               protected={"000001", "000002"})
+    cands = [_c(code=c, score=0.9) for c in ("000001", "000002", "000003")]
+    rows = _plan(cands, cur, max_trade=1)
+    assert [r["code"] for r in _by(rows, "demote")] == ["000003"]
+
+
+def test_상한_안이면_보호가_있어도_강등하지_않는다():
+    """반대 방향 회귀 — 보호를 더한다고 멀쩡한 tier 를 깎으면 안 된다."""
+    cur = _cur(tier={"000001": TRADE, "000002": TRADE},
+               since={c: LONG_AGO for c in ("000001", "000002")},
+               protected={"000001"})
+    cands = [_c(code=c, score=0.9) for c in ("000001", "000002")]
+    assert _by(_plan(cands, cur, max_trade=5), "demote") == []
+
+
+def test_교착이_풀린다_승격과_강등이_같은_수를_본다():
+    """상한 초과 상태에서 강등이 나와야 다음 사이클에 승격 자리가 생긴다."""
+    trade = [f"0000{i:02d}" for i in range(1, 6)]      # 매매 5 (보호 3)
+    cur = _cur(tier={**{c: TRADE for c in trade}, "000099": COLLECT},
+               since={**{c: LONG_AGO for c in trade}, "000099": LONG_AGO},
+               protected=set(trade[:3]))
+    cands = [_c(code=c, score=0.9) for c in [*trade, "000099"]]
+    rows = _plan(cands, cur, max_trade=4)
+    assert len(_by(rows, "demote")) == 1, "5 > 4 이므로 비보호 하위 1건이 내려간다"
+
+
 # --- ⑤ 결정에 근거가 실린다 ---
 
 def test_decisions_carry_sources_and_reason():
