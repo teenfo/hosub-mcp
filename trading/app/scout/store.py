@@ -22,7 +22,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import settings
-from .model import TTL_SEC, Signal
+from .model import DECISION_QUOTE_FIELDS, TTL_SEC, Signal
 
 KST = ZoneInfo("Asia/Seoul")   # 관측을 **거래일** 단위로 접기 위한 기준
 
@@ -71,7 +71,7 @@ def _conn() -> sqlite3.Connection:
     # 성적이 실제로 나쁜가" 를 묻기 위한 재료다. 측정 전에 승격 조건에 넣으면
     # 발굴 3규칙 점수가 저지른 일을 반복한다.
     have = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
-    for col in ("change_pct", "cntr_str", "spread_pct"):
+    for col in DECISION_QUOTE_FIELDS:
         if col not in have:
             conn.execute(f"ALTER TABLE decisions ADD COLUMN {col} REAL")
     conn.executescript(
@@ -398,16 +398,19 @@ def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
         fresh = [d for d in rows if last.get(d["code"]) != _decision_key(d)]
         if not fresh:
             return 0
+        # 시세 컬럼은 `DECISION_QUOTE_FIELDS` 로 **생성한다**. 손으로 나열하면
+        # 필드를 늘릴 때 ALTER 는 되는데 INSERT 를 빼먹어 컬럼이 조용히 NULL 로
+        # 남는다 — 그 침묵은 4주 뒤 측정할 때야 드러난다.
+        cols = ", ".join(DECISION_QUOTE_FIELDS)
+        marks = ",".join("?" * (11 + len(DECISION_QUOTE_FIELDS)))
         conn.executemany(
-            "INSERT INTO decisions (ts, code, name, action, from_tier, to_tier,"
-            " score, sources, reason, mode, applied, change_pct, cntr_str,"
-            " spread_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO decisions (ts, code, name, action, from_tier, to_tier,"
+            f" score, sources, reason, mode, applied, {cols}) VALUES ({marks})",
             [(ts, d["code"], d.get("name"), d["action"], d.get("from_tier"),
               d.get("to_tier"), d.get("score"),
               json.dumps(sorted(d.get("sources") or []), ensure_ascii=False),
               d.get("reason"), mode, 1 if applied else 0,
-              d.get("change_pct"), d.get("cntr_str"),
-              d.get("spread_pct")) for d in fresh],
+              *(d.get(f) for f in DECISION_QUOTE_FIELDS)) for d in fresh],
         )
     return len(fresh)
 

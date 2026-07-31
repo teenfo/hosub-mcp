@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .. import settings
+from .model import DECISION_QUOTE_FIELDS
 from .scoring import Candidate
 
 log = logging.getLogger(__name__)
@@ -322,18 +323,27 @@ def _drop(code: str, c: Candidate | None, cur: Current, score: float,
 def _dec(c: Candidate, action: str, frm: str, to: str, reason: str) -> dict:
     """결정 한 건. 실측 시세가 있으면 **기록만** 하고 판단에는 쓰지 않는다.
 
-    등락률·체결강도를 여기 싣는 이유는 4주 뒤 측정 때문이다. 지금 승격 조건에
-    넣으면 발굴 3규칙 점수가 저지른 일을 반복하는 것이다 — 그것도 '그럴듯해서'
-    넣었고 1년 뒤 알파가 아니라 베타 프록시로 판명됐다. 체결강도는 어느 소스도
-    쓰지 않는 새 정보라, 원장에 쌓여야 비로소 질문을 던질 수 있다.
+    등락률·체결강도·스프레드·호가잔량·당일 위치를 여기 싣는 이유는 4주 뒤 측정
+    때문이다. 지금 승격 조건에 넣으면 발굴 3규칙 점수가 저지른 일을 반복하는
+    것이다 — 그것도 '그럴듯해서' 넣었고 1년 뒤 알파가 아니라 베타 프록시로
+    판명됐다. 원장에 쌓여야 비로소 질문을 던질 수 있다.
+
+    **`quote_obs` 가 있는데도 여기 또 싣는 이유**는 시점이다. 그쪽은 종목·날짜당
+    한 행으로 접히므로 남는 것은 그날 마지막 값인데, 물어야 할 것은 "이 종목을
+    올린 **그 순간** 어땠나" 다. 이번 실측이 정확히 그 순간의 값을 가리켰다 —
+    진입가가 직전 30분 범위의 0.67 지점이었고 위치가 높을수록 이후 상승 여력이
+    단조로 줄었다(하단 1.52% → 상단 1.02%). 접힌 평균으로는 그 질문을 못 한다.
+
+    실을 필드는 `model.DECISION_QUOTE_FIELDS` 가 유일한 목록이다. 여기서 손으로
+    나열하면 스키마와 갈리고, 갈린 컬럼은 NULL 로만 조용히 드러난다.
     """
     d = {"code": c.code, "name": c.name, "action": action, "from_tier": frm,
          "to_tier": to, "score": c.score, "sources": list(c.sources),
          "reason": reason}
     if c.quote:
-        d["change_pct"] = c.quote.get("change_pct")
-        d["cntr_str"] = c.quote.get("cntr_str")
-        # 호가 스프레드도 같은 규약 — 싣기만 하고 판단에 쓰지 않는다.
-        # 유동성을 거래대금으로만 보는 지금 게이트가 못 보는 축이다.
-        d["spread_pct"] = c.quote.get("spread_pct")
+        # 없는 키는 담지 않는다 — `extra_fields` 가 못 잰 값의 키를 아예 빼므로
+        # 여기서 0 으로 채우면 '측정했는데 0' 과 '못 쟀다' 가 섞인다.
+        for f in DECISION_QUOTE_FIELDS:
+            if f in c.quote:
+                d[f] = c.quote[f]
     return d

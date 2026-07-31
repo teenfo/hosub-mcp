@@ -131,6 +131,26 @@ def score_strength(score: float, max_score: float = 3.0) -> float:
     return _clamp(score / max_score)
 
 
+# 결정 원장(`decisions`)에 **시점 고정**으로 싣는 실측 시세 필드.
+#
+# 목록을 여기 한 군데 두는 이유: 스키마(`store`)와 결정 생성(`promote`)이 서로
+# 다른 목록을 들면 컬럼은 생기는데 값이 안 들어오고, 그 침묵은 4주 뒤 측정할 때
+# `NULL` 로만 드러난다. 둘 다 model 을 임포트하므로 여기가 유일한 교차점이다.
+#
+# `quote_obs` 로는 부족해서 따로 싣는다. 그쪽은 **종목·날짜당 한 행으로 접히므로**
+# 남는 것이 그날 마지막 값이다. 우리가 물어야 할 것은 "그 종목을 올린 **그 순간**
+# 당일 위치가 얼마였나" 이고, 이번 실측이 가리킨 것이 정확히 그 순간의 값이다
+# (진입가가 직전 30분 범위의 0.67 지점 · 위치가 높을수록 이후 상승 여력이 단조 감소).
+#
+# `exp_price`/`exp_qty` 는 넣지 않는다 — 예상체결은 동시호가 값인데 승격 판정은
+# `in_session` 안에서만 일어나므로 사실상 늘 비어 있다. 그건 `quote_obs` 쪽에서
+# 프리마켓 창을 따로 볼 때 쓴다. 늘 NULL 인 컬럼은 원장을 읽기 어렵게만 한다.
+DECISION_QUOTE_FIELDS = (
+    "change_pct", "cntr_str", "spread_pct",     # 기존 3종
+    "day_pos", "day_range_pct", "from_open_pct",
+    "req_imbalance", "tot_imbalance", "vol_vs_prev", "limit_pos",
+)
+
 # 무작위 표본의 강도. **확신값이 아니다** — 무작위 추출에는 확신이 없다.
 # 관측 팔이 존재하려면 `promote_collect`(0.35)를 넘어야 하고, 동시에 점수 표본
 # (score_strength(2.0) = 0.667)보다는 낮아야 사유가 있는 후보가 자리를 먼저
