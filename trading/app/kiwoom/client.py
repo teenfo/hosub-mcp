@@ -38,6 +38,11 @@ TR_WATCH_INFO = "ka10095"        # 관심종목정보 — **여러 종목을 1�
 # 아래 둘은 관측 전용 — 신호·점수 경로에 넣지 않는다. 경로가 서로 다르다(실호출 확정)
 TR_INTRADAY_INVESTOR = "ka10063"  # 장중 투자자별 매매 — 800종목 1콜. PATH_MARKET
 TR_VI_STOCKS = "ka10054"          # VI 발동종목 — 100종목. PATH_STOCK_INFO
+# 수급 계열 — 전부 관측 전용. 경로가 제각각이라 실호출로 확인했다(2026-07-31).
+TR_DAILY_PRICE = "ka10086"        # 일별주가 — **OHLCV + 수급 한 콜**. PATH_MARKET
+TR_INVESTOR_DAILY = "ka10059"     # 종목별 투자자·기관별 — 13주체. PATH_STOCK_INFO
+TR_SHORT_TREND = "ka10014"        # 공매도 추이. PATH_SHORT
+TR_TRADE_DETAIL = "ka10015"       # 일별 거래상세 — 장전/장중/장후 비중. PATH_STOCK_INFO
 
 PATH_CHART = "/api/dostk/chart"
 PATH_MARKET = "/api/dostk/mrkcond"
@@ -45,6 +50,7 @@ PATH_ORDER = "/api/dostk/ordr"
 PATH_ACCOUNT = "/api/dostk/acnt"
 PATH_RANK = "/api/dostk/rkinfo"
 PATH_STOCK_INFO = "/api/dostk/stkinfo"
+PATH_SHORT = "/api/dostk/shsa"        # 공매도 — 다른 경로에서는 1504 가 온다
 
 log = logging.getLogger("trading.kiwoom")
 
@@ -394,6 +400,43 @@ class KiwoomClient:
              "max_trde_qty": "0", "trde_prica_tp": "0", "min_trde_prica": "0",
              "max_trde_prica": "0", "motn_drc": "0", "stex_tp": "1"},
         )
+
+    # --- 수급 (관측 전용) ---------------------------------------------------
+    #
+    # 넷 다 신호·점수 경로에 닿지 않는다. `dmst_stex_tp` 를 건드리지 않으므로
+    # 주문 라우팅과도 무관하다. 날짜는 YYYYMMDD.
+
+    async def daily_price(self, code: str, qry_dt: str = "") -> dict:
+        """일별주가 (ka10086) — **OHLCV 와 수급이 한 콜에 온다**.
+
+        야간 발굴이 부르는 `ka10081`(일봉)은 OHLCV 만 준다. 이쪽은 같은 1콜에
+        개인·기관·외국인 순매수 + 프로그램매매 + 외국인 지분율 + 신용비율까지
+        얹어 준다 — 그 넷을 따로 부르려던 TR 3개가 필요 없어졌다.
+        대신 **20행**뿐이라(ka10081 은 600행) 일봉을 대체하지는 못한다.
+        """
+        return await self._call(PATH_MARKET, TR_DAILY_PRICE,
+                                {"stk_cd": code, "qry_dt": qry_dt, "indc_tp": "0"})
+
+    async def investor_daily(self, code: str, dt: str) -> dict:
+        """종목별 투자자·기관별 (ka10059) — 13개 주체 세부, 100일치.
+
+        `unit_tp: "1000"` 은 천주 단위. `amt_qty_tp: "1"` 이 수량 기준이다.
+        """
+        return await self._call(
+            PATH_STOCK_INFO, TR_INVESTOR_DAILY,
+            {"dt": dt, "stk_cd": code, "amt_qty_tp": "1", "trde_tp": "0",
+             "unit_tp": "1000"})
+
+    async def short_trend(self, code: str, start: str, end: str) -> dict:
+        """공매도 추이 (ka10014). 경로가 `shsa` 다 — 다른 곳에서는 1504."""
+        return await self._call(
+            PATH_SHORT, TR_SHORT_TREND,
+            {"stk_cd": code, "tm_tp": "1", "strt_dt": start, "end_dt": end})
+
+    async def trade_detail(self, code: str, start: str) -> dict:
+        """일별 거래상세 (ka10015) — 장전/장중/장후 거래량 비중."""
+        return await self._call(PATH_STOCK_INFO, TR_TRADE_DETAIL,
+                                {"stk_cd": code, "strt_dt": start})
 
     async def daily_realized(self, start: str, end: str) -> dict:
         """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.

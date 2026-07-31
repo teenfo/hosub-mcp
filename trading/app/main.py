@@ -24,6 +24,7 @@ from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
 from .scout import observe as scout_observe
+from .scout import flows as scout_flows
 from .scout import premarket as scout_premarket
 from .trade import desk, orders
 from . import journal
@@ -418,6 +419,9 @@ async def lifespan(app: FastAPI):
         # NXT 프리마켓(08:00~08:50) — 우리가 못 보던 한 시간. 조회만
         # 하고 주문은 여전히 KRX 로 나간다(dmst_stex_tp 는 안 건드린다).
         asyncio.create_task(scout_premarket.loop()),
+        # 수급 — 마감 후 1회. 감시목록 세부(기관 13주체·공매도·장전비중).
+        # 전종목 수급은 야간 발굴 루프가 함께 가져온다(discovery.py).
+        asyncio.create_task(scout_flows.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
@@ -830,6 +834,23 @@ async def api_journal_run(payload: dict | None = Body(None),
     day = payload.get("date") or datetime.now(KST).date().isoformat()
     entry = await journal.generate(day, with_summary=payload.get("summary", True))
     return entry
+
+
+@app.get("/api/flows")
+async def api_flows(days: int = 30, _=Depends(require_auth)):
+    """수급 관측 적재 현황 — 일자별로 어느 칸이 찼는지(조회 전용)."""
+    from .scout import store as scout_store
+
+    return {"coverage": await asyncio.to_thread(
+        scout_store.flow_coverage, max(1, min(365, days)))}
+
+
+@app.post("/api/flows/run")
+async def api_flows_run(_=Depends(require_auth)):
+    """감시목록 수급을 지금 1회 수집한다(조회·기록만 — 주문 없음)."""
+    from .scout import flows
+
+    return {"ok": True, **await flows.collect_once()}
 
 
 @app.get("/api/premarket")
