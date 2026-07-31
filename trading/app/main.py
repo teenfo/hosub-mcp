@@ -24,6 +24,7 @@ from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
 from .scout import observe as scout_observe
+from .scout import premarket as scout_premarket
 from .trade import desk, orders
 from . import journal
 
@@ -414,6 +415,9 @@ async def lifespan(app: FastAPI):
         # 관측 전용 — 신호를 내지 않고 원장에만 쌓는다(투자자별 매매 · VI).
         # 4주 뒤 잔차 IC 로 물을 재료이지, 지금 판단에 쓰는 값이 아니다.
         asyncio.create_task(scout_observe.loop()),
+        # NXT 프리마켓(08:00~08:50) — 우리가 못 보던 한 시간. 조회만
+        # 하고 주문은 여전히 KRX 로 나간다(dmst_stex_tp 는 안 건드린다).
+        asyncio.create_task(scout_premarket.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
@@ -826,6 +830,15 @@ async def api_journal_run(payload: dict | None = Body(None),
     day = payload.get("date") or datetime.now(KST).date().isoformat()
     entry = await journal.generate(day, with_summary=payload.get("summary", True))
     return entry
+
+
+@app.get("/api/premarket")
+async def api_premarket(_=Depends(require_auth)):
+    """NXT 프리마켓 관측 — 날짜별 스냅샷 요약(조회 전용)."""
+    from .scout import premarket, store as scout_store
+
+    return {"window": premarket.window(), "enabled": premarket.enabled(),
+            "days": await asyncio.to_thread(scout_store.premarket_days)}
 
 
 @app.get("/api/cases")
