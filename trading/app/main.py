@@ -828,6 +828,36 @@ async def api_journal_run(payload: dict | None = Body(None),
     return entry
 
 
+@app.get("/api/cases")
+async def api_cases(rule: str | None = None, hour: int | None = None,
+                    limit: int = 20, _=Depends(require_auth)):
+    """매매 케이스 원장 — 누적 요약 · 커버리지 · 최근 케이스(조회 전용)."""
+    from .research import cases
+
+    return {
+        "stats": await asyncio.to_thread(cases.stats),
+        "coverage": await asyncio.to_thread(cases.coverage),
+        "rows": await asyncio.to_thread(cases.similar, rule, hour,
+                                        max(1, min(200, limit)), None),
+    }
+
+
+@app.post("/api/cases/build")
+async def api_cases_build(payload: dict | None = Body(None),
+                          _=Depends(require_auth)):
+    """지난 일자를 소급해 케이스로 적재한다(조회·기록만 — 주문 없음).
+
+    일지 생성 경로는 그날치만 만든다. 이미 지나간 일지는 아무도 만들어 주지
+    않으므로 배포 후 한 번 이 경로로 채운다. 멱등이다.
+    """
+    from .research import cases
+
+    days = int((payload or {}).get("days", 60))
+    built = await asyncio.to_thread(cases.build_range, max(1, min(365, days)))
+    return {"ok": True, "built": built,
+            "coverage": await asyncio.to_thread(cases.coverage)}
+
+
 @app.get("/api/backtest/report/latest")
 async def api_backtest_report(_=Depends(require_auth)):
     """분봉 축적분 주기 백테스트 최신 리포트(전체 요약 + 종목별). 종목명 포함."""
