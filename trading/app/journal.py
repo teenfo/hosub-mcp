@@ -98,6 +98,32 @@ def signals_on(day: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def last_signal_at(since_days: int = 7) -> dict[str, datetime]:
+    """종목별 **마지막 신호 시각**. 발굴 엔진의 '침묵 판정' 입력.
+
+    매매 tier 자리는 신호를 탐지하려고 주는 것이다. 자리를 받고도 신호를 한 건도
+    못 내면 그 자리는 놀고 있는 것이고, 대기 후보에게 넘기는 편이 낫다 —
+    실측 2026-07-31: 매매 tier 40종목 중 16종목(40%)이 그날 신호 0건이었고,
+    매매 tier 밖에서 나온 신호는 0건이었다(자리가 모자라서 놓친 기회는 없었다).
+
+    `actionable` 은 보지 않는다. 자금·한도로 미발주된 것도 **규칙이 걸렸다**는
+    뜻이고, 자리의 값어치는 거기서 나온다.
+    """
+    cutoff = (datetime.now(KST).date() - timedelta(days=since_days)).isoformat()
+    out: dict[str, datetime] = {}
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT symbol, MAX(ts) t FROM signal_log WHERE day>=? AND ts IS NOT NULL"
+            " GROUP BY symbol", (cutoff,)).fetchall()
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r["t"])
+        except (TypeError, ValueError):
+            continue
+        out[r["symbol"]] = t if t.tzinfo else t.replace(tzinfo=KST)
+    return out
+
+
 def prune_signals(keep_days: int = 180) -> int:
     """오래된 신호 기록 정리(디스크 방어). 반환: 삭제 행 수."""
     cutoff = (datetime.now(KST).date() - timedelta(days=keep_days)).isoformat()

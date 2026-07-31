@@ -313,6 +313,35 @@ def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
     return len(fresh)
 
 
+def last_action_at(action: str, days: int = 7) -> dict[str, datetime]:
+    """종목별 **그 결정이 마지막으로 적용된 시각**. 회전 판정의 입력.
+
+    `promote_trade` → 언제 이 자리를 받았나(침묵 기간의 기준점)
+    `demote`        → 언제 밀려났나(쿨다운의 기준점)
+
+    감시목록에는 tier 가 바뀐 시각이 없다 — `watchlist.set_mode` 는 `added` 를
+    건드리지 않으므로 `Current.since` 는 최초 편입 시각이다. 그대로 쓰면 어제
+    편입돼 오늘 자리를 받은 종목이 즉시 '오래 앉았다' 로 읽힌다. 원장이 그
+    시각을 이미 갖고 있으므로 여기서 읽는다.
+
+    `applied=1` 만 본다. shadow 결정은 실제로 일어나지 않은 일이다.
+    """
+    cutoff = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    out: dict[str, datetime] = {}
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT code, MAX(ts) t FROM decisions"
+            " WHERE action=? AND applied=1 AND ts>=? GROUP BY code",
+            (action, cutoff)).fetchall()
+    for r in rows:
+        try:
+            t = datetime.fromisoformat(r["t"])
+        except (TypeError, ValueError):
+            continue
+        out[r["code"]] = t if t.tzinfo else t.replace(tzinfo=UTC)
+    return out
+
+
 def recent_decisions(limit: int = 200) -> list[dict]:
     with _conn() as conn:
         rows = conn.execute(
