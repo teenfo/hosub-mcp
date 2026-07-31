@@ -91,7 +91,70 @@ def parse_watch_info(raw: dict) -> dict[str, dict]:
             "volume": _num(row.get("trde_qty"), int),
             "trde_prica": _num(row.get("trde_prica"), int),
             "spread_pct": spread_pct(row),
+            **extra_fields(row),
         }
+    return out
+
+
+def extra_fields(row: dict) -> dict:
+    """ka10095 의 **쓰지 않고 버리던 필드들** — 추가 호출 0.
+
+    63개 필드가 오는데 9개만 읽고 있었다. 나머지는 그냥 버렸다. 이 TR 은 승격
+    게이트가 이미 매 사이클 부르므로, 적재 비용은 컬럼 몇 개의 디스크뿐이다.
+
+    무엇을 왜 남기나 — 전부 **관측이고 판단에 쓰지 않는다**:
+
+      req_imbalance   최우선 매수/매도 잔량비. 실측 3.46:1 같은 값이 나온다.
+                      진입 직전에 매도벽이 있었는가를 사후에 물을 수 있는 유일한
+                      기록이다. 지금은 남는 데가 없다.
+      tot_imbalance   총 잔량비 — 위와 다른 시간축의 같은 정보.
+      day_pos         **당일 시·고·저 안에서 현재가의 위치**(0=저가, 1=고가).
+                      이번 실측이 정확히 이 값을 가리켰다: 진입가가 직전 30분
+                      범위의 평균 0.67 지점이었고, 위치가 높을수록 이후 상승
+                      여력이 단조로 줄었다(하단 1.52% → 상단 1.02% → 신고가
+                      0.95%). 그런데 그 값을 **결정 시점에 남긴 적이 없어**
+                      분봉으로 사후 재계산해야 했다. 남기지 않으면 4주 뒤에도
+                      사후 재계산만 가능하다.
+      vol_vs_prev     전일 거래량 대비 — presurge 와 다른 정규화.
+      exp_price/qty   예상체결. 08:30~09:00 동시호가 정보라 **주문 없이**
+                      프리마켓을 관측할 수 있는 유일한 창이다.
+      limit_pos       상한가까지 남은 거리(%). 0 에 가까우면 상한가 근처다.
+
+    값을 못 만들면 키를 **빼고** 돌려준다. 0 으로 채우면 '측정했는데 0' 과
+    '못 쟀다' 가 섞여, 4주 뒤 평균이 조용히 아래로 끌린다(스프레드 표본을
+    따로 센 것과 같은 이유).
+    """
+    out: dict = {}
+
+    def ratio(a: str, b: str, key: str) -> None:
+        x, y = abs(_num(row.get(a))), abs(_num(row.get(b)))
+        if x > 0 and y > 0:
+            out[key] = round(x / y, 4)
+
+    ratio("pri_buy_req", "pri_sel_req", "req_imbalance")
+    ratio("tot_buy_req", "tot_sel_req", "tot_imbalance")
+
+    price = abs(_num(row.get("cur_prc")))
+    hi, lo = abs(_num(row.get("high_pric"))), abs(_num(row.get("low_pric")))
+    if price > 0 and hi > lo > 0:
+        out["day_pos"] = round((price - lo) / (hi - lo), 4)
+        out["day_range_pct"] = round((hi - lo) / lo * 100, 4)
+    op = abs(_num(row.get("open_pric")))
+    if op > 0 and price > 0:
+        out["from_open_pct"] = round((price - op) / op * 100, 4)
+
+    prev = _num(row.get("pred_trde_qty_pre"))
+    if prev:
+        out["vol_vs_prev"] = round(prev, 4)
+
+    exp_p = abs(_num(row.get("exp_cntr_pric")))
+    if exp_p > 0:
+        out["exp_price"] = exp_p
+        out["exp_qty"] = _num(row.get("exp_cntr_qty"), int)
+
+    upl = abs(_num(row.get("upl_pric")))
+    if upl > 0 and price > 0:
+        out["limit_pos"] = round((upl - price) / price * 100, 4)
     return out
 
 

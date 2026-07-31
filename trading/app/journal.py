@@ -279,6 +279,21 @@ def facts(entry: dict) -> list[str]:
             f"{be['triggered']}건, 실제 대비 {be['delta_krw']:+,.0f}원"
             f"(유리 {be['helped']}건 · 불리 {be['hurt']}건). 매매에 반영되지 않은 "
             "가정치다 — 표본이 20거래일에 못 미치면 판단을 보류한다.")
+    # 케이스 원장 누적 — **오늘이 아니라 지금까지**의 사실이다. 하루치 집계만
+    # 보면 매일 "표본이 적어 판단 보류" 로 끝나는데, 같은 질문에 대한 답이
+    # 이미 누적돼 있다. 진입 후 경로가 이 시스템의 실제 고장 지점이므로
+    # 그 값을 매일 눈앞에 둔다.
+    cs = entry.get("cases") or {}
+    if cs.get("n"):
+        line = (f"[누적 {cs['n']}건] 진입 후 최대 유리 {cs['mfe_pct']:+.2f}% vs "
+                f"최대 불리 {cs['mae_pct']:+.2f}%")
+        if cs.get("entry_pos") is not None:
+            line += f", 진입가는 직전 30분 범위의 {cs['entry_pos']:.2f} 지점"
+        line += (f". 한 번도 유리하게 못 간 건 {cs['never_up']}건, "
+                 f"목표선에 닿은 {cs['target_reached']}건 중 목표청산은 "
+                 f"{cs['target_exited']}건, 손절선을 관통한 건 "
+                 f"{cs['stop_breached']}건.")
+        out.append(line)
     if entry.get("carried"):
         out.append(
             f"다음 날로 넘어간 미청산 포지션 {len(entry['carried'])}건 — "
@@ -293,6 +308,8 @@ SUMMARY_SYSTEM = """너는 개인 투자자의 매매일지를 정리하는 기�
 2. 숫자를 새로 계산하거나 바꾸지 않는다. 사실에 없는 내용을 지어내지 않는다.
 3. 매수·매도 추천, 종목 전망, 목표가 제시를 하지 않는다. 지난 일에 대한 정리만 한다.
 4. 근거가 부족하면 "표본이 적어 판단 보류"라고 쓴다.
+5. '지난 사례'는 **과거 기록**이다. 오늘의 성과로 세지 말고, 오늘과 같은 패턴이
+   반복되는지 확인하는 데만 쓴다. 사례가 오늘 결과와 다르면 그 차이를 적는다.
 
 출력 형식(한국어, 마크다운 없이 평문):
 오늘의 결과: (1~2문장)
@@ -315,7 +332,49 @@ def summary_prompt(entry: dict) -> str:
             lines.append(
                 f"- {p.get('name') or p.get('symbol')} / {p.get('rule')} / "
                 f"{p.get('outcome') or '?'}({why}) / {p.get('pnl_pct'):+.2f}%")
+    lines += _precedent_lines(entry)
     return "\n".join(lines)
+
+
+def _precedent_lines(entry: dict) -> list[str]:
+    """오늘 쓴 규칙·시간대의 **지난** 케이스를 선례로 붙인다.
+
+    요약이 매일 그날 숫자만 보고 "표본이 적어 판단 보류" 로 끝나는 것을 막는다.
+    같은 규칙을 같은 시간대에 몇 번이나 돌렸고 그때 무엇이 그러했는지가 이미
+    원장에 있다.
+
+    **오늘 케이스는 제외한다**(`exclude_day`). 오늘 거래를 오늘의 선례로 인용하면
+    같은 사실을 두 번 세는 것이고, 요약이 그걸 독립된 근거처럼 읽는다.
+    """
+    if not entry.get("positions"):
+        return []
+    try:
+        from .research import cases
+    except Exception:  # noqa: BLE001
+        return []
+    # 오늘 가장 많이 쓴 (규칙, 시간대) 두 조합만 — 프롬프트가 길어지면 요약이
+    # 사실 목록보다 선례를 따라간다.
+    combos = Counter((p.get("rule"), _hour_of(p.get("opened")))
+                     for p in entry["positions"])
+    lines: list[str] = []
+    for (rule, hour), _ in combos.most_common(2):
+        if not rule:
+            continue
+        try:
+            rows = cases.similar(rule, hour, limit=3, exclude_day=entry["date"])
+        except Exception:  # noqa: BLE001 - 선례 조회 실패가 요약을 막지 않는다
+            log.warning("선례 조회 실패 %s", rule, exc_info=True)
+            continue
+        if not rows:
+            continue
+        lines.append("")
+        lines.append(f"지난 사례({rule} · {hour}시대, 참고용):")
+        for c in rows:
+            note = " / ".join(c.get("lessons") or []) or "특이사항 없음"
+            lines.append(
+                f"- {c['d']} {c.get('name') or c.get('symbol')} "
+                f"{(c.get('pnl_pct') or 0):+.2f}% — {note}")
+    return lines
 
 
 # --------------------------------------------------------------------------
@@ -373,6 +432,17 @@ def build(day: str | None = None) -> dict:
         "breakeven_shadow": breakeven.report(day),
         "summary": {},
     }
+    # 케이스 원장 — 오늘 청산분을 사후 측정치와 함께 남기고, 누적 요약을 싣는다.
+    # 일지가 매일 '오늘의 집계'만 보던 것을 **누적된 사실 위에서** 읽게 하려는
+    # 것이다. 실패해도 일지는 만든다 — 관측이 기록을 막을 이유가 없다.
+    try:
+        from .research import cases
+
+        cases.build_day(day)
+        entry["cases"] = cases.stats()
+    except Exception:  # noqa: BLE001
+        log.warning("케이스 적재 실패 — 일지는 그대로 만든다", exc_info=True)
+        entry["cases"] = {}
     entry["facts"] = facts(entry)
     return entry
 

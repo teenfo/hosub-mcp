@@ -22,7 +22,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import settings
-from .model import TTL_SEC, Signal
+from .model import DECISION_QUOTE_FIELDS, TTL_SEC, Signal
 
 KST = ZoneInfo("Asia/Seoul")   # 관측을 **거래일** 단위로 접기 위한 기준
 
@@ -71,7 +71,7 @@ def _conn() -> sqlite3.Connection:
     # 성적이 실제로 나쁜가" 를 묻기 위한 재료다. 측정 전에 승격 조건에 넣으면
     # 발굴 3규칙 점수가 저지른 일을 반복한다.
     have = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
-    for col in ("change_pct", "cntr_str", "spread_pct"):
+    for col in DECISION_QUOTE_FIELDS:
         if col not in have:
             conn.execute(f"ALTER TABLE decisions ADD COLUMN {col} REAL")
     conn.executescript(
@@ -113,6 +113,60 @@ def _conn() -> sqlite3.Connection:
     if "empty" not in have:
         conn.execute(
             "ALTER TABLE source_health ADD COLUMN empty INTEGER NOT NULL DEFAULT 0")
+    # ka10095 는 63필드를 주는데 9개만 읽고 있었다. 나머지는 추가 호출 0으로
+    # 얻을 수 있으므로 남긴다(`quote.extra_fields`). `extra_last` 는 마지막
+    # 관측의 JSON 이고, `day_pos` 만 따로 접는다 — 이번 실측이 정확히 그 값을
+    # 가리켰기 때문이다(진입가가 직전 범위의 어디였나. 위치가 높을수록 이후
+    # 상승 여력이 단조로 줄었다). 못 잰 순간은 `day_pos_n` 에서 빠진다.
+    # 관측 전용 원장 2종. **신호가 아니다** — 점수·승격 경로에 들어가지 않고
+    # 4주 뒤 잔차 IC 를 물을 재료로만 쌓인다.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS investor_obs (
+            ts TEXT NOT NULL, code TEXT NOT NULL, name TEXT, invsr TEXT NOT NULL,
+            price REAL, change_pct REAL,
+            net_amt REAL, net_amt_delta REAL, net_qty REAL,
+            buy_amt REAL, sell_amt REAL,
+            PRIMARY KEY (ts, code, invsr)
+        );
+        CREATE INDEX IF NOT EXISTS ix_investor_obs_code ON investor_obs (code, ts);
+        CREATE TABLE IF NOT EXISTS vi_obs (
+            d TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            motn_time TEXT NOT NULL, release_time TEXT, kind TEXT,
+            motn_pric REAL, dispty_rt REAL, motn_cnt INTEGER,
+            seen_at TEXT,
+            PRIMARY KEY (d, code, motn_time)
+        );
+        CREATE INDEX IF NOT EXISTS ix_vi_obs_code ON vi_obs (code, d);
+
+        -- 개장 창(09:00~09:15) 시장 상태 — **하루 한 행**.
+        --
+        -- 실측 2026-07-31: 09:03 진입 → 09:30 청산이 5거래일 평균 +0.367%
+        -- (비용 차감)인데 날짜별로는 -1.553% ~ +1.932%, 승률 17.9% ~ 75.6%.
+        -- **분산이 엣지의 4배**다. 종목 선택 엣지가 아니라 '그날 시장이
+        -- 올랐는가' 이고, 5일 표본으로는 아무 말도 못 한다.
+        --
+        -- 그래서 창을 여는 대신 그 시각의 시장 상태를 남긴다. 4주 뒤 물을 것은
+        -- "개장 창 진입의 성적이 이 값들로 갈리는가" 다 — 갈리면 시장 방향
+        -- 필터가 분산을 줄인다는 뜻이고, 안 갈리면 이 창은 그냥 베타다.
+        CREATE TABLE IF NOT EXISTS opening_obs (
+            d TEXT PRIMARY KEY,
+            n INTEGER NOT NULL,          -- 관측 종목 수
+            up_ratio REAL,               -- 시가 대비 상승 종목 비율(%) = 개장 폭
+            mean_chg REAL, median_chg REAL,
+            surge3 INTEGER, surge5 INTEGER,   -- +3% / +5% 급등 종목 수
+            mean_range REAL,             -- 종목 평균 개장 범위(%)
+            mean_rvol REAL,              -- 종목 평균 RVOL(15분 평균 / 직전 평균)
+            seen_at TEXT
+        );
+        """
+    )
+    have = {r[1] for r in conn.execute("PRAGMA table_info(quote_obs)")}
+    for col, decl in (("extra_last", "TEXT"),
+                      ("day_pos_n", "INTEGER NOT NULL DEFAULT 0"),
+                      ("day_pos_sum", "REAL NOT NULL DEFAULT 0")):
+        if col not in have:
+            conn.execute(f"ALTER TABLE quote_obs ADD COLUMN {col} {decl}")
     return conn
 
 
@@ -134,20 +188,28 @@ def record_quotes(quotes: dict[str, dict], names: dict[str, str] | None = None,
     names = names or {}
     ts = (now or datetime.now(UTC))
     day = ts.astimezone(KST).strftime("%Y-%m-%d")
+    known = {"price", "change_pct", "cntr_str", "volume", "trde_prica", "spread_pct"}
     rows = []
     for code, q in quotes.items():
         sp = q.get("spread_pct")
+        extra = {k: v for k, v in q.items() if k not in known}
+        dp = extra.get("day_pos")
         rows.append((day, code, names.get(code),
                      1 if sp is None else 0,          # n 은 항상 +1, 아래에서 처리
                      sp, q.get("cntr_str"), q.get("price"), q.get("trde_prica"),
-                     ts.isoformat()))
+                     ts.isoformat(),
+                     json.dumps(extra, ensure_ascii=False) if extra else None,
+                     0 if dp is None else 1, 0.0 if dp is None else float(dp)))
     with _conn() as conn:
         conn.executemany(
             "INSERT INTO quote_obs (d, code, name, n, spread_n, spread_sum,"
             " spread_min, spread_max, spread_last, cntr_str_last, price_last,"
-            " trde_prica_last, updated_at)"
-            " VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)"
+            " trde_prica_last, updated_at, extra_last, day_pos_n, day_pos_sum)"
+            " VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(d, code) DO UPDATE SET"
+            "   extra_last = COALESCE(excluded.extra_last, quote_obs.extra_last),"
+            "   day_pos_n = quote_obs.day_pos_n + excluded.day_pos_n,"
+            "   day_pos_sum = quote_obs.day_pos_sum + excluded.day_pos_sum,"
             "   n = quote_obs.n + 1,"
             "   name = COALESCE(excluded.name, quote_obs.name),"
             "   spread_n = quote_obs.spread_n + excluded.spread_n,"
@@ -167,8 +229,8 @@ def record_quotes(quotes: dict[str, dict], names: dict[str, str] | None = None,
             "                              quote_obs.trde_prica_last),"
             "   updated_at = excluded.updated_at",
             [(d, c, nm, 0 if sp is None else 1, 0.0 if sp is None else sp,
-              sp, sp, sp, cs, pr, tp, at)
-             for (d, c, nm, _null, sp, cs, pr, tp, at) in rows],
+              sp, sp, sp, cs, pr, tp, at, ex, dpn, dps)
+             for (d, c, nm, _null, sp, cs, pr, tp, at, ex, dpn, dps) in rows],
         )
     return len(rows)
 
@@ -177,13 +239,97 @@ def quote_stats(day: str | None = None, limit: int = 500) -> list[dict]:
     """종목별 스프레드 관측 요약. 화면·분석용 읽기 전용."""
     with _conn() as conn:
         sql = ("SELECT *, CASE WHEN spread_n > 0 THEN spread_sum / spread_n END"
-               " AS spread_avg FROM quote_obs")
+               " AS spread_avg,"
+               " CASE WHEN day_pos_n > 0 THEN day_pos_sum / day_pos_n END"
+               " AS day_pos_avg FROM quote_obs")
         args: tuple = ()
         if day:
             sql += " WHERE d = ?"
             args = (day,)
         sql += " ORDER BY spread_avg DESC NULLS LAST LIMIT ?"
         return [dict(r) for r in conn.execute(sql, (*args, limit))]
+
+
+# --- 관측 전용 원장 -----------------------------------------------------------
+
+def record_investor(rows: list[dict], invsr: str,
+                    now: datetime | None = None) -> int:
+    """장중 투자자별 순매수를 시점별로 쌓는다(ka10063). 반환: 적재 행 수.
+
+    시세 관측(`quote_obs`)과 달리 **접지 않는다.** 순매수는 하루 동안 방향이
+    바뀌는 값이라 평균으로 뭉개면 "언제 사고 있었나" 가 사라진다 — 우리가
+    답하려는 질문이 정확히 그 시점이다.
+    """
+    if not rows:
+        return 0
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="minutes")
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO investor_obs (ts, code, name, invsr, price,"
+            " change_pct, net_amt, net_amt_delta, net_qty, buy_amt, sell_amt)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(ts, r["code"], r.get("name"), invsr, r.get("price"),
+              r.get("change_pct"), r.get("net_amt"), r.get("net_amt_delta"),
+              r.get("net_qty"), r.get("buy_amt"), r.get("sell_amt")) for r in rows],
+        )
+    return len(rows)
+
+
+def record_vi(rows: list[dict], now: datetime | None = None) -> int:
+    """VI 발동 사실을 (날짜, 종목, 발동시각)당 한 행으로 쌓는다(ka10054).
+
+    같은 종목이 하루에 여러 번 발동하므로 발동시각까지 키에 넣는다. 폴링
+    주기가 발동 창(2분)보다 길면 놓치는 발동이 생긴다 — 놓친 것을 채워
+    넣지는 않는다. **본 것만 기록한다.**
+    """
+    if not rows:
+        return 0
+    ts = (now or datetime.now(UTC)).astimezone(KST)
+    day = ts.strftime("%Y-%m-%d")
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO vi_obs (d, code, name, motn_time, release_time,"
+            " kind, motn_pric, dispty_rt, motn_cnt, seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(day, r["code"], r.get("name"), r.get("motn_time") or "",
+              r.get("release_time"), r.get("kind"), r.get("motn_pric"),
+              r.get("dispty_rt"), r.get("motn_cnt"),
+              ts.isoformat(timespec="seconds")) for r in rows],
+        )
+    return len(rows)
+
+
+def record_opening(day: str, stats: dict, now: datetime | None = None) -> bool:
+    """개장 창 시장 상태를 하루 한 행으로 남긴다. 반환: 썼는가.
+
+    **덮어쓰지 않는다.** 09:15 한 시점의 상태가 이 행의 의미인데, 재시작해서
+    09:40 에 다시 계산하면 같은 컬럼에 다른 시각의 값이 들어간다. 그러면 4주 뒤
+    "그때 시장이 어땠나" 를 물을 수 없다.
+    """
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="seconds")
+    with _conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO opening_obs (d, n, up_ratio, mean_chg,"
+            " median_chg, surge3, surge5, mean_range, mean_rvol, seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (day, stats["n"], stats.get("up_ratio"), stats.get("mean_chg"),
+             stats.get("median_chg"), stats.get("surge3"), stats.get("surge5"),
+             stats.get("mean_range"), stats.get("mean_rvol"), ts))
+        return cur.rowcount > 0
+
+
+def opening_days(limit: int = 60) -> list[dict]:
+    """개장 창 관측 이력 — 분석용 읽기 전용."""
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM opening_obs ORDER BY d DESC LIMIT ?", (limit,))]
+
+
+def vi_codes(day: str) -> set[str]:
+    """그날 VI 가 걸린 적 있는 종목 — 사후 대조용(우리 거래와 겹쳤는가)."""
+    with _conn() as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT code FROM vi_obs WHERE d=?", (day,))}
 
 
 # --- 신호 적재 ---------------------------------------------------------------
@@ -299,16 +445,19 @@ def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
         fresh = [d for d in rows if last.get(d["code"]) != _decision_key(d)]
         if not fresh:
             return 0
+        # 시세 컬럼은 `DECISION_QUOTE_FIELDS` 로 **생성한다**. 손으로 나열하면
+        # 필드를 늘릴 때 ALTER 는 되는데 INSERT 를 빼먹어 컬럼이 조용히 NULL 로
+        # 남는다 — 그 침묵은 4주 뒤 측정할 때야 드러난다.
+        cols = ", ".join(DECISION_QUOTE_FIELDS)
+        marks = ",".join("?" * (11 + len(DECISION_QUOTE_FIELDS)))
         conn.executemany(
-            "INSERT INTO decisions (ts, code, name, action, from_tier, to_tier,"
-            " score, sources, reason, mode, applied, change_pct, cntr_str,"
-            " spread_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            f"INSERT INTO decisions (ts, code, name, action, from_tier, to_tier,"
+            f" score, sources, reason, mode, applied, {cols}) VALUES ({marks})",
             [(ts, d["code"], d.get("name"), d["action"], d.get("from_tier"),
               d.get("to_tier"), d.get("score"),
               json.dumps(sorted(d.get("sources") or []), ensure_ascii=False),
               d.get("reason"), mode, 1 if applied else 0,
-              d.get("change_pct"), d.get("cntr_str"),
-              d.get("spread_pct")) for d in fresh],
+              *(d.get(f) for f in DECISION_QUOTE_FIELDS)) for d in fresh],
         )
     return len(fresh)
 

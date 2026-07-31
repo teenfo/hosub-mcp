@@ -23,6 +23,7 @@ from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
+from .scout import observe as scout_observe
 from .trade import desk, orders
 from . import journal
 
@@ -142,6 +143,11 @@ def _price_of(symbol: str) -> float | None:
     return ledger.latest_price(symbol)
 
 
+# 일일 손실 가드가 평가손익을 셀 때 쓸 가격원. 실시간 스냅샷을 먼저 보므로
+# 추가 API 호출이 없다 — 가드는 30초마다 도는데 REST 로 물으면 예산을 먹는다.
+engine.price_of = _price_of
+
+
 SESSION_END = "15:30"
 
 
@@ -170,6 +176,7 @@ async def _ledger_loop() -> None:
     from .trade import breakeven, ledger, orders
 
     eod_done = ""
+    flat_done = ""      # 손실 정리선으로 접은 날 — 하루 한 번만 돈다
     while True:  # noqa: PLR1702 - 청산 감시 루프
         try:
             cfg = settings.CONFIG.get("execution", {})
@@ -222,6 +229,22 @@ async def _ledger_loop() -> None:
                             await asyncio.to_thread(orders.propose_exit, ex,
                                                     ex["reason"], ex["exit_px"])
                             log.info("청산 승인 대기 %s (%s)", ex["symbol"], ex["reason"])
+                    # 손실 정리선 — 실현 + 평가가 정리선을 넘으면 보유분을 접는다.
+                    # 신규 진입 차단(가드)은 앞을 막을 뿐 이미 벌어진 손실을 끊지
+                    # 못한다. 실측 2026-07-30: 한도 1.5% 인 날 계좌 -4.26%.
+                    # **기본값 0(꺼짐)** 이라 설정을 넣기 전에는 이 블록이 돌지 않는다.
+                    guard = await asyncio.to_thread(engine.day_guard_status)
+                    if guard.get("flatten") and flat_done != now.date().isoformat():
+                        left = await asyncio.to_thread(ledger.positions, "open", 200)
+                        n = 0
+                        for pos in left:
+                            px = _price_of(pos["symbol"]) or pos["entry"]
+                            r = await orders.execute_exit(pos, "loss_flat", px)
+                            n += 1 if r.get("ok") else 0
+                        log.warning("%s — 보유 %d건 중 %d건 정리 발주",
+                                    guard.get("flatten_reason"), len(left), n)
+                        if n >= len(left):
+                            flat_done = now.date().isoformat()
                     # 마감 정리는 **장이 열려 있는 동안** 해야 한다.
                     #
                     # 종전에는 `hhmm > "15:30"` 에서만 돌았다 — 15:30 은 정규장이
@@ -388,6 +411,9 @@ async def lifespan(app: FastAPI):
         # 발굴 엔진 — 기본 shadow. 신호를 모으고 결정을 기록만 하며 감시목록에는
         # 손대지 않는다. 기존 scanner/discovery 자동편입 경로는 그대로 돈다.
         asyncio.create_task(scout.loop()),
+        # 관측 전용 — 신호를 내지 않고 원장에만 쌓는다(투자자별 매매 · VI).
+        # 4주 뒤 잔차 IC 로 물을 재료이지, 지금 판단에 쓰는 값이 아니다.
+        asyncio.create_task(scout_observe.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
@@ -800,6 +826,36 @@ async def api_journal_run(payload: dict | None = Body(None),
     day = payload.get("date") or datetime.now(KST).date().isoformat()
     entry = await journal.generate(day, with_summary=payload.get("summary", True))
     return entry
+
+
+@app.get("/api/cases")
+async def api_cases(rule: str | None = None, hour: int | None = None,
+                    limit: int = 20, _=Depends(require_auth)):
+    """매매 케이스 원장 — 누적 요약 · 커버리지 · 최근 케이스(조회 전용)."""
+    from .research import cases
+
+    return {
+        "stats": await asyncio.to_thread(cases.stats),
+        "coverage": await asyncio.to_thread(cases.coverage),
+        "rows": await asyncio.to_thread(cases.similar, rule, hour,
+                                        max(1, min(200, limit)), None),
+    }
+
+
+@app.post("/api/cases/build")
+async def api_cases_build(payload: dict | None = Body(None),
+                          _=Depends(require_auth)):
+    """지난 일자를 소급해 케이스로 적재한다(조회·기록만 — 주문 없음).
+
+    일지 생성 경로는 그날치만 만든다. 이미 지나간 일지는 아무도 만들어 주지
+    않으므로 배포 후 한 번 이 경로로 채운다. 멱등이다.
+    """
+    from .research import cases
+
+    days = int((payload or {}).get("days", 60))
+    built = await asyncio.to_thread(cases.build_range, max(1, min(365, days)))
+    return {"ok": True, "built": built,
+            "coverage": await asyncio.to_thread(cases.coverage)}
 
 
 @app.get("/api/backtest/report/latest")

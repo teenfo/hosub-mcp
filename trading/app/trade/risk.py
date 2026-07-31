@@ -3,16 +3,49 @@ import math
 from dataclasses import dataclass
 
 
-def day_guard(realized_pct: float, target_pct: float,
-              loss_limit_pct: float) -> tuple[bool, str]:
-    """당일 실현손익률(%)로 신규 진입 허용 여부 판단.
+def day_guard(realized_pct: float, target_pct: float, loss_limit_pct: float,
+              unrealized_pct: float = 0.0,
+              include_unrealized: bool = True) -> tuple[bool, str]:
+    """당일 손익률(%)로 신규 진입 허용 여부 판단.
     - 손실 한도 도달 → 손실 차단(우선)
     - 목표 도달 → 이익 확정 마감
-    반환: (중단 여부, 사유). 목표/한도가 0 이하면 해당 조건 미적용."""
-    if loss_limit_pct and realized_pct <= -abs(loss_limit_pct):
-        return True, f"일일 손실 한도(-{loss_limit_pct:g}%) 도달 — 신규 진입 중단"
+    반환: (중단 여부, 사유). 목표/한도가 0 이하면 해당 조건 미적용.
+
+    **손실 판정에는 평가손익을 함께 센다**(2026-07-31). 종전에는 실현분만 봐서,
+    물려 있는 포지션이 아무리 깊어도 가드가 침묵했다 — 실측 2026-07-30, 한도
+    1.5% 인 날 계좌는 −4.26% 까지 내려갔다. 손실은 청산할 때 생기는 것이 아니라
+    청산할 때 확정될 뿐이다.
+
+    **이익 목표는 실현분만 본다.** 평가이익으로 목표를 선언하면 아직 손에 쥐지
+    않은 돈으로 그날 장사를 접게 된다 — 두 판정은 성격이 다르다.
+    """
+    loss_basis = realized_pct + (unrealized_pct if include_unrealized else 0.0)
+    if loss_limit_pct and loss_basis <= -abs(loss_limit_pct):
+        why = f"일일 손실 한도(-{loss_limit_pct:g}%) 도달 — 신규 진입 중단"
+        if include_unrealized and unrealized_pct:
+            why += (f" (실현 {realized_pct:+.2f}% + 평가 {unrealized_pct:+.2f}%"
+                    f" = {loss_basis:+.2f}%)")
+        return True, why
     if target_pct and realized_pct >= target_pct:
         return True, f"일일 목표(+{target_pct:g}%) 도달 — 이익 확정, 신규 진입 중단"
+    return False, ""
+
+
+def flatten_call(realized_pct: float, unrealized_pct: float,
+                 flatten_pct: float) -> tuple[bool, str]:
+    """보유분까지 정리해야 하는 수준인가 — 신규 진입 차단보다 한 단계 위.
+
+    두 문턱을 나눠 두는 이유: "더 벌이지 않는다" 와 "지금 다 접는다" 는 다른
+    결정이다. 한도(`daily_loss_limit_pct`)는 앞을 막고, 이 값은 이미 벌어진
+    것을 끊는다. `flatten_pct` 가 0 이면 미적용 — **기본값은 0(꺼짐)** 이고,
+    켜는 것은 실거래 청산을 자동 발주하는 결정이므로 사용자가 한다.
+    """
+    if not flatten_pct:
+        return False, ""
+    total = realized_pct + unrealized_pct
+    if total <= -abs(flatten_pct):
+        return True, (f"일일 손실 정리선(-{flatten_pct:g}%) 도달 "
+                      f"({total:+.2f}%) — 보유분 정리")
     return False, ""
 
 

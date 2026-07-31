@@ -38,17 +38,26 @@ class NightlySource:
         from ...discovery import latest_picks
 
         date, picks = latest_picks()
-        return [
-            Signal(
+        out: list[Signal] = []
+        for p in picks:
+            if not p.get("code"):
+                continue
+            # 무작위 표본은 점수가 0 이라 그대로 두면 강도 0 → 영원히 후보가
+            # 되지 않는다. 관측 팔이 존재하려면 승격선을 넘어야 하므로 바닥값을
+            # 준다. 이건 확신이 아니라 **표본에 자리를 준다**는 뜻이고, kind 로
+            # 끝까지 구분되므로 사후 대조에서 섞이지 않는다.
+            rand = p.get("pick_kind") == "random"
+            out.append(Signal(
                 code=p["code"], name=p.get("name") or p["code"], source=self.name,
-                kind=self.name,
-                strength=model.score_strength(float(p.get("score", 0))),
+                kind=f"{self.name}:random" if rand else self.name,
+                strength=(model.RANDOM_STRENGTH if rand
+                          else model.score_strength(float(p.get("score", 0)))),
                 raw=float(p.get("score", 0)),
                 price=float(p.get("close", 0) or 0),
-                evidence={"date": date, "reasons": p.get("reasons") or []},
-            )
-            for p in picks if p.get("code")
-        ]
+                evidence={"date": date, "pick_kind": p.get("pick_kind") or "score",
+                          "reasons": p.get("reasons") or []},
+            ))
+        return out
 
 
 class NewsSource:

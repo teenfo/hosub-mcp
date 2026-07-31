@@ -127,6 +127,7 @@ def record_fill(fill: dict) -> bool:
                 "WHERE id=?",
                 (float(price), int(qty) or row["qty"], round(slip, 4), row["id"]),
             )
+            _apply_refit(conn, row, float(price))
             updated = True
         elif ord_no and price > 0:
             # 청산 체결 — 이론가로 적어 둔 손익을 실체결가로 정정한다.
@@ -237,6 +238,7 @@ def reconcile_executions(execs: list[dict]) -> dict:
                      round((price - model) / model * 100, 4) if model else 0.0,
                      a["fee"], row["id"]),
                 )
+                _apply_refit(conn, row, round(price, 2))
                 entries += 1
                 continue
             ex = conn.execute(
@@ -474,6 +476,78 @@ def held_minutes(opened: str, now: datetime | None = None) -> float | None:
     if t.tzinfo is None:
         t = t.replace(tzinfo=KST)
     return (now - t).total_seconds() / 60
+
+
+def refit_lines(side: str, model_entry: float, entry: float, stop: float,
+                target: float, lo: float, hi: float) -> tuple[float, float] | None:
+    """체결가가 확정된 뒤 손절·목표를 **실측 진입가 기준**으로 다시 본다.
+
+    신호 단계의 손절폭 대역 검사(`rules.evaluate_all`)는 모델 진입가로 한다.
+    체결가는 그 뒤에 정해지고, 슬리피지가 폭을 대역 밖으로 밀어낼 수 있다.
+    **진입 전이라면 폐기했을 폭을 진입 후에는 아무도 다시 보지 않는다.**
+
+    실측 2026-07-27~31: 107건 중 17건이 체결 후 1.0~2.5% 밖이었고, 슬리피지가
+    폭을 최대 0.94%p 밀어냈다. 대역의 양쪽 끝은 각각 "비용을 못 이긴다"와
+    "목표가 하루 변동폭 밖이다" 를 뜻하므로, 밖으로 나간 폭은 그대로 두면
+    진입 시점에 이미 결론이 난 거래가 된다.
+
+    대역 **안이면 손절선을 그대로 둔다** — 대개 구조적 수준(레인지 저점·스윙
+    저점)이고 옮기면 근거가 사라진다. 밖일 때만 가장 가까운 경계로 당기고,
+    목표는 원래 설계한 손익비 R 을 유지하도록 다시 만든다.
+
+    반환: 새 (손절선, 목표가). 손댈 필요가 없으면 None.
+    """
+    if not (lo or hi):
+        return None
+    if not (model_entry and entry and stop) or entry <= 0 or model_entry <= 0:
+        return None
+    long = side == "long"
+    # 체결가가 이미 손절선을 넘어 버렸다면 옮기지 않는다. 손절선을 다시 그으면
+    # '즉시 청산될 자리' 가 '한 번 더 잃을 자리' 로 바뀐다 — 실거래에 닿는
+    # 판단은 보수적인 쪽으로 둔다.
+    if (long and entry <= stop) or (not long and entry >= stop):
+        return None
+    width = round(abs(entry - stop) / entry * 100, 4)
+    if (not lo or width >= lo) and (not hi or width <= hi):
+        return None
+    want = min(max(width, lo or width), hi or width)
+    # 원 설계의 손익비. 목표가 없거나 손절폭이 0이면 R 을 복원할 수 없다 —
+    # 그때는 목표를 건드리지 않는다(폭만 고친다).
+    base = abs(model_entry - stop)
+    r = abs(target - model_entry) / base if base > 0 and target else None
+    new_stop = entry * (1 - want / 100) if long else entry * (1 + want / 100)
+    new_target = target
+    if r is not None:
+        new_target = (entry * (1 + want * r / 100) if long
+                      else entry * (1 - want * r / 100))
+    return round(new_stop, 2), round(float(new_target), 2)
+
+
+def _apply_refit(conn, row, entry: float) -> bool:
+    """체결 확정 직후 손절·목표 재검증을 실제 행에 반영한다(같은 트랜잭션 안).
+
+    쓰는 곳은 `stop_live`/`target_live` 다 — **원본은 보존한다.** 일지·백테스트가
+    "원래 설계는 무엇이었나" 를 계속 읽어야 하고, 재검증 규칙이 나빴을 때
+    되돌릴 기준이 남아야 한다(데스크 라인 갱신과 같은 규약).
+    """
+    if row["status"] != "open":
+        return False
+    cfg = settings.RULES or {}
+    if not cfg.get("refit_stop_on_fill", True):
+        return False
+    fit = refit_lines(
+        row["side"], float(row["model_entry"] or 0), entry,
+        float(row["stop"] or 0), float(row["target"] or 0),
+        float(cfg.get("min_stop_pct") or 0), float(cfg.get("max_stop_pct") or 0))
+    if fit is None:
+        return False
+    stop, target = fit
+    conn.execute(
+        "UPDATE positions SET stop_live=?, target_live=?, lines_updated=? WHERE id=?",
+        (stop, target, datetime.now(KST).isoformat(timespec="seconds"), row["id"]))
+    log.info("체결 후 손절폭 재검증 %s: 진입 %s → 손절 %s→%s · 목표 %s→%s",
+             row["symbol"], entry, row["stop"], stop, row["target"], target)
+    return True
 
 
 def effective_lines(row) -> tuple[float, float]:
@@ -734,6 +808,32 @@ def realized_today(equity: float) -> dict:
     krw = sum((r["pnl_krw"] or 0) for r in rows)
     pct = (krw / equity * 100) if equity else 0.0
     return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows)}
+
+
+def open_pnl(price_of, equity: float) -> dict:
+    """미청산 포지션의 **평가손익** 합계 → {krw, pct, positions, priced}.
+
+    일일 손실 가드가 실현손익만 보던 것이 이번 실측의 구멍이다 — 2026-07-30
+    한도 1.5% 인 날 계좌는 −4.26% 까지 갔다. 가드는 청산된 것만 세므로, 물려
+    있는 포지션이 아무리 깊어도 침묵한다. **손실은 청산할 때 생기는 게 아니라
+    청산할 때 확정될 뿐이다.**
+
+    가격을 못 얻은 포지션은 `priced` 에서 빠진다. 0 으로 세면 손실을 과소계상해
+    가드가 다시 침묵하므로, 호출부가 "몇 건을 못 봤는가" 를 알 수 있게 한다.
+    """
+    krw = 0.0
+    n = priced = 0
+    for row in positions(status="open"):
+        n += 1
+        px = price_of(row["symbol"])
+        entry, qty = float(row["entry"] or 0), int(row["qty"] or 0)
+        if not px or entry <= 0 or qty <= 0:
+            continue
+        priced += 1
+        d = (float(px) - entry) if row["side"] == "long" else (entry - float(px))
+        krw += d * qty
+    return {"krw": round(krw, 1), "pct": round(krw / equity * 100, 4) if equity else 0.0,
+            "positions": n, "priced": priced}
 
 
 def _epoch(iso: str) -> int | None:
