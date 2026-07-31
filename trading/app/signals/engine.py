@@ -36,6 +36,10 @@ class SignalEngine:
         self._fired_restored = False   # 재시작 후 오늘 발사분 복원 여부
         self.last_run: str = ""
         self.last_signals: list[dict] = []
+        # 평가손익 가드가 쓸 가격원. main 이 기동 시 실시간 스냅샷 우선 함수를
+        # 꽂아 준다(`main._price_of`). 안 꽂혀도 최근 분봉 종가로 동작하므로
+        # 가드가 침묵하지는 않는다 — 신선도만 떨어진다.
+        self.price_of = None
         self.guard: dict = {}          # 일일 목표·손실 가드 상태 (대시보드 노출)
         self.equity_synced = False     # 실계좌 잔고로 자산을 동기화했는가
         self._equity_synced_at = 0.0
@@ -181,6 +185,12 @@ class SignalEngine:
                 self.equity_synced = True
                 self._equity_synced_at = now
 
+    def _guard_price_of(self, symbol: str):
+        from ..trade import ledger
+        if self.price_of is not None:
+            return self.price_of(symbol)
+        return ledger.latest_price(symbol)
+
     def day_guard_status(self) -> dict:
         """당일 실현손익 + 목표/한도 대비 신규 진입 중단 여부.
 
@@ -196,11 +206,21 @@ class SignalEngine:
         loss = float(settings.RISK.get("daily_loss_limit_pct", 0) or 0)
         ov = override.state()
         loss_eff = round(loss + (ov["extra_loss_pct"] if ov["active"] else 0.0), 4)
-        halted, why = risk.day_guard(today["pct"], target, loss_eff)
+        # 평가손익은 가드가 보지 못하던 절반이다. 가격을 못 얻은 포지션이 있으면
+        # 그만큼 손실을 과소계상하므로 `priced` 를 함께 노출한다.
+        incl = bool(settings.RISK.get("guard_include_unrealized", True))
+        open_pnl = ledger.open_pnl(self._guard_price_of, self.equity)
+        halted, why = risk.day_guard(today["pct"], target, loss_eff,
+                                     open_pnl["pct"], incl)
         if halted and ov["active"] and "손실" in why:
             why += f" (임시 허용 +{ov['extra_loss_pct']:g}% 반영 후에도 초과)"
+        flat_at = float(settings.RISK.get("daily_loss_flatten_pct", 0) or 0)
+        flatten, flat_why = risk.flatten_call(today["pct"], open_pnl["pct"], flat_at)
         return {**today, "daily_target_pct": target, "daily_loss_limit_pct": loss,
                 "loss_limit_effective_pct": loss_eff, "override": ov,
+                "unrealized": open_pnl, "guard_include_unrealized": incl,
+                "daily_loss_flatten_pct": flat_at,
+                "flatten": flatten, "flatten_reason": flat_why,
                 "equity": self.equity, "halted": halted, "reason": why,
                 "regime": self.regime, "base_regime": self.base_regime,
                 "gap_bias": self.gap_bias, "night_bias": self.night_bias}

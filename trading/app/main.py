@@ -142,6 +142,11 @@ def _price_of(symbol: str) -> float | None:
     return ledger.latest_price(symbol)
 
 
+# 일일 손실 가드가 평가손익을 셀 때 쓸 가격원. 실시간 스냅샷을 먼저 보므로
+# 추가 API 호출이 없다 — 가드는 30초마다 도는데 REST 로 물으면 예산을 먹는다.
+engine.price_of = _price_of
+
+
 SESSION_END = "15:30"
 
 
@@ -170,6 +175,7 @@ async def _ledger_loop() -> None:
     from .trade import breakeven, ledger, orders
 
     eod_done = ""
+    flat_done = ""      # 손실 정리선으로 접은 날 — 하루 한 번만 돈다
     while True:  # noqa: PLR1702 - 청산 감시 루프
         try:
             cfg = settings.CONFIG.get("execution", {})
@@ -222,6 +228,22 @@ async def _ledger_loop() -> None:
                             await asyncio.to_thread(orders.propose_exit, ex,
                                                     ex["reason"], ex["exit_px"])
                             log.info("청산 승인 대기 %s (%s)", ex["symbol"], ex["reason"])
+                    # 손실 정리선 — 실현 + 평가가 정리선을 넘으면 보유분을 접는다.
+                    # 신규 진입 차단(가드)은 앞을 막을 뿐 이미 벌어진 손실을 끊지
+                    # 못한다. 실측 2026-07-30: 한도 1.5% 인 날 계좌 -4.26%.
+                    # **기본값 0(꺼짐)** 이라 설정을 넣기 전에는 이 블록이 돌지 않는다.
+                    guard = await asyncio.to_thread(engine.day_guard_status)
+                    if guard.get("flatten") and flat_done != now.date().isoformat():
+                        left = await asyncio.to_thread(ledger.positions, "open", 200)
+                        n = 0
+                        for pos in left:
+                            px = _price_of(pos["symbol"]) or pos["entry"]
+                            r = await orders.execute_exit(pos, "loss_flat", px)
+                            n += 1 if r.get("ok") else 0
+                        log.warning("%s — 보유 %d건 중 %d건 정리 발주",
+                                    guard.get("flatten_reason"), len(left), n)
+                        if n >= len(left):
+                            flat_done = now.date().isoformat()
                     # 마감 정리는 **장이 열려 있는 동안** 해야 한다.
                     #
                     # 종전에는 `hhmm > "15:30"` 에서만 돌았다 — 15:30 은 정규장이
