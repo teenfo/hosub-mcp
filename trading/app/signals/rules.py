@@ -146,6 +146,18 @@ def orb(df: pd.DataFrame, cfg: dict) -> Signal | None:
     if cfg.get("vol_ratio", 0):        # 돌파봉 거래량 ≥ 세션 평균 × 배수
         if last.volume < df["volume"].mean() * cfg["vol_ratio"]:
             return None
+    # RVOL — 돌파봉 거래량 ÷ **개장 범위 봉 평균**. `vol_ratio` 와 분모가 다르다:
+    # 저쪽은 세션 누적 평균이라 장이 갈수록 분모가 커져 오후 돌파에 관대해진다.
+    # 이쪽은 "그 종목의 개장 활동 대비 지금 몇 배인가" 라 시각과 무관하다.
+    #
+    # 실측 2026-07-31 (5거래일 · 894건, 비용 0.33% 차감, 목표 1.5R):
+    #     필터 없음        건당 -0.251%  승률 41.7%
+    #     RVOL >= 1.5     건당 +0.194%  승률 49.0%   <- 유일한 양수 변형
+    # 승률 +7.3%p 는 문헌이 보고한 개선폭(8~12%p)과 같은 자릿수다.
+    if cfg.get("min_rvol", 0):
+        base = rng["volume"].mean()
+        if not base or last.volume < base * cfg["min_rvol"]:
+            return None
     range_pct = (hi - lo) / lo * 100 if lo else 0
     if cfg.get("min_range_pct", 0) and range_pct < cfg["min_range_pct"]:
         return None                     # 너무 좁은 시초 범위(노이즈 돌파) 배제
@@ -221,8 +233,16 @@ def momentum_breakout(df: pd.DataFrame, cfg: dict) -> Signal | None:
 @register("pullback", side="long")
 def pullback_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
     """눌림목 롱. 상승 추세(현재가 > 초반 평균 & VWAP 근처/위)에서 20봉 이평으로
-    되돌린 뒤(near_pct 이내) 반등 양봉이 나오면 진입. 손절은 눌림 저점 - ATR 여유."""
-    if len(df) < 40:
+    되돌린 뒤(near_pct 이내) 반등 양봉이 나오면 진입. 손절은 눌림 저점 - ATR 여유.
+
+    `min_bars` 는 종전에 **하드코딩 40** 이었다. 다른 규칙(rsi_dip·vwap_reclaim·
+    gap_fill)은 전부 설정으로 노출돼 있는데 여기만 코드에 박혀 있어서, 이 규칙이
+    09:40 이전에 한 번도 평가되지 않는다는 사실이 설정 어디에도 드러나지 않았다.
+    실측 2026-07-31: 09:00~09:15 진입의 기대값이 09:15 이후보다 유의하게 높은데
+    (09:03 +0.697% vs 09:30 -0.524%, 비용 전) 우리 실거래 107건 중 09:15 이전
+    진입은 **0건**이었다. 값을 바꾸지 않고 **보이게만** 한다 — 창을 열지 말지는
+    관측(`opening_obs`) 뒤에 정한다."""
+    if len(df) < cfg.get("min_bars", 40):
         return None
     vw = ind.vwap(df)
     sma20 = ind.sma(df["close"], 20)

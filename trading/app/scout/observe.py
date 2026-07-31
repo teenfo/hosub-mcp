@@ -25,7 +25,7 @@ from datetime import UTC, datetime
 
 from .. import settings
 from ..kiwoom import observe as parse
-from . import promote, store
+from . import opening, promote, store
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +45,7 @@ async def collect_once(now: datetime | None = None) -> dict:
     """
     from ..kiwoom.client import client
 
-    out = {"investor": 0, "vi": 0}
+    out = {"investor": 0, "vi": 0, "opening": 0}
     cfg = _cfg()
     invsr = str(cfg.get("invsr", "6"))
     if cfg.get("investor", True):
@@ -59,6 +59,14 @@ async def collect_once(now: datetime | None = None) -> dict:
             out["vi"] = store.record_vi(parse.parse_vi(await client.vi_stocks()), now)
         except Exception:  # noqa: BLE001
             log.warning("VI 관측 실패", exc_info=True)
+    # 개장 창은 하루 한 번만 쓰인다(`INSERT OR IGNORE`). 여기 얹는 이유는 이미
+    # 장중에만 도는 루프라서다 — 별도 루프를 띄우면 같은 게이트를 두 번 쓴다.
+    # 저장된 분봉만 읽으므로 API 호출이 없다.
+    if opening.enabled():
+        try:
+            out["opening"] = 1 if opening.collect_once(now) else 0
+        except Exception:  # noqa: BLE001
+            log.warning("개장 창 관측 실패", exc_info=True)
     return out
 
 
@@ -69,8 +77,9 @@ async def loop() -> None:
         try:
             if enabled() and settings.KIWOOM_APP_KEY and promote.in_session():
                 got = await collect_once()
-                if got["investor"] or got["vi"]:
-                    log.debug("관측 적재 투자자 %d · VI %d", got["investor"], got["vi"])
+                if any(got.values()):
+                    log.debug("관측 적재 투자자 %d · VI %d · 개장창 %d",
+                              got["investor"], got["vi"], got["opening"])
         except Exception:  # noqa: BLE001
             log.exception("관측 수집 루프 오류")
         await asyncio.sleep(int(_cfg().get("interval_sec", 120)))

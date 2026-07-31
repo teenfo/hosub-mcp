@@ -138,6 +138,27 @@ def _conn() -> sqlite3.Connection:
             PRIMARY KEY (d, code, motn_time)
         );
         CREATE INDEX IF NOT EXISTS ix_vi_obs_code ON vi_obs (code, d);
+
+        -- 개장 창(09:00~09:15) 시장 상태 — **하루 한 행**.
+        --
+        -- 실측 2026-07-31: 09:03 진입 → 09:30 청산이 5거래일 평균 +0.367%
+        -- (비용 차감)인데 날짜별로는 -1.553% ~ +1.932%, 승률 17.9% ~ 75.6%.
+        -- **분산이 엣지의 4배**다. 종목 선택 엣지가 아니라 '그날 시장이
+        -- 올랐는가' 이고, 5일 표본으로는 아무 말도 못 한다.
+        --
+        -- 그래서 창을 여는 대신 그 시각의 시장 상태를 남긴다. 4주 뒤 물을 것은
+        -- "개장 창 진입의 성적이 이 값들로 갈리는가" 다 — 갈리면 시장 방향
+        -- 필터가 분산을 줄인다는 뜻이고, 안 갈리면 이 창은 그냥 베타다.
+        CREATE TABLE IF NOT EXISTS opening_obs (
+            d TEXT PRIMARY KEY,
+            n INTEGER NOT NULL,          -- 관측 종목 수
+            up_ratio REAL,               -- 시가 대비 상승 종목 비율(%) = 개장 폭
+            mean_chg REAL, median_chg REAL,
+            surge3 INTEGER, surge5 INTEGER,   -- +3% / +5% 급등 종목 수
+            mean_range REAL,             -- 종목 평균 개장 범위(%)
+            mean_rvol REAL,              -- 종목 평균 RVOL(15분 평균 / 직전 평균)
+            seen_at TEXT
+        );
         """
     )
     have = {r[1] for r in conn.execute("PRAGMA table_info(quote_obs)")}
@@ -276,6 +297,32 @@ def record_vi(rows: list[dict], now: datetime | None = None) -> int:
               ts.isoformat(timespec="seconds")) for r in rows],
         )
     return len(rows)
+
+
+def record_opening(day: str, stats: dict, now: datetime | None = None) -> bool:
+    """개장 창 시장 상태를 하루 한 행으로 남긴다. 반환: 썼는가.
+
+    **덮어쓰지 않는다.** 09:15 한 시점의 상태가 이 행의 의미인데, 재시작해서
+    09:40 에 다시 계산하면 같은 컬럼에 다른 시각의 값이 들어간다. 그러면 4주 뒤
+    "그때 시장이 어땠나" 를 물을 수 없다.
+    """
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="seconds")
+    with _conn() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO opening_obs (d, n, up_ratio, mean_chg,"
+            " median_chg, surge3, surge5, mean_range, mean_rvol, seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (day, stats["n"], stats.get("up_ratio"), stats.get("mean_chg"),
+             stats.get("median_chg"), stats.get("surge3"), stats.get("surge5"),
+             stats.get("mean_range"), stats.get("mean_rvol"), ts))
+        return cur.rowcount > 0
+
+
+def opening_days(limit: int = 60) -> list[dict]:
+    """개장 창 관측 이력 — 분석용 읽기 전용."""
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM opening_obs ORDER BY d DESC LIMIT ?", (limit,))]
 
 
 def vi_codes(day: str) -> set[str]:
