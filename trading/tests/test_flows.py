@@ -197,3 +197,29 @@ def test_감시목록_상한을_지킨다(db, monkeypatch):
                         {"A": {}, "B": {}, "C": {}}, raising=False)
     out = asyncio.run(flows.collect_once(datetime(2026, 7, 31, tzinfo=KST)))
     assert out["symbols"] == 2 and len(seen) == 2
+
+
+def test_일별주가는_조회일이_필수다():
+    """빈 문자열로 보내면 rc=2 `1511 필수 입력 값에 값이 존재하지 않습니다` 가
+    온다 — 다른 조회 TR 들이 빈 값을 '최근' 으로 받아 주는 것과 다르다.
+    이걸 빈 채로 배포했다가 전종목 배치 3,925콜이 통째로 실패할 뻔했다."""
+    import asyncio as _aio
+
+    from app.kiwoom import client as kc
+
+    sent = {}
+
+    class Probe(kc.KiwoomClient):
+        def __init__(self):
+            pass
+
+        async def _call(self, path, tr, body):
+            sent.update(body)
+            return {"return_code": 0, "daly_stkpc": []}
+
+    _aio.run(Probe().daily_price("005930"))
+    assert sent["qry_dt"] and len(sent["qry_dt"]) == 8 and sent["qry_dt"].isdigit()
+
+    sent.clear()
+    _aio.run(Probe().daily_price("005930", "20260731"))
+    assert sent["qry_dt"] == "20260731"
