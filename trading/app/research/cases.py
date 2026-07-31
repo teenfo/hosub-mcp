@@ -269,10 +269,22 @@ def build_day(day: str, now: datetime | None = None) -> int:
 # 조회 — 일지 프롬프트에 주입할 선례
 # --------------------------------------------------------------------------
 def stats(days: int = 30) -> dict:
-    """케이스 원장 요약 — 이번 세션이 일회성 스크립트로 냈던 값들."""
+    """케이스 원장 요약 — 이번 세션이 일회성 스크립트로 냈던 값들.
+
+    **`bars > 0` 이 아니라 `mfe_pct IS NOT NULL` 로 거른다.** 봉이 1개뿐인
+    케이스(진입과 청산이 같은 분)는 `bars=1` 이지만 이동폭을 낼 수 없어
+    측정치가 NULL 이다. `bars > 0` 으로 거르면 그 행이 표본에 들어오고,
+    `(r.get("mfe_pct") or 0) <= 0` 이 NULL 을 0 으로 바꿔 **"한 번도 유리하게
+    못 갔다" 로 세어 버린다.**
+
+    실측 2026-07-31 소급 적재에서 정확히 이 일이 일어났다 — 진짜 14건인데
+    원장은 18건이라고 했다(bars=1 인 4건: 삼성중공업·후성·송원산업·서산).
+    못 잰 것을 0 으로 세면 안 된다고 이 파일 곳곳에 적어 놓고 집계에서 스스로
+    어겼다.
+    """
     with _conn() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM cases WHERE bars > 0 ORDER BY d DESC LIMIT ?",
+            "SELECT * FROM cases WHERE mfe_pct IS NOT NULL ORDER BY d DESC LIMIT ?",
             (days * 60,))]
     if not rows:
         return {"n": 0}
@@ -281,15 +293,26 @@ def stats(days: int = 30) -> dict:
         vs = [r[key] for r in rows if r.get(key) is not None]
         return round(sum(vs) / len(vs), 4) if vs else None
 
-    reached = [r for r in rows if (r.get("mfe_over_target") or 0) >= 1.0]
+    def count(key, pred):
+        """비율의 분모까지 함께 돌려준다 — 지표마다 잰 표본이 다르다.
+        목표 도달률은 목표가 있는 건만, 손절 관통은 손절폭이 있는 건만이다."""
+        vs = [r for r in rows if r.get(key) is not None]
+        return sum(1 for r in vs if pred(r[key])), len(vs)
+
+    reached = [r for r in rows
+               if r.get("mfe_over_target") is not None
+               and r["mfe_over_target"] >= 1.0]
+    breached, breached_of = count("mae_over_stop", lambda v: v > 1.0)
     return {
         "n": len(rows),
         "mfe_pct": avg("mfe_pct"), "mae_pct": avg("mae_pct"),
         "mfe_3min": avg("mfe_3min"), "entry_pos": avg("entry_pos"),
-        "never_up": sum(1 for r in rows if (r.get("mfe_pct") or 0) <= 0),
+        "never_up": sum(1 for r in rows if r["mfe_pct"] <= 0),
         "target_reached": len(reached),
+        "target_reached_of": sum(1 for r in rows
+                                 if r.get("mfe_over_target") is not None),
         "target_exited": sum(1 for r in reached if r.get("exit_reason") == "target"),
-        "stop_breached": sum(1 for r in rows if (r.get("mae_over_stop") or 0) > 1.0),
+        "stop_breached": breached, "stop_breached_of": breached_of,
     }
 
 
@@ -355,7 +378,8 @@ def coverage() -> dict:
     """
     with _conn() as conn:
         row = conn.execute(
-            "SELECT COUNT(*) AS n, SUM(CASE WHEN bars > 0 THEN 1 ELSE 0 END) AS measured,"
+            "SELECT COUNT(*) AS n,"
+            " SUM(CASE WHEN mfe_pct IS NOT NULL THEN 1 ELSE 0 END) AS measured,"
             " MIN(d) AS first_day, MAX(d) AS last_day FROM cases").fetchone()
     n, measured = row["n"] or 0, row["measured"] or 0
     return {"n": n, "measured": measured, "unmeasured": n - measured,

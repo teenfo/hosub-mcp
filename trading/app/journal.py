@@ -289,10 +289,12 @@ def facts(entry: dict) -> list[str]:
                 f"최대 불리 {cs['mae_pct']:+.2f}%")
         if cs.get("entry_pos") is not None:
             line += f", 진입가는 직전 30분 범위의 {cs['entry_pos']:.2f} 지점"
+        # 분모를 지표마다 따로 적는다 — 목표 도달은 목표가 있는 건만, 손절
+        # 관통은 손절폭이 있는 건만 잰다. 하나의 n 으로 나누면 비율이 틀린다.
         line += (f". 한 번도 유리하게 못 간 건 {cs['never_up']}건, "
-                 f"목표선에 닿은 {cs['target_reached']}건 중 목표청산은 "
-                 f"{cs['target_exited']}건, 손절선을 관통한 건 "
-                 f"{cs['stop_breached']}건.")
+                 f"목표선에 닿은 {cs['target_reached']}/{cs['target_reached_of']}건 중 "
+                 f"목표청산은 {cs['target_exited']}건, 손절선을 관통한 건 "
+                 f"{cs['stop_breached']}/{cs['stop_breached_of']}건.")
         out.append(line)
     if entry.get("carried"):
         out.append(
