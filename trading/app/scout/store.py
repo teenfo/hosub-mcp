@@ -63,11 +63,12 @@ def _conn() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS ix_decisions_code ON decisions (code, ts);
         """
     )
-    # 결정 시점의 실측 등락률·체결강도. **판단에 쓰지 않고 기록만 한다** —
-    # 4주 뒤 "체결강도가 실제로 성적과 상관있나" 를 묻기 위한 재료다.
-    # 측정 전에 승격 조건에 넣으면 발굴 3규칙 점수가 저지른 일을 반복한다.
+    # 결정 시점의 실측 등락률·체결강도·호가 스프레드. **판단에 쓰지 않고 기록만
+    # 한다** — 4주 뒤 "체결강도가 실제로 성적과 상관있나", "스프레드 넓은 종목의
+    # 성적이 실제로 나쁜가" 를 묻기 위한 재료다. 측정 전에 승격 조건에 넣으면
+    # 발굴 3규칙 점수가 저지른 일을 반복한다.
     have = {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
-    for col in ("change_pct", "cntr_str"):
+    for col in ("change_pct", "cntr_str", "spread_pct"):
         if col not in have:
             conn.execute(f"ALTER TABLE decisions ADD COLUMN {col} REAL")
     conn.executescript(
@@ -205,13 +206,14 @@ def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
             return 0
         conn.executemany(
             "INSERT INTO decisions (ts, code, name, action, from_tier, to_tier,"
-            " score, sources, reason, mode, applied, change_pct, cntr_str)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " score, sources, reason, mode, applied, change_pct, cntr_str,"
+            " spread_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [(ts, d["code"], d.get("name"), d["action"], d.get("from_tier"),
               d.get("to_tier"), d.get("score"),
               json.dumps(sorted(d.get("sources") or []), ensure_ascii=False),
               d.get("reason"), mode, 1 if applied else 0,
-              d.get("change_pct"), d.get("cntr_str")) for d in fresh],
+              d.get("change_pct"), d.get("cntr_str"),
+              d.get("spread_pct")) for d in fresh],
         )
     return len(fresh)
 

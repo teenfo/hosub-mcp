@@ -142,6 +142,23 @@ def _price_of(symbol: str) -> float | None:
     return ledger.latest_price(symbol)
 
 
+SESSION_END = "15:30"
+
+
+def _eod_window(hhmm: str, cfg: dict) -> bool:
+    """마감 정리를 **지금 발주해도 되는가** — 장중 창 안인가.
+
+    이 한 줄이 오버나이트를 만들었다. 종전 조건은 `hhmm > "15:30"` 이었는데,
+    15:30 은 정규장이 **끝나는** 시각이지 발주할 수 있는 시각이 아니다.
+    실측 2026-07-30 15:31:13 — 삼성중공업 청산 발주가
+    `[2000] 장종료되었습니다` 로 거부되고 포지션이 밤을 넘겼다.
+
+    그래서 창을 `eod_flat_at`(기본 15:20) ~ 15:30 으로 잡는다. 10분이면 부분
+    실패해도 다음 사이클에 다시 시도할 여유가 있다.
+    """
+    return cfg.get("eod_flat_at", "15:20") <= hhmm <= SESSION_END
+
+
 async def _ledger_loop() -> None:
     """오픈 포지션 청산 감시(장중 30초) + 장 마감 미청산분 정리(1회).
 
@@ -153,7 +170,7 @@ async def _ledger_loop() -> None:
     from .trade import breakeven, ledger, orders
 
     eod_done = ""
-    while True:
+    while True:  # noqa: PLR1702 - 청산 감시 루프
         try:
             cfg = settings.CONFIG.get("execution", {})
             now = datetime.now(KST)
@@ -205,7 +222,34 @@ async def _ledger_loop() -> None:
                             await asyncio.to_thread(orders.propose_exit, ex,
                                                     ex["reason"], ex["exit_px"])
                             log.info("청산 승인 대기 %s (%s)", ex["symbol"], ex["reason"])
+                    # 마감 정리는 **장이 열려 있는 동안** 해야 한다.
+                    #
+                    # 종전에는 `hhmm > "15:30"` 에서만 돌았다 — 15:30 은 정규장이
+                    # 끝나는 시각이라 그 뒤 주문은 거래소가 받지 않는다. 실측
+                    # 2026-07-30 15:31:13: 삼성중공업 청산 발주가
+                    # `[2000] 장종료되었습니다` 로 거부됐고, 원장을 닫지 않으므로
+                    # 포지션이 밤을 넘겼다. 다음 날 개장 5초 만에 목표가로 정리돼
+                    # 결과는 +1,359원이었지만, 갭 하락이었으면 손실 상한이 없었다.
+                    # "오버나이트 없음" 이 이 시스템의 설계 전제다.
+                    #
+                    # `eod_done` 을 **정리가 끝났을 때만** 세운다. 부분 실패하면
+                    # 다음 사이클에 다시 시도해 15:30 까지 창을 쓴다.
+                    if _eod_window(hhmm, cfg) \
+                            and eod_done != now.date().isoformat():
+                        left = await asyncio.to_thread(ledger.positions, "open", 200)
+                        n = 0
+                        for pos in left:
+                            px = _price_of(pos["symbol"]) or pos["entry"]
+                            r = await orders.execute_exit(pos, "eod", px)
+                            n += 1 if r.get("ok") else 0
+                        if n:
+                            log.info("마감 정리 %d/%d건 시장가 발주", n, len(left))
+                        if n >= len(left):
+                            eod_done = now.date().isoformat()
                 elif hhmm > "15:30" and eod_done != now.date().isoformat():
+                    # 여기까지 온 것은 장중 창에서 못 닫았다는 뜻이다. 거래소가
+                    # 거부할 가능성이 높지만 시도는 남긴다 — 실패해도 원장은 열린
+                    # 채로 남아 다음 날 데스크가 보고, 화면에 미청산으로 드러난다.
                     n = 0
                     for pos in await asyncio.to_thread(ledger.positions, "open", 200):
                         px = _price_of(pos["symbol"]) or pos["entry"]
@@ -213,7 +257,8 @@ async def _ledger_loop() -> None:
                         n += 1 if r.get("ok") else 0
                     eod_done = now.date().isoformat()
                     if n:
-                        log.info("장 마감 미청산 %d건 시장가 정리", n)
+                        log.warning("장 마감 **후** 미청산 %d건 정리 시도 — "
+                                    "장중 창(eod_flat_at)에서 닫지 못했다", n)
         except Exception:  # noqa: BLE001
             log.exception("청산 감시 오류")
         # 정산은 장 마감 뒤에도 돌려야 eod 청산분이 채워진다. 관측 실패가 청산
