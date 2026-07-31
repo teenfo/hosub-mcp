@@ -113,6 +113,17 @@ def _conn() -> sqlite3.Connection:
     if "empty" not in have:
         conn.execute(
             "ALTER TABLE source_health ADD COLUMN empty INTEGER NOT NULL DEFAULT 0")
+    # ka10095 는 63필드를 주는데 9개만 읽고 있었다. 나머지는 추가 호출 0으로
+    # 얻을 수 있으므로 남긴다(`quote.extra_fields`). `extra_last` 는 마지막
+    # 관측의 JSON 이고, `day_pos` 만 따로 접는다 — 이번 실측이 정확히 그 값을
+    # 가리켰기 때문이다(진입가가 직전 범위의 어디였나. 위치가 높을수록 이후
+    # 상승 여력이 단조로 줄었다). 못 잰 순간은 `day_pos_n` 에서 빠진다.
+    have = {r[1] for r in conn.execute("PRAGMA table_info(quote_obs)")}
+    for col, decl in (("extra_last", "TEXT"),
+                      ("day_pos_n", "INTEGER NOT NULL DEFAULT 0"),
+                      ("day_pos_sum", "REAL NOT NULL DEFAULT 0")):
+        if col not in have:
+            conn.execute(f"ALTER TABLE quote_obs ADD COLUMN {col} {decl}")
     return conn
 
 
@@ -134,20 +145,28 @@ def record_quotes(quotes: dict[str, dict], names: dict[str, str] | None = None,
     names = names or {}
     ts = (now or datetime.now(UTC))
     day = ts.astimezone(KST).strftime("%Y-%m-%d")
+    known = {"price", "change_pct", "cntr_str", "volume", "trde_prica", "spread_pct"}
     rows = []
     for code, q in quotes.items():
         sp = q.get("spread_pct")
+        extra = {k: v for k, v in q.items() if k not in known}
+        dp = extra.get("day_pos")
         rows.append((day, code, names.get(code),
                      1 if sp is None else 0,          # n 은 항상 +1, 아래에서 처리
                      sp, q.get("cntr_str"), q.get("price"), q.get("trde_prica"),
-                     ts.isoformat()))
+                     ts.isoformat(),
+                     json.dumps(extra, ensure_ascii=False) if extra else None,
+                     0 if dp is None else 1, 0.0 if dp is None else float(dp)))
     with _conn() as conn:
         conn.executemany(
             "INSERT INTO quote_obs (d, code, name, n, spread_n, spread_sum,"
             " spread_min, spread_max, spread_last, cntr_str_last, price_last,"
-            " trde_prica_last, updated_at)"
-            " VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)"
+            " trde_prica_last, updated_at, extra_last, day_pos_n, day_pos_sum)"
+            " VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(d, code) DO UPDATE SET"
+            "   extra_last = COALESCE(excluded.extra_last, quote_obs.extra_last),"
+            "   day_pos_n = quote_obs.day_pos_n + excluded.day_pos_n,"
+            "   day_pos_sum = quote_obs.day_pos_sum + excluded.day_pos_sum,"
             "   n = quote_obs.n + 1,"
             "   name = COALESCE(excluded.name, quote_obs.name),"
             "   spread_n = quote_obs.spread_n + excluded.spread_n,"
@@ -167,8 +186,8 @@ def record_quotes(quotes: dict[str, dict], names: dict[str, str] | None = None,
             "                              quote_obs.trde_prica_last),"
             "   updated_at = excluded.updated_at",
             [(d, c, nm, 0 if sp is None else 1, 0.0 if sp is None else sp,
-              sp, sp, sp, cs, pr, tp, at)
-             for (d, c, nm, _null, sp, cs, pr, tp, at) in rows],
+              sp, sp, sp, cs, pr, tp, at, ex, dpn, dps)
+             for (d, c, nm, _null, sp, cs, pr, tp, at, ex, dpn, dps) in rows],
         )
     return len(rows)
 
@@ -177,7 +196,9 @@ def quote_stats(day: str | None = None, limit: int = 500) -> list[dict]:
     """종목별 스프레드 관측 요약. 화면·분석용 읽기 전용."""
     with _conn() as conn:
         sql = ("SELECT *, CASE WHEN spread_n > 0 THEN spread_sum / spread_n END"
-               " AS spread_avg FROM quote_obs")
+               " AS spread_avg,"
+               " CASE WHEN day_pos_n > 0 THEN day_pos_sum / day_pos_n END"
+               " AS day_pos_avg FROM quote_obs")
         args: tuple = ()
         if day:
             sql += " WHERE d = ?"
