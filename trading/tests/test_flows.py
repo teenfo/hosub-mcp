@@ -250,3 +250,48 @@ def test_감시목록_값은_종목명_문자열이다(db, monkeypatch):
 ])
 def test_이름_추출은_모양을_가리지_않는다(val, want):
     assert flows._name_of(val) == want
+
+
+def test_거래상세는_기준일에서_과거로_준다():
+    """`strt_dt` 는 이름과 달리 '시작일' 이 아니라 '기준일' 이다. 범위 시작으로
+    알고 10일 전을 넘겼더니 그보다 최근 날짜가 하나도 안 왔다 —
+    실측: strt_dt=20260721 → 07-21, 07-20 … 순으로만 응답."""
+    import asyncio as _aio
+
+    from app.kiwoom import client as kc
+
+    sent = {}
+
+    class Probe(kc.KiwoomClient):
+        def __init__(self):
+            pass
+
+        async def _call(self, path, tr, body):
+            sent.update(body)
+            return {"return_code": 0, "daly_trde_dtl": []}
+
+    _aio.run(Probe().trade_detail("005930"))
+    assert sent["strt_dt"] and len(sent["strt_dt"]) == 8   # 기본값은 오늘
+
+
+def test_수집은_기준일로_오늘을_넘긴다(db, monkeypatch):
+    """회귀 — `lookback_days` 만큼 과거를 넘기면 최근 관측이 통째로 빈다."""
+    sent = []
+
+    class Fake:
+        async def investor_daily(self, code, dt):
+            return {"return_code": 0, "stk_invsr_orgn": []}
+
+        async def short_trend(self, code, s, e):
+            return {"return_code": 0, "shrts_trnsn": []}
+
+        async def trade_detail(self, code, anchor=""):
+            sent.append(anchor)
+            return {"return_code": 0, "daly_trde_dtl": []}
+
+    import app.kiwoom.client as kc
+    monkeypatch.setattr(kc, "client", Fake(), raising=False)
+    monkeypatch.setattr(flows, "_cfg", lambda: {"lookback_days": 10})
+    asyncio.run(flows.collect_symbol("005930", None,
+                                     datetime(2026, 7, 31, tzinfo=KST)))
+    assert sent == ["20260731"]        # 20260721 이 아니다

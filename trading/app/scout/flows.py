@@ -75,7 +75,9 @@ async def collect_symbol(code: str, name: str | None, day: datetime) -> dict:
     jobs = (
         ("detail", lambda: client.investor_daily(code, ymd), parse.parse_investor_daily),
         ("short", lambda: client.short_trend(code, frm, ymd), parse.parse_short),
-        ("session", lambda: client.trade_detail(code, frm), parse.parse_trade_detail),
+        # `ka10015` 의 `strt_dt` 는 기준일이고 거기서 **과거로** 준다 —
+        # 범위 시작으로 알고 `frm` 을 넘기면 최근 날짜가 하나도 안 온다.
+        ("session", lambda: client.trade_detail(code, ymd), parse.parse_trade_detail),
     )
     for key, call, fn in jobs:
         try:
