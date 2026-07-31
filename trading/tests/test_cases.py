@@ -195,3 +195,31 @@ def test_소급_적재는_날짜별_건수를_돌려준다(db, monkeypatch):
     monkeypatch.setattr(cases, "build_day", lambda day, now=None: 7)
     got = cases.build_range(30, _dt(2026, 8, 5, tzinfo=cases.KST))
     assert got == {"2026-08-03": 7, "2026-08-04": 7}
+
+
+def test_구간을_직접_질의한다_최근_N봉을_잘라_쓰지_않는다(tmp_path, monkeypatch):
+    """`load_bars(limit=N)` 뒤에 구간을 거르면 심층 백필된 종목(4,500봉)의
+    **오래된 날** 케이스가 조용히 잘린다. 평균값은 거의 같아서 집계만 보면
+    드러나지 않는다 — 소급 적재에서 never_up 18 vs 14 로 어긋났다.
+    """
+    import sqlite3
+
+    from app.data import store as bars_store
+
+    db = tmp_path / "market.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE bars (symbol TEXT, tf TEXT, ts TEXT, open REAL,"
+                 " high REAL, low REAL, close REAL, volume INTEGER)")
+    # 3,000봉 — 옛 구현의 limit=2000 을 넘긴다. 우리가 원하는 구간은 맨 앞이다.
+    conn.executemany(
+        "INSERT INTO bars VALUES (?,?,?,?,?,?,?,?)",
+        [("005930", "1m", "2026-07-27T%02d:%02d:00+09:00" % (9 + i // 60, i % 60),
+          100, 100 + i, 100, 100, 10) for i in range(3000)])
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(bars_store, "DB_PATH", db)
+
+    got = cases._bars_for("005930", "2026-07-27T09:00:00+09:00",
+                          "2026-07-27T09:05:00+09:00")
+    assert len(got) == 6                      # 09:00~09:05, 잘리지 않는다
+    assert got[0][0].endswith("09:00:00+09:00")
