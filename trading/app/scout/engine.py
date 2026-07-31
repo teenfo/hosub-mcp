@@ -276,6 +276,12 @@ class Engine:
                 log.warning("현재가 묶음 조회 실패 %d종목 — 이번 사이클 매매 승격 "
                             "보류: %s", len(chunk), e)
                 continue
+            # **판정과 독립으로 관측을 남긴다.** `decisions` 에만 실으면 승격이
+            # 일어난 종목만 남는데, 매매 tier 가 상한에 닿으면 판정 자체가 안
+            # 일어난다 — 실측 2026-07-31: `promote_trade` 결정이 7/29 이후 0건
+            # 이라 스프레드가 하나도 안 쌓였다. 여기서 남기면 판정 여부와 무관하게
+            # 후보 전체(실측 92종목)가 매 사이클 기록된다. 추가 호출은 없다.
+            store.record_quotes(quotes, {c.code: c.name for c in targets})
             for c in targets:
                 q = quotes.get(c.code)
                 if q:

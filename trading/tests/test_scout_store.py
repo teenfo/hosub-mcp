@@ -245,3 +245,61 @@ def test_0건은_실패가_아니다():
     store.mark_ok(model.VOLUME, 0)
     h = store.health()[model.VOLUME]
     assert h["fails"] == 0 and h["last_ok"] and h["empty"] == 1
+
+
+# --- 시세 관측 — 판정과 독립으로 쌓는다 (2026-07-31) ---
+#
+# `decisions` 에만 실으면 승격 판정이 일어난 종목만 남는다. 실측: `promote_trade`
+# 결정이 7/29 이후 0건이라(매매 tier 포화) 스프레드가 하나도 안 쌓였다.
+# 15,939건의 결정 중 시세가 실린 것은 15건뿐이었다.
+
+def _q(spread=0.05, cntr=110.0, price=70_000):
+    return {"price": price, "cntr_str": cntr, "spread_pct": spread,
+            "trde_prica": 1_000}
+
+
+_AT = datetime(2026, 7, 31, 3, 0, tzinfo=UTC)      # 12:00 KST
+
+
+def test_관측은_종목_날짜당_한_행으로_접힌다():
+    """매 사이클 원행으로 쌓으면 92종목 × 30초 = 하루 7만 행이다."""
+    store.record_quotes({"005930": _q(0.05)}, {"005930": "삼성전자"}, _AT)
+    store.record_quotes({"005930": _q(0.15)}, {}, _AT)
+    rows = store.quote_stats("2026-07-31")
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["n"] == 2 and r["spread_n"] == 2
+    assert r["spread_min"] == 0.05 and r["spread_max"] == 0.15
+    assert r["spread_last"] == 0.15
+    assert r["spread_avg"] == pytest.approx(0.10)
+    assert r["name"] == "삼성전자", "이름은 뒤 호출이 비어도 유지된다"
+
+
+def test_스프레드를_못_낸_표본은_평균을_끌어내리지_않는다():
+    """장 전·거래정지에는 호가가 없다. 0 으로 세면 평균이 거짓이 된다."""
+    store.record_quotes({"000660": _q(None)}, {"000660": "SK하이닉스"}, _AT)
+    store.record_quotes({"000660": _q(0.20)}, {}, _AT)
+    r = store.quote_stats("2026-07-31")[0]
+    assert r["n"] == 2, "관측 횟수는 센다"
+    assert r["spread_n"] == 1, "스프레드 표본만 따로 센다"
+    assert r["spread_avg"] == pytest.approx(0.20)
+
+
+def test_거래일이_다르면_행이_나뉜다():
+    store.record_quotes({"005930": _q()}, {}, _AT)
+    store.record_quotes({"005930": _q()},
+                        {}, datetime(2026, 8, 1, 3, 0, tzinfo=UTC))
+    assert len(store.quote_stats()) == 2
+    assert len(store.quote_stats("2026-07-31")) == 1
+
+
+def test_거래일은_KST_기준이다():
+    """UTC 로 접으면 09:00 KST(=00:00 UTC) 전후가 다른 날로 갈린다."""
+    store.record_quotes({"005930": _q()}, {},
+                        datetime(2026, 7, 30, 23, 30, tzinfo=UTC))   # 7/31 08:30 KST
+    assert [r["d"] for r in store.quote_stats()] == ["2026-07-31"]
+
+
+def test_빈_입력은_아무것도_쓰지_않는다():
+    assert store.record_quotes({}, {}, _AT) == 0
+    assert store.quote_stats() == []

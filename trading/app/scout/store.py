@@ -19,9 +19,12 @@ import logging
 import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .. import settings
 from .model import TTL_SEC, Signal
+
+KST = ZoneInfo("Asia/Seoul")   # 관측을 **거래일** 단위로 접기 위한 기준
 
 log = logging.getLogger(__name__)
 DB_PATH = Path(settings.DATA_DIR) / "scout.db"
@@ -80,6 +83,28 @@ def _conn() -> sqlite3.Connection:
             fails INTEGER NOT NULL DEFAULT 0,
             signals INTEGER NOT NULL DEFAULT 0
         );
+
+        -- 시세 관측 — **종목·날짜당 한 행**으로 접어 쌓는다.
+        --
+        -- `decisions` 에만 실으면 승격 판정이 일어난 종목만 남는다. 실측
+        -- 2026-07-31: `promote_trade` 결정이 7/29 이후 0건이라(매매 tier 포화)
+        -- 스프레드가 하나도 안 쌓였다. 관측은 판정과 독립이어야 한다.
+        --
+        -- `refresh_quotes` 가 이미 수집 tier 후보 전체(실측 92종목)를 1콜로
+        -- 받아 오므로 **추가 호출이 0** 이다. 매 사이클 원행으로 쌓으면 하루
+        -- 7만 행이라 종목·날짜로 접는다 — 우리가 물을 질문("이 종목의 스프레드가
+        -- 넓은가")에는 그 해상도면 충분하고, 장중 변동은 min/max 로 남는다.
+        CREATE TABLE IF NOT EXISTS quote_obs (
+            d TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            n INTEGER NOT NULL DEFAULT 0,
+            spread_n INTEGER NOT NULL DEFAULT 0,
+            spread_sum REAL NOT NULL DEFAULT 0,
+            spread_min REAL, spread_max REAL, spread_last REAL,
+            cntr_str_last REAL, price_last REAL, trde_prica_last INTEGER,
+            updated_at TEXT,
+            PRIMARY KEY (d, code)
+        );
+        CREATE INDEX IF NOT EXISTS ix_quote_obs_code ON quote_obs (code, d);
         """
     )
     # 연속 0건 폴 횟수. 조회 성공만 보던 종전 규약은 "정상적으로 아무것도 못 찾는"
@@ -89,6 +114,76 @@ def _conn() -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE source_health ADD COLUMN empty INTEGER NOT NULL DEFAULT 0")
     return conn
+
+
+# --- 시세 관측 ---------------------------------------------------------------
+
+def record_quotes(quotes: dict[str, dict], names: dict[str, str] | None = None,
+                  now: datetime | None = None) -> int:
+    """실측 시세를 종목·날짜당 한 행으로 접어 쌓는다. 반환: 반영한 종목 수.
+
+    **판단에 쓰지 않는다.** 체결강도와 같은 규약이다 — 2주 뒤 "스프레드가 넓은
+    종목의 성적이 실제로 나쁜가" 를 물을 수 있게 하는 것이 목적이고, 문턱을 지금
+    손으로 정하면 1.5단계에서 폐기한 실수를 반복한다.
+
+    스프레드는 낼 수 없는 순간이 있다(장 전·거래정지·데이터 결손). 그때 0 으로
+    세면 평균이 아래로 끌려가므로 **스프레드 표본만 따로 센다**(`spread_n`).
+    """
+    if not quotes:
+        return 0
+    names = names or {}
+    ts = (now or datetime.now(UTC))
+    day = ts.astimezone(KST).strftime("%Y-%m-%d")
+    rows = []
+    for code, q in quotes.items():
+        sp = q.get("spread_pct")
+        rows.append((day, code, names.get(code),
+                     1 if sp is None else 0,          # n 은 항상 +1, 아래에서 처리
+                     sp, q.get("cntr_str"), q.get("price"), q.get("trde_prica"),
+                     ts.isoformat()))
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT INTO quote_obs (d, code, name, n, spread_n, spread_sum,"
+            " spread_min, spread_max, spread_last, cntr_str_last, price_last,"
+            " trde_prica_last, updated_at)"
+            " VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(d, code) DO UPDATE SET"
+            "   n = quote_obs.n + 1,"
+            "   name = COALESCE(excluded.name, quote_obs.name),"
+            "   spread_n = quote_obs.spread_n + excluded.spread_n,"
+            "   spread_sum = quote_obs.spread_sum + excluded.spread_sum,"
+            "   spread_min = CASE WHEN excluded.spread_last IS NULL"
+            "        THEN quote_obs.spread_min"
+            "        ELSE MIN(COALESCE(quote_obs.spread_min, excluded.spread_last),"
+            "                 excluded.spread_last) END,"
+            "   spread_max = CASE WHEN excluded.spread_last IS NULL"
+            "        THEN quote_obs.spread_max"
+            "        ELSE MAX(COALESCE(quote_obs.spread_max, excluded.spread_last),"
+            "                 excluded.spread_last) END,"
+            "   spread_last = COALESCE(excluded.spread_last, quote_obs.spread_last),"
+            "   cntr_str_last = COALESCE(excluded.cntr_str_last, quote_obs.cntr_str_last),"
+            "   price_last = COALESCE(excluded.price_last, quote_obs.price_last),"
+            "   trde_prica_last = COALESCE(excluded.trde_prica_last,"
+            "                              quote_obs.trde_prica_last),"
+            "   updated_at = excluded.updated_at",
+            [(d, c, nm, 0 if sp is None else 1, 0.0 if sp is None else sp,
+              sp, sp, sp, cs, pr, tp, at)
+             for (d, c, nm, _null, sp, cs, pr, tp, at) in rows],
+        )
+    return len(rows)
+
+
+def quote_stats(day: str | None = None, limit: int = 500) -> list[dict]:
+    """종목별 스프레드 관측 요약. 화면·분석용 읽기 전용."""
+    with _conn() as conn:
+        sql = ("SELECT *, CASE WHEN spread_n > 0 THEN spread_sum / spread_n END"
+               " AS spread_avg FROM quote_obs")
+        args: tuple = ()
+        if day:
+            sql += " WHERE d = ?"
+            args = (day,)
+        sql += " ORDER BY spread_avg DESC NULLS LAST LIMIT ?"
+        return [dict(r) for r in conn.execute(sql, (*args, limit))]
 
 
 # --- 신호 적재 ---------------------------------------------------------------
