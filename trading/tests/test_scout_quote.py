@@ -194,6 +194,49 @@ def test_watch_info_parses_to_the_same_shape_as_quote():
     assert got["005930"]["trde_prica"] == 13726155
 
 
+# --- 호가 스프레드 — 유동성의 두 번째 축 (2026-07-31) ---
+#
+# 유동성을 거래대금 하한으로만 보면 호가가 벌어진 종목을 못 거른다. 거래대금이
+# 커도 스프레드가 넓으면 왕복 비용이 모델값(0.33%)보다 커진다. ka10095 가
+# 5호가를 같은 행에 주므로 **추가 호출 0** 으로 잴 수 있다.
+
+def test_스프레드를_5호가에서_낸다():
+    from app.kiwoom.quote import parse_watch_info, spread_pct
+
+    # 실측 2026-07-31 삼성중공업: 매수1 21,100 / 매도1 21,150 → 0.2370%
+    row = {"stk_cd": "010140", "stk_nm": "삼성중공업", "cur_prc": "+21125",
+           "buy_1th_bid": "+21100", "sel_1th_bid": "+21150"}
+    assert spread_pct(row) == pytest.approx(0.2370, abs=1e-4)
+    got = parse_watch_info({"return_code": 0, "atn_stk_infr": [row]})
+    assert got["010140"]["spread_pct"] == pytest.approx(0.2370, abs=1e-4)
+
+
+@pytest.mark.parametrize("row", [
+    {},                                                   # 호가 없음
+    {"buy_1th_bid": "0", "sel_1th_bid": "+21150"},        # 장 전·거래정지
+    {"buy_1th_bid": "+21100", "sel_1th_bid": "0"},
+    {"buy_1th_bid": "+21150", "sel_1th_bid": "+21100"},   # 역전 — 데이터 결손
+])
+def test_스프레드를_못_내면_None_이지_0이_아니다(row):
+    """0 으로 돌려주면 '스프레드가 없는 완벽한 종목' 으로 읽힌다."""
+    from app.kiwoom.quote import spread_pct
+
+    assert spread_pct(row) is None
+
+
+def test_스프레드는_판단을_바꾸지_않는다():
+    """**측정 전에는 기록만 한다.** 체결강도와 같은 규약이다 —
+    문턱을 지금 손으로 정하면 1.5단계에서 폐기한 실수를 반복한다."""
+    wide = _plan([_c(["volume"], quote={"price": 10_000, "spread_pct": 2.0})])
+    tight = _plan([_c(["volume"], quote={"price": 10_000, "spread_pct": 0.01})])
+    assert [r["action"] for r in wide] == [r["action"] for r in tight]
+
+
+def test_스프레드가_결정에_기록된다():
+    rows = _plan([_c(["volume"], quote={"price": 10_000, "spread_pct": 0.237})])
+    assert _trade(rows)[0]["spread_pct"] == 0.237
+
+
 def test_watch_info_skips_unusable_rows():
     """가격 0·코드 없음은 '조회됨' 으로 세면 안 된다 — 승격 게이트가 오판한다."""
     from app.kiwoom.quote import parse_watch_info

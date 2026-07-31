@@ -225,4 +225,7 @@ def _dec(c: Candidate, action: str, frm: str, to: str, reason: str) -> dict:
     if c.quote:
         d["change_pct"] = c.quote.get("change_pct")
         d["cntr_str"] = c.quote.get("cntr_str")
+        # 호가 스프레드도 같은 규약 — 싣기만 하고 판단에 쓰지 않는다.
+        # 유동성을 거래대금으로만 보는 지금 게이트가 못 보는 축이다.
+        d["spread_pct"] = c.quote.get("spread_pct")
     return d

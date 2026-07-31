@@ -96,3 +96,34 @@ def test_reject_exit_reopens_for_proposal(tmp_path, monkeypatch):
     orders.reject(oid)
     # 보류(거부)하면 포지션은 열린 채로, 다시 청산 후보로 잡힌다
     assert ledger.due_exits(lambda s: 10_500)[0]["id"] == "p5"
+
+
+# --- 마감 정리 창 — 오버나이트를 만든 조건 (2026-07-30 실측) ---
+#
+# 종전 조건은 `hhmm > "15:30"` 이었다. 15:30 은 정규장이 **끝나는** 시각이라
+# 그 뒤 발주는 거래소가 받지 않는다:
+#   15:31:13  청산 발주 거부 삼성중공업 [2000] 장종료되었습니다 — 원장을 닫지 않는다
+#   다음 날 09:00:05  개장 5초 만에 목표가 청산(+1,359원)
+# 결과는 이익이었지만 갭 하락이었으면 손실 상한이 없었다. "오버나이트 없음" 이
+# 이 시스템의 설계 전제다.
+
+@pytest.mark.parametrize("hhmm,want", [
+    ("15:19", False),   # 아직 창 밖 — 정상 매매 시간
+    ("15:20", True),    # 창 시작
+    ("15:25", True),
+    ("15:30", True),    # 마지막 사이클까지는 시도한다
+    ("15:31", False),   # **거래소가 거부하는 구간** — 여기가 종전의 유일한 창이었다
+    ("16:00", False),
+    ("09:00", False),
+])
+def test_마감_정리는_장중에만_발주한다(hhmm, want):
+    from app.main import _eod_window
+
+    assert _eod_window(hhmm, {}) is want
+
+
+def test_마감_정리_시작_시각은_설정으로_당길_수_있다():
+    from app.main import _eod_window
+
+    assert _eod_window("15:05", {"eod_flat_at": "15:00"}) is True
+    assert _eod_window("15:05", {"eod_flat_at": "15:20"}) is False

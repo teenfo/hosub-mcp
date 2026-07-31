@@ -90,5 +90,32 @@ def parse_watch_info(raw: dict) -> dict[str, dict]:
             "cntr_str": _num(row.get("cntr_str")),
             "volume": _num(row.get("trde_qty"), int),
             "trde_prica": _num(row.get("trde_prica"), int),
+            "spread_pct": spread_pct(row),
         }
     return out
+
+
+def spread_pct(row: dict) -> float | None:
+    """매수1·매도1 호가 간격(%). 낼 수 없으면 None.
+
+    ka10095 는 5호가를 같은 행에 함께 준다(`buy_1th_bid`/`sel_1th_bid`) — 편입
+    게이트가 이미 이 TR 을 부르므로 **추가 호출이 0** 이다.
+
+    왜 재는가: 우리는 유동성을 거래대금 하한(30억)으로만 보는데, 스프레드는
+    그와 다른 축이다. 거래대금이 커도 호가가 벌어진 종목은 왕복 비용이 모델값
+    (0.33%)보다 커진다. 지금 확정률을 올리는 이유가 '이익이 비용에 먹힌다'
+    인데, 확정선을 올리는 것은 대증요법이고 스프레드 넓은 종목을 안 잡는 것이
+    원인 요법이다.
+
+    **판단에 쓰지 않고 `decisions` 에 싣기만 한다.** 체결강도와 같은 규약이다 —
+    문턱을 지금 손으로 정하면 1.5단계에서 폐기한 실수를 반복한다. 2주 뒤
+    "스프레드가 넓은 종목의 성적이 실제로 나쁜가" 를 물을 수 있게 하는 것이
+    이번 범위다.
+
+    호가에 붙는 +/- 는 전일대비 방향이므로 절댓값으로 읽는다(가격 필드와 동일).
+    """
+    bid = abs(_num(row.get("buy_1th_bid")))
+    ask = abs(_num(row.get("sel_1th_bid")))
+    if bid <= 0 or ask <= 0 or ask < bid:
+        return None                      # 장 전·거래정지·데이터 결손
+    return round((ask - bid) / bid * 100, 4)

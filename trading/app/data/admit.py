@@ -27,6 +27,7 @@ from __future__ import annotations
 import logging
 
 from .. import settings
+from ..kiwoom import quote
 
 log = logging.getLogger("trading.admit")
 
@@ -86,6 +87,10 @@ def evaluate(row: dict | None, code: str, conf: dict | None = None) -> dict:
         "trde_prica": prica,
         "trde_qty": _num(row.get("trde_qty")),
         "cntr_str": _num(row.get("cntr_str")),
+        # 호가 스프레드 — **판정에 쓰지 않고 보여주기만 한다.** 거래대금이 커도
+        # 호가가 벌어진 종목은 왕복 비용이 모델값(0.33%)보다 크다. 지금 게이트는
+        # 유동성을 거래대금으로만 보므로 이 축을 놓친다. 문턱은 측정 후에 정한다.
+        "spread_pct": quote.spread_pct(row),
         "mac": _num(row.get("mac")),
         "upl_pric": _num(row.get("upl_pric")),
         "lst_pric": _num(row.get("lst_pric")),
