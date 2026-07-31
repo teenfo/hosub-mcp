@@ -137,8 +137,23 @@ def snapshot_current() -> Current:
         log.exception("보유 종목 조회 실패 — 이번 사이클은 강등하지 않는다")
         protected |= set(tier)
         held = set(tier)
+    # 회전 판정 재료 — 원장에서 읽는다(감시목록에는 tier 변경 시각이 없다).
+    # 실패해도 회전만 못 할 뿐이므로 판정 전체를 멈추지 않는다.
+    trade_since: dict[str, datetime] = {}
+    last_signal: dict[str, datetime] = {}
+    demoted_at: dict[str, datetime] = {}
+    try:
+        from .. import journal
+
+        trade_since = store.last_action_at("promote_trade")
+        demoted_at = store.last_action_at("demote")
+        last_signal = journal.last_signal_at()
+    except Exception:  # noqa: BLE001 - 회전은 부가 기능이다
+        log.exception("회전 판정 재료 조회 실패 — 이번 사이클은 회전하지 않는다")
     return Current(tier=tier, since=since, protected=frozenset(protected),
-                   held=frozenset(held), names=names)
+                   held=frozenset(held), names=names,
+                   trade_since=trade_since, last_signal=last_signal,
+                   demoted_at=demoted_at)
 
 
 def _parse_ts(raw) -> datetime:

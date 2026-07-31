@@ -60,6 +60,16 @@ DEFAULTS = {
     "probation_sessions": 1,     # 매매 승격 전 수집 tier 체류 세션 수
     "max_trade": 50,             # 매매 tier 상한
     "max_total": 120,            # 감시목록 전체 상한
+    # --- 기회비용 회전 ---
+    # 자리를 받고 이만큼 지나도록 신호가 한 건도 없으면 대기 후보에게 넘긴다.
+    # **성과가 아니라 신호 유무로 판정한다** — 종목의 과거 손익은 다음 거래를
+    # 예측하지 않는다(실측 2026-07-31: 상관 −0.050, n=57, t=−0.37. 손실 이력
+    # 종목의 다음 거래 −0.611% vs 이익 이력 −0.607%, 차이 0.004%p).
+    # 반면 "이 종목에 우리 규칙이 걸리지 않는다" 는 자리를 비울 근거가 된다 —
+    # 자리의 목적이 신호 탐지이기 때문이다.
+    "silent_dwell_min": 390,     # 1거래일. 0 이면 회전 끔
+    "silent_cooldown_min": 390,  # 밀려난 뒤 재승격 금지 기간
+    "max_rotate": 3,             # 사이클당 회전 상한 — MAX_SHRINK 와 같은 서킷브레이커
 }
 
 
@@ -84,6 +94,13 @@ class Current:
     # (`_collect_targets`), 청산 감시의 가격 폴백이 낡는다.
     held: frozenset = frozenset()
     names: dict[str, str] = field(default_factory=dict)
+    # --- 기회비용 회전 (2026-07-31) ---
+    # 자리를 받은 시각 / 마지막 신호 시각 / 마지막으로 밀려난 시각.
+    # 감시목록에는 tier 변경 시각이 없어(`set_mode` 가 `added` 를 안 건드린다)
+    # `decisions`·`signal_log` 원장에서 읽어 온다.
+    trade_since: dict[str, datetime] = field(default_factory=dict)
+    last_signal: dict[str, datetime] = field(default_factory=dict)
+    demoted_at: dict[str, datetime] = field(default_factory=dict)
 
 
 def _tradable(c: Candidate, cap: float) -> tuple[bool, str]:
@@ -132,6 +149,30 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
         t = cur.since.get(code)
         return t is None or (now - t) >= dwell
 
+    # --- 기회비용 회전 ---
+    silent_min = float(conf.get("silent_dwell_min", 0) or 0)
+    cool = timedelta(minutes=float(conf.get("silent_cooldown_min", 0) or 0))
+
+    def silent(code: str) -> bool:
+        """자리를 받은 뒤 `silent_dwell_min` 이 지나도록 신호가 없었는가.
+
+        기준점은 **자리를 받은 시각**이다(`trade_since`). 감시목록 편입 시각을
+        쓰면 어제 편입돼 오늘 자리를 받은 종목이 즉시 '오래 앉았다' 가 된다.
+        원장에 없으면 편입 시각으로 폴백한다 — 엔진 이전에 들어온 종목이다.
+        """
+        if silent_min <= 0:
+            return False
+        got = cur.trade_since.get(code) or cur.since.get(code)
+        if got is None or (now - got) < timedelta(minutes=silent_min):
+            return False                   # 아직 기회를 다 쓰지 않았다
+        last = cur.last_signal.get(code)
+        return last is None or last < got
+
+    def cooling(code: str) -> bool:
+        """밀려난 지 얼마 안 됐는가. 없으면 다음 사이클에 곧장 복귀해 무의미하다."""
+        t = cur.demoted_at.get(code)
+        return bool(cool) and t is not None and (now - t) < cool
+
     # --- 승격 ---
     trade_now = sum(1 for t in cur.tier.values() if t == TRADE)
     total_now = sum(1 for t in cur.tier.values() if t != NONE)
@@ -150,6 +191,8 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
             # 매매 승격은 **게이트로만** 판정한다 — 점수는 보지 않는다
             if not held_long_enough(c.code):
                 continue                       # probation — 최소 1세션 체류
+            if cooling(c.code):
+                continue                       # 침묵으로 밀려난 직후 — 쿨다운
             ok, why = _tradable(c, cap)
             if not ok:
                 continue                       # 조용히 수집전용 유지
@@ -218,20 +261,55 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     # 수동은 감시목록에는 남으므로(drop 보호는 유지) 정보 수집이 끊기지 않는다.
     in_trade = [code for code, t in cur.tier.items()
                 if t == TRADE and code not in dropped and code not in cur.held]
-    in_trade.sort(key=lambda code: (by_code[code].score if code in by_code else 0.0,
+    # **침묵한 자리를 먼저 뺀다.** 종전 정렬은 점수 하위부터였는데, 점수는
+    # "여전히 눈에 띄는가" 이지 "우리에게 값어치가 있는가" 가 아니다 — 거래대금
+    # 상위에 계속 있는 종목은 계속 눈에 띈다. 자리의 목적은 신호 탐지다.
+    in_trade.sort(key=lambda code: (not silent(code),
+                                    by_code[code].score if code in by_code else 0.0,
                                     code))
     held_trade = sum(1 for code, t in cur.tier.items()
                      if t == TRADE and code in cur.held)
     over_t = len(in_trade) + held_trade - int(conf["max_trade"])
+    demoted: set[str] = set()
     for code in in_trade[:max(0, over_t)]:
+        demoted.add(code)
         c = by_code.get(code)
-        out.append({"code": code, "name": (c.name if c else None)
-                    or cur.names.get(code, code),
-                    "action": "demote", "from_tier": TRADE, "to_tier": COLLECT,
-                    "score": c.score if c else 0.0,
-                    "sources": c.sources if c else [],
-                    "reason": f"매매 tier 상한 {conf['max_trade']} 초과 — 점수 하위"})
+        out.append(_demote(code, c, cur,
+                           f"매매 tier 상한 {conf['max_trade']} 초과 — "
+                           + ("침묵" if silent(code) else "점수 하위")))
+
+    # --- 회전: 자리는 찼는데 침묵한 종목이 있고, 대기 후보가 있을 때 ---
+    #
+    # **경쟁이 있을 때만 돈다.** 자리가 남는데 내리면 순손실이다. 대기 후보가
+    # 없어도 마찬가지 — 비워 봐야 채울 것이 없다.
+    #
+    # 실측 2026-07-31 근거: 매매 tier 40종목 중 16종목(40%)이 그날 신호 0건이었고,
+    # 매매 tier **밖에서 나온 신호는 0건**이었다. 자리가 모자라 놓친 기회는 없고,
+    # 앉아 있는 종목이 신호를 안 낸다. 발굴 소스는 5일간 고유 1,000종목 이상을
+    # 지목했는데 실제로 거래된 것은 50종목이다.
+    rotate = int(conf.get("max_rotate", 0) or 0)
+    if rotate > 0 and over_t <= 0:
+        waiting = [c.code for c in cands
+                   if cur.tier.get(c.code) == COLLECT
+                   and c.code not in dropped
+                   and not cooling(c.code)
+                   and held_long_enough(c.code)
+                   and _tradable(c, cap)[0]]
+        room = int(conf["max_trade"]) - (len(in_trade) + held_trade)
+        need = min(len(waiting) - max(0, room), rotate)
+        if need > 0:
+            for code in [x for x in in_trade if silent(x) and x not in demoted][:need]:
+                c = by_code.get(code)
+                out.append(_demote(code, c, cur,
+                                   f"침묵 {int(silent_min)}분 — 대기 후보에 자리 양보"))
     return out
+
+
+def _demote(code: str, c: Candidate | None, cur: Current, reason: str) -> dict:
+    return {"code": code, "name": (c.name if c else None) or cur.names.get(code, code),
+            "action": "demote", "from_tier": TRADE, "to_tier": COLLECT,
+            "score": c.score if c else 0.0,
+            "sources": c.sources if c else [], "reason": reason}
 
 
 def _drop(code: str, c: Candidate | None, cur: Current, score: float,

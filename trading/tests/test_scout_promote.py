@@ -29,11 +29,15 @@ def _c(code="000001", score=0.9, price=10_000, groups=1, **kw):
                      else {"intraday": score / 2, "news": score / 2})
 
 
-def _cur(tier=None, since=None, protected=(), names=None, held=()):
+def _cur(tier=None, since=None, protected=(), names=None, held=(),
+         trade_since=None, last_signal=None, demoted_at=None):
     """`protected` 는 drop 금지(보유+수동), `held` 는 그중 demote 도 금지(보유만)."""
     return Current(tier=dict(tier or {}), since=dict(since or {}),
                    protected=frozenset(protected) | frozenset(held),
-                   held=frozenset(held), names=dict(names or {}))
+                   held=frozenset(held), names=dict(names or {}),
+                   trade_since=dict(trade_since or {}),
+                   last_signal=dict(last_signal or {}),
+                   demoted_at=dict(demoted_at or {}))
 
 
 @pytest.fixture(autouse=True)
@@ -328,3 +332,118 @@ def test_cap_overflow_also_waits_for_the_session():
     cands = [_c(code=c, score=2.0 - i) for i, c in enumerate(codes)]
     assert _by(_plan(cands, cur, now=AFTER_CLOSE, max_total=2), "drop") == []
     assert _by(_plan(cands, cur, now=NOW, max_total=2), "drop")
+
+
+# --- ⑥ 기회비용 회전 — 침묵한 자리를 대기 후보에게 넘긴다 (2026-07-31) ---
+#
+# **성과 기반 강등은 측정으로 기각됐다.** 종목의 과거 손익은 다음 거래를
+# 예측하지 않는다(상관 −0.050, n=57, t=−0.37. 손실 이력 종목의 다음 거래
+# −0.611% vs 이익 이력 −0.607%, 차이 0.004%p). 그 위에 규칙을 세우면 노이즈를
+# 따라가는 것이다 — 1.5단계에서 랭킹 6종이 전부 무작위보다 나빴던 것과 같다.
+#
+# 대신 신호 유무로 판정한다. 실측: 매매 tier 40종목 중 16종목(40%)이 그날 신호
+# 0건이었고, 매매 tier **밖에서 나온 신호는 0건**이었다 — 자리가 모자라 놓친
+# 기회는 없고 앉아 있는 종목이 신호를 안 낸다.
+
+OLD = NOW - timedelta(hours=12)          # 침묵 상한(390분)을 넘긴 체류
+RECENT = NOW - timedelta(minutes=30)     # 아직 기회를 다 쓰지 않음
+
+
+def _rot(tier_codes, waiting=(), **kw):
+    """매매 tier + 대기(수집) 후보로 판을 만든다."""
+    tier = {c: TRADE for c in tier_codes} | {c: COLLECT for c in waiting}
+    since = {c: LONG_AGO for c in tier}
+    cands = [_c(code=c, score=0.9) for c in tier]
+    return cands, _cur(tier=tier, since=since, **kw)
+
+
+def test_침묵한_자리를_대기_후보에게_넘긴다():
+    cands, cur = _rot(["000001", "000002"], waiting=["000009"],
+                      trade_since={"000001": OLD, "000002": OLD},
+                      last_signal={"000002": NOW - timedelta(minutes=5)})
+    rows = _plan(cands, cur, max_trade=2)
+    assert [r["code"] for r in _by(rows, "demote")] == ["000001"]
+    assert "침묵" in _by(rows, "demote")[0]["reason"]
+
+
+def test_자리가_남으면_회전하지_않는다():
+    """비워 봐야 순손실이다 — 경쟁이 있을 때만 돈다."""
+    cands, cur = _rot(["000001"], waiting=["000009"],
+                      trade_since={"000001": OLD})
+    assert _by(_plan(cands, cur, max_trade=10), "demote") == []
+
+
+def test_대기_후보가_없으면_회전하지_않는다():
+    cands, cur = _rot(["000001", "000002"],
+                      trade_since={"000001": OLD, "000002": OLD})
+    assert _by(_plan(cands, cur, max_trade=2), "demote") == []
+
+
+def test_자리를_받은_직후에는_침묵으로_치지_않는다():
+    """기회를 다 쓰기 전에 빼면 탐색이 아니라 학대다."""
+    cands, cur = _rot(["000001", "000002"], waiting=["000009"],
+                      trade_since={"000001": RECENT, "000002": RECENT})
+    assert _by(_plan(cands, cur, max_trade=2), "demote") == []
+
+
+def test_신호를_낸_종목은_침묵이_아니다():
+    cands, cur = _rot(["000001", "000002"], waiting=["000009"],
+                      trade_since={"000001": OLD, "000002": OLD},
+                      last_signal={"000001": NOW - timedelta(minutes=5),
+                                   "000002": NOW - timedelta(minutes=5)})
+    assert _by(_plan(cands, cur, max_trade=2), "demote") == []
+
+
+def test_자리를_받기_전에_낸_신호는_안_쳐준다():
+    """이전 체류의 신호로 이번 자리를 정당화하면 안 된다."""
+    cands, cur = _rot(["000001", "000002"], waiting=["000009"],
+                      trade_since={"000001": OLD, "000002": OLD},
+                      last_signal={"000001": OLD - timedelta(hours=1)})
+    assert [r["code"] for r in _by(cands and _plan(cands, cur, max_trade=2),
+                                   "demote")] == ["000001"]
+
+
+def test_보유는_회전_대상이_아니다():
+    """매매 tier 에서 내리면 분봉 백필에서 빠져 청산 감시 폴백이 낡는다."""
+    cands, cur = _rot(["000001", "000002"], waiting=["000009"],
+                      held={"000001"},
+                      trade_since={"000001": OLD, "000002": OLD})
+    assert [r["code"] for r in _by(_plan(cands, cur, max_trade=2),
+                                   "demote")] == ["000002"]
+
+
+def test_회전은_사이클당_상한이_있다():
+    """소스 장애로 대량 회전하는 것을 막는다 — MAX_SHRINK 와 같은 성격."""
+    codes = [f"0000{i:02d}" for i in range(1, 6)]
+    cands, cur = _rot(codes, waiting=["000091", "000092", "000093", "000094"],
+                      trade_since={c: OLD for c in codes})
+    assert len(_by(_plan(cands, cur, max_trade=5, max_rotate=2), "demote")) == 2
+
+
+def test_회전을_끌_수_있다():
+    cands, cur = _rot(["000001", "000002"], waiting=["000009"],
+                      trade_since={"000001": OLD, "000002": OLD})
+    assert _by(_plan(cands, cur, max_trade=2, silent_dwell_min=0), "demote") == []
+
+
+def test_밀려난_직후에는_재승격되지_않는다():
+    """쿨다운이 없으면 다음 사이클에 곧장 복귀해 회전이 무의미해진다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO},
+               demoted_at={"000001": NOW - timedelta(minutes=10)})
+    assert _by(_plan([_c(code="000001")], cur), "promote_trade") == []
+
+
+def test_쿨다운이_지나면_다시_올라온다():
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO},
+               demoted_at={"000001": NOW - timedelta(hours=12)})
+    assert len(_by(_plan([_c(code="000001")], cur), "promote_trade")) == 1
+
+
+def test_상한_초과_강등도_침묵부터_뺀다():
+    """점수는 '여전히 눈에 띄는가' 이지 '값어치가 있는가' 가 아니다."""
+    cands, cur = _rot(["000001", "000002"],
+                      trade_since={"000001": OLD, "000002": OLD},
+                      last_signal={"000002": NOW - timedelta(minutes=5)})
+    # 000002 가 점수는 같지만 신호를 냈다 → 침묵한 000001 이 먼저 밀린다
+    rows = _plan(cands, cur, max_trade=1)
+    assert [r["code"] for r in _by(rows, "demote")] == ["000001"]
