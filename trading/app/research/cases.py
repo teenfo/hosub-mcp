@@ -163,14 +163,25 @@ def lessons_for(case: dict) -> list[str]:
 # 적재
 # --------------------------------------------------------------------------
 def _bars_for(symbol: str, start: str, end: str) -> list[tuple]:
-    from ..data import store as bars_store
+    """구간을 **직접 질의한다.** `load_bars` 로 최근 N봉을 받아 자르지 않는다.
 
-    df = bars_store.load_bars(symbol, "1m", limit=2000)
-    if df.empty:
-        return []
-    seg = df[(df.index >= start) & (df.index <= end)]
-    return [(str(i), float(r.high), float(r.low), float(r.close))
-            for i, r in seg.iterrows()]
+    종전 구현은 `load_bars(limit=2000)` 뒤에 구간을 걸렀다. 2,000분봉은 약
+    5거래일인데 심층 백필된 종목은 4,500봉을 갖고 있어, **오래된 날의 케이스가
+    조용히 잘렸다.** 소급 적재 실측(2026-07-31): 그 구현으로 만든 원장이
+    `never_up` 18건 / `target_reached` 22건을 냈는데 같은 표본의 직접 측정은
+    14건 / 25건이었다. 평균값(MFE·MAE)은 거의 같아서 **집계만 보면 안 드러난다** —
+    구간이 짧아진 케이스만 최고·최저가 덜 잡힌 것이기 때문이다.
+
+    잘린 것이 최근 구간이 아니라 **과거 구간**이라 오늘 만드는 케이스는 멀쩡하고
+    소급분만 틀린다. 이런 종류가 가장 늦게 발견된다.
+    """
+    from ..data.store import _conn as bars_conn
+
+    with bars_conn() as conn:
+        rows = conn.execute(
+            "SELECT ts, high, low, close FROM bars WHERE symbol=? AND tf='1m' "
+            "AND ts >= ? AND ts <= ? ORDER BY ts", (symbol, start, end)).fetchall()
+    return [(r[0], float(r[1]), float(r[2]), float(r[3])) for r in rows]
 
 
 def build_case(pos: dict) -> dict | None:
