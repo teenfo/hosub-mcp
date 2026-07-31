@@ -740,6 +740,23 @@ class SignalEngine:
             targets.update(dict.fromkeys(roster.active(days)))
         except Exception:  # noqa: BLE001 - 로스터 실패가 마감 확정을 막지 않는다
             log.warning("로스터 조회 실패 — 감시목록만 마감 백필")
+        # 유동성 유니버스까지 넓힌다 — 지금 1분봉이 있는 종목은 **395개**뿐이고
+        # (일봉은 3,941), 장중 차트 지표는 그 395개에만 계산할 수 있다.
+        # "전체 종목 베이스 + 장중 지표" 가 양립하지 않는 이유가 이것이었다.
+        #
+        # 406 은 기술적 상한이 아니라 **대상 집합**이었다. 마감 백필이 감시목록
+        # + 로스터만 훑었을 뿐이다. ka10080 은 1콜에 900봉(≈2.4거래일)을 주므로
+        # 종목당 1콜이면 하루가 통째로 덮인다 — 4 rps 에서 1,000종목이 약 4분,
+        # 그리고 15:35 부터 야간 발굴(17:30)까지 예산은 통째로 비어 있다.
+        univ = int(cfg0.get("eod_universe_max", 0))
+        if univ > 0:
+            try:
+                from ..discovery import liquid_universe
+                before = len(targets)
+                targets.update(dict.fromkeys(liquid_universe(univ)))
+                log.info("마감 백필 대상 확장: %d → %d종목", before, len(targets))
+            except Exception:  # noqa: BLE001 - 확장 실패가 기존 확정을 막지 않는다
+                log.warning("유동성 유니버스 조회 실패 — 감시목록·로스터만 백필")
         n = 0
         for symbol in targets:
             try:

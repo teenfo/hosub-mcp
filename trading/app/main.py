@@ -23,6 +23,7 @@ from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
+from .scout import observe as scout_observe
 from .trade import desk, orders
 from . import journal
 
@@ -410,6 +411,9 @@ async def lifespan(app: FastAPI):
         # 발굴 엔진 — 기본 shadow. 신호를 모으고 결정을 기록만 하며 감시목록에는
         # 손대지 않는다. 기존 scanner/discovery 자동편입 경로는 그대로 돈다.
         asyncio.create_task(scout.loop()),
+        # 관측 전용 — 신호를 내지 않고 원장에만 쌓는다(투자자별 매매 · VI).
+        # 4주 뒤 잔차 IC 로 물을 재료이지, 지금 판단에 쓰는 값이 아니다.
+        asyncio.create_task(scout_observe.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)

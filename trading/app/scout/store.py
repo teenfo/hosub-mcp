@@ -118,6 +118,28 @@ def _conn() -> sqlite3.Connection:
     # 관측의 JSON 이고, `day_pos` 만 따로 접는다 — 이번 실측이 정확히 그 값을
     # 가리켰기 때문이다(진입가가 직전 범위의 어디였나. 위치가 높을수록 이후
     # 상승 여력이 단조로 줄었다). 못 잰 순간은 `day_pos_n` 에서 빠진다.
+    # 관측 전용 원장 2종. **신호가 아니다** — 점수·승격 경로에 들어가지 않고
+    # 4주 뒤 잔차 IC 를 물을 재료로만 쌓인다.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS investor_obs (
+            ts TEXT NOT NULL, code TEXT NOT NULL, name TEXT, invsr TEXT NOT NULL,
+            price REAL, change_pct REAL,
+            net_amt REAL, net_amt_delta REAL, net_qty REAL,
+            buy_amt REAL, sell_amt REAL,
+            PRIMARY KEY (ts, code, invsr)
+        );
+        CREATE INDEX IF NOT EXISTS ix_investor_obs_code ON investor_obs (code, ts);
+        CREATE TABLE IF NOT EXISTS vi_obs (
+            d TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            motn_time TEXT NOT NULL, release_time TEXT, kind TEXT,
+            motn_pric REAL, dispty_rt REAL, motn_cnt INTEGER,
+            seen_at TEXT,
+            PRIMARY KEY (d, code, motn_time)
+        );
+        CREATE INDEX IF NOT EXISTS ix_vi_obs_code ON vi_obs (code, d);
+        """
+    )
     have = {r[1] for r in conn.execute("PRAGMA table_info(quote_obs)")}
     for col, decl in (("extra_last", "TEXT"),
                       ("day_pos_n", "INTEGER NOT NULL DEFAULT 0"),
@@ -205,6 +227,62 @@ def quote_stats(day: str | None = None, limit: int = 500) -> list[dict]:
             args = (day,)
         sql += " ORDER BY spread_avg DESC NULLS LAST LIMIT ?"
         return [dict(r) for r in conn.execute(sql, (*args, limit))]
+
+
+# --- 관측 전용 원장 -----------------------------------------------------------
+
+def record_investor(rows: list[dict], invsr: str,
+                    now: datetime | None = None) -> int:
+    """장중 투자자별 순매수를 시점별로 쌓는다(ka10063). 반환: 적재 행 수.
+
+    시세 관측(`quote_obs`)과 달리 **접지 않는다.** 순매수는 하루 동안 방향이
+    바뀌는 값이라 평균으로 뭉개면 "언제 사고 있었나" 가 사라진다 — 우리가
+    답하려는 질문이 정확히 그 시점이다.
+    """
+    if not rows:
+        return 0
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="minutes")
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO investor_obs (ts, code, name, invsr, price,"
+            " change_pct, net_amt, net_amt_delta, net_qty, buy_amt, sell_amt)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [(ts, r["code"], r.get("name"), invsr, r.get("price"),
+              r.get("change_pct"), r.get("net_amt"), r.get("net_amt_delta"),
+              r.get("net_qty"), r.get("buy_amt"), r.get("sell_amt")) for r in rows],
+        )
+    return len(rows)
+
+
+def record_vi(rows: list[dict], now: datetime | None = None) -> int:
+    """VI 발동 사실을 (날짜, 종목, 발동시각)당 한 행으로 쌓는다(ka10054).
+
+    같은 종목이 하루에 여러 번 발동하므로 발동시각까지 키에 넣는다. 폴링
+    주기가 발동 창(2분)보다 길면 놓치는 발동이 생긴다 — 놓친 것을 채워
+    넣지는 않는다. **본 것만 기록한다.**
+    """
+    if not rows:
+        return 0
+    ts = (now or datetime.now(UTC)).astimezone(KST)
+    day = ts.strftime("%Y-%m-%d")
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO vi_obs (d, code, name, motn_time, release_time,"
+            " kind, motn_pric, dispty_rt, motn_cnt, seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [(day, r["code"], r.get("name"), r.get("motn_time") or "",
+              r.get("release_time"), r.get("kind"), r.get("motn_pric"),
+              r.get("dispty_rt"), r.get("motn_cnt"),
+              ts.isoformat(timespec="seconds")) for r in rows],
+        )
+    return len(rows)
+
+
+def vi_codes(day: str) -> set[str]:
+    """그날 VI 가 걸린 적 있는 종목 — 사후 대조용(우리 거래와 겹쳤는가)."""
+    with _conn() as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT code FROM vi_obs WHERE d=?", (day,))}
 
 
 # --- 신호 적재 ---------------------------------------------------------------

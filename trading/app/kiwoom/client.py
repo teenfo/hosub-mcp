@@ -34,6 +34,9 @@ TR_STOCK_LIST = "ka10099"        # 종목정보 리스트 (요청 필드 실호�
 TR_QUOTE = "ka10006"             # 주식시세 — flu_rt(등락률) + cntr_str(체결강도)
 TR_STOCK_BASIC = "ka10001"       # 주식기본정보 — 시총·PER·EPS·52주 고저 등
 TR_WATCH_INFO = "ka10095"        # 관심종목정보 — **여러 종목을 1콜로**. 편입 게이트용
+# 아래 둘은 관측 전용 — 신호·점수 경로에 넣지 않는다. 경로가 서로 다르다(실호출 확정)
+TR_INTRADAY_INVESTOR = "ka10063"  # 장중 투자자별 매매 — 800종목 1콜. PATH_MARKET
+TR_VI_STOCKS = "ka10054"          # VI 발동종목 — 100종목. PATH_STOCK_INFO
 
 PATH_CHART = "/api/dostk/chart"
 PATH_MARKET = "/api/dostk/mrkcond"
@@ -355,6 +358,35 @@ class KiwoomClient:
         """
         return await self._call(PATH_STOCK_INFO, TR_WATCH_INFO,
                                 {"stk_cd": "|".join(codes)})
+
+    async def intraday_investor(self, market: str = "000", invsr: str = "6") -> dict:
+        """장중 투자자별 매매 (ka10063) — **800종목을 1콜로**. 관측 전용.
+
+        경로가 `mrkcond` 이고 필수 파라미터가 `invsr` 다. `rkinfo`·`stkinfo`·
+        `frgnistt` 는 전부 1504(지원하지 않는 API ID)를 돌려주고, `invsr_tp`
+        로 보내면 1511(필수 입력 값 없음)이 온다 — 실호출로 확정했다(2026-07-31).
+
+        invsr: 6 외국인 / 7 기관계 등. amt_qty_tp 1 = 금액(백만원) 기준.
+        """
+        return await self._call(
+            PATH_MARKET, TR_INTRADAY_INVESTOR,
+            {"mrkt_tp": market, "amt_qty_tp": "1", "invsr": invsr,
+             "frgn_all": "0", "smtm_netprps_tp": "0", "stex_tp": "1"},
+        )
+
+    async def vi_stocks(self, market: str = "000") -> dict:
+        """VI(변동성완화장치) 발동종목 (ka10054) — 100종목. 관측 전용.
+
+        경로는 `stkinfo` 다(`mrkcond` 는 1504). 발동 중에는 단일가로 묶이므로
+        시장가가 생각한 값에 체결되지 않는다. 지금은 겹치는지만 센다.
+        """
+        return await self._call(
+            PATH_STOCK_INFO, TR_VI_STOCKS,
+            {"mrkt_tp": market, "bf_mkrt_tp": "0", "stk_cd": "", "motn_tp": "0",
+             "skip_stk": "000000000", "trde_qty_tp": "0", "min_trde_qty": "0",
+             "max_trde_qty": "0", "trde_prica_tp": "0", "min_trde_prica": "0",
+             "max_trde_prica": "0", "motn_drc": "0", "stex_tp": "1"},
+        )
 
     async def daily_realized(self, start: str, end: str) -> dict:
         """일자별 실현손익 (ka10074). 날짜는 YYYYMMDD.

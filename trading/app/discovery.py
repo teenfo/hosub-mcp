@@ -207,6 +207,32 @@ def latest_picks() -> tuple[str | None, list[dict]]:
     return date, picks
 
 
+def liquid_universe(limit: int = 0) -> list[str]:
+    """가장 최근 발굴일의 **유동성 통과 전종목**, 거래대금 내림차순.
+
+    분봉 커버리지를 넓힐 대상 목록이다. 정렬을 거래대금으로 두는 이유는
+    두 가지다 — 실제로 체결 가능한 쪽부터 채우고, 거래대금 순위는 하루 사이
+    잘 바뀌지 않아 **날마다 같은 종목이 담긴다**. 대상이 매일 갈리면 패널에
+    구멍이 생겨 나중에 아무것도 못 잰다.
+    """
+    with _conn() as conn:
+        row = conn.execute("SELECT MAX(date) AS d FROM chart_obs").fetchone()
+        day = row["d"] if row else None
+        if not day:
+            return []
+        rows = conn.execute("SELECT code, feats FROM chart_obs WHERE date=?", (day,))
+        pairs = []
+        for r in rows:
+            try:
+                tv = float(json.loads(r["feats"]).get("trade_value") or 0)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                tv = 0.0
+            pairs.append((tv, r["code"]))
+    pairs.sort(key=lambda x: (-x[0], x[1]))
+    codes = [c for _, c in pairs]
+    return codes[:limit] if limit else codes
+
+
 class Discovery:
     def __init__(self) -> None:
         self.running = False
