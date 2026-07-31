@@ -52,6 +52,7 @@ PATH_RANK = "/api/dostk/rkinfo"
 PATH_STOCK_INFO = "/api/dostk/stkinfo"
 PATH_SHORT = "/api/dostk/shsa"        # 공매도 — 다른 경로에서는 1504 가 온다
 
+KST = ZoneInfo("Asia/Seoul")
 log = logging.getLogger("trading.kiwoom")
 
 
@@ -413,9 +414,16 @@ class KiwoomClient:
         개인·기관·외국인 순매수 + 프로그램매매 + 외국인 지분율 + 신용비율까지
         얹어 준다 — 그 넷을 따로 부르려던 TR 3개가 필요 없어졌다.
         대신 **20행**뿐이라(ka10081 은 600행) 일봉을 대체하지는 못한다.
+
+        `qry_dt` 는 **필수다.** 빈 문자열로 보내면 rc=2, `1511 필수 입력 값에
+        값이 존재하지 않습니다` 가 온다 — 다른 조회 TR 들이 빈 값을 '최근'으로
+        받아 주는 것과 다르다. 안 넘기면 오늘(KST)로 채운다. 이걸 빈 채로
+        배포했다가 전종목 배치 3,925콜이 통째로 실패할 뻔했다(2026-07-31).
         """
-        return await self._call(PATH_MARKET, TR_DAILY_PRICE,
-                                {"stk_cd": code, "qry_dt": qry_dt, "indc_tp": "0"})
+        return await self._call(
+            PATH_MARKET, TR_DAILY_PRICE,
+            {"stk_cd": code, "indc_tp": "0",
+             "qry_dt": qry_dt or datetime.now(KST).strftime("%Y%m%d")})
 
     async def investor_daily(self, code: str, dt: str) -> dict:
         """종목별 투자자·기관별 (ka10059) — 13개 주체 세부, 100일치.
