@@ -72,7 +72,7 @@ _TRADING_GET_RE = re.compile(
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}|stock/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
     r"|research/(event-study|ranking|news-impact|trailing|trailing/real)|scout|regime/history"
-    r"|cases|premarket)$"
+    r"|cases|premarket|flows)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
@@ -81,12 +81,12 @@ _TRADING_POST_RE = re.compile(
     r"|journal/run|guard/override(/clear)?"
     r"|research/(event-study|ranking|news-impact|trailing)/run"
     r"|scout/(mode|run)|account/reconcile"
-    r"|positions/[0-9a-f]{12}/(close|void)|desk|cases/build)$"
+    r"|positions/[0-9a-f]{12}/(close|void)|desk|cases/build|flows/run)$"
 )
 # 백테스트는 오래 걸린다(전 종목 리포트 수십 초, 종목별 재생도 봉이 쌓일수록·
 # 스윕과 겹칠수록 수 초~수십 초) — 이 경로들만 프록시 타임아웃을 늘린다.
 _TRADING_SLOW_RE = re.compile(
-    r"^(backtest/(report/run|\d{6})|journal/run|cases/build"
+    r"^(backtest/(report/run|\d{6})|journal/run|cases/build|flows/run"
     r"|research/(event-study|ranking|news-impact|trailing)/run)$")
 
 # TNM(뉴스·공시 모니터링) 서비스 프록시 — trading 과 동일 패턴.

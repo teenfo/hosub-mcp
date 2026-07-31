@@ -149,6 +149,35 @@ def _conn() -> sqlite3.Connection:
         -- 그래서 창을 여는 대신 그 시각의 시장 상태를 남긴다. 4주 뒤 물을 것은
         -- "개장 창 진입의 성적이 이 값들로 갈리는가" 다 — 갈리면 시장 방향
         -- 필터가 분산을 줄인다는 뜻이고, 안 갈리면 이 창은 그냥 베타다.
+        -- 수급 원장 — 종목·일자당 한 행. **네 소스가 각자 자기 칸만 채운다.**
+        --
+        -- 한 표에 모으는 이유: 4주 뒤 물을 것이 "기관이 산 종목의 성적이
+        -- 다른가" 이지 "ka10059 가 뭘 줬나" 가 아니다. 표를 넷으로 나누면
+        -- 그 질문에 매번 조인 넷이 붙는다.
+        --
+        -- 칸을 나누는 이유: 소스마다 실패가 독립이다. 공매도 조회가 죽었다고
+        -- ka10086 이 채운 수급을 NULL 로 덮으면, 있던 관측이 사라진다.
+        -- 각 upsert 는 자기 컬럼만 쓰고 나머지는 건드리지 않는다.
+        CREATE TABLE IF NOT EXISTS flow_obs (
+            d TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            -- ka10086 (전종목)
+            close REAL, open REAL, high REAL, low REAL,
+            change_pct REAL, volume INTEGER, trade_value_mn INTEGER,
+            ind REAL, orgn REAL, foreign_ REAL, program REAL,
+            for_wght REAL, crd_rt REAL,
+            -- ka10059 (감시목록) — 기관 세부
+            fnnc_invt REAL, insrnc REAL, invtrt REAL, etc_fnnc REAL,
+            bank REAL, penfnd_etc REAL, samo_fund REAL, natn REAL,
+            etc_corp REAL, natfor REAL,
+            -- ka10014 (감시목록)
+            short_qty REAL, short_wght REAL, short_avg_pric REAL,
+            -- ka10015 (감시목록) — 장전/장중/장후 거래량 비중
+            bf_mkrt_wght REAL, opmr_wght REAL, af_mkrt_wght REAL,
+            updated_at TEXT,
+            PRIMARY KEY (d, code)
+        );
+        CREATE INDEX IF NOT EXISTS ix_flow_obs_code ON flow_obs (code, d);
+
         -- NXT 프리마켓(08:00~08:50) 관측 — 시점별로 쌓는다.
         --
         -- 우리는 지금까지 KRX 만 보고 있었다(`stex_tp: "1"`). NXT 는 08:00 부터
@@ -314,6 +343,61 @@ def record_vi(rows: list[dict], now: datetime | None = None) -> int:
               ts.isoformat(timespec="seconds")) for r in rows],
         )
     return len(rows)
+
+
+def record_flows(code: str, rows: list[dict], name: str | None = None,
+                 now: datetime | None = None) -> int:
+    """수급을 종목·일자당 한 행에 접어 넣는다. 반환: 반영한 일자 수.
+
+    **행에 실린 키만 쓴다.** 네 소스(ka10086·ka10059·ka10014·ka10015)가 각자
+    자기 칸만 채우므로, 한쪽 조회가 실패해도 다른 쪽이 넣어 둔 값이 NULL 로
+    덮이지 않는다. 이게 이 함수의 존재 이유다 — `INSERT OR REPLACE` 를 쓰면
+    공매도 조회 한 번 실패에 그날 수급이 통째로 사라진다.
+    """
+    if not rows:
+        return 0
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="seconds")
+    with _conn() as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(flow_obs)")}
+        n = 0
+        for r in rows:
+            day = r.get("d")
+            if not day:
+                continue
+            # `foreign` 은 SQL 예약어라 컬럼명이 `foreign_` 이다.
+            vals = {("foreign_" if k == "foreign" else k): v
+                    for k, v in r.items() if k != "d"}
+            vals = {k: v for k, v in vals.items() if k in cols}
+            if not vals:
+                continue
+            keys = list(vals)
+            conn.execute(
+                f"INSERT INTO flow_obs (d, code, name, updated_at, {','.join(keys)})"
+                f" VALUES (?,?,?,?,{','.join('?' * len(keys))})"
+                f" ON CONFLICT(d, code) DO UPDATE SET"
+                f"   name = COALESCE(excluded.name, flow_obs.name),"
+                f"   updated_at = excluded.updated_at,"
+                + ",".join(f" {k} = excluded.{k}" for k in keys),
+                (day, code, name, ts, *(vals[k] for k in keys)))
+            n += 1
+    return n
+
+
+def flow_coverage(days: int = 30) -> list[dict]:
+    """일자별 수급 적재 현황 — 어느 칸이 비었는지 보인다.
+
+    소스별 채움 비율을 따로 세는 이유: 전종목(ka10086)과 감시목록 한정
+    (ka10059·ka10014·ka10015)은 대상이 다르다. 하나의 '적재 건수' 로 보면
+    감시목록 소스가 실패한 날과 원래 대상이 적은 날을 구분할 수 없다.
+    """
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT d, COUNT(*) AS codes,"
+            " SUM(CASE WHEN ind IS NOT NULL THEN 1 ELSE 0 END) AS with_flow,"
+            " SUM(CASE WHEN invtrt IS NOT NULL THEN 1 ELSE 0 END) AS with_detail,"
+            " SUM(CASE WHEN short_qty IS NOT NULL THEN 1 ELSE 0 END) AS with_short,"
+            " SUM(CASE WHEN opmr_wght IS NOT NULL THEN 1 ELSE 0 END) AS with_session"
+            " FROM flow_obs GROUP BY d ORDER BY d DESC LIMIT ?", (days,))]
 
 
 def record_premarket(rows: list[dict], now: datetime | None = None) -> int:

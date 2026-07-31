@@ -26,6 +26,8 @@ from . import export, settings
 from .data import store
 from .data.collector import parse_chart_response
 from .features import compute_features
+from .kiwoom import flows as kflows
+from .scout import store as scout_store
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -295,6 +297,11 @@ class Discovery:
             scored: list[dict] = []         # 발굴 후보 (유동성 게이트 통과 + 점수)
             pool: list[dict] = []           # 유동성 통과 전량 — 무작위 표본의 모집단
             obs: list[tuple] = []           # 차트 지표 원장 (전종목 베이스)
+            # 수급(ka10086) — 종목당 콜이 하나 더 붙는다. 설정으로 끈다.
+            fcfg = settings.CONFIG.get("scout", {}).get("observe", {}).get("flows", {})
+            flow_on = bool(fcfg.get("universe", True))
+            flow_days = int(fcfg.get("universe_days", 3))
+            flow_fail = 0
             for i, s in enumerate(symbols):
                 if i % 100 == 0:
                     self.progress = f"수집 중 {i}/{len(symbols)}"
@@ -320,6 +327,19 @@ class Discovery:
                         "close": f["close"], "score": f["score"],
                         "reasons": f["reasons"]}
                 pool.append(cand)
+                # 수급 — `ka10086` 은 OHLCV 에 개인·기관·외국인 순매수 +
+                # 프로그램매매 + 외국인 지분율 + 신용비율을 얹어 준다. 일봉
+                # (`ka10081`)이 못 주는 축이라 **한 콜을 더 쓴다**(전종목이면
+                # 배치가 약 16분 → 33분). 유동성 통과분에만 건다 — 1주도 못 사는
+                # 종목의 수급은 4주 뒤 질문에 쓰이지 않는다.
+                if flow_on:
+                    try:
+                        rows = kflows.parse_daily_price(
+                            await client.daily_price(s["code"]))
+                        scout_store.record_flows(s["code"], rows[:flow_days],
+                                                 s["name"])
+                    except Exception:  # noqa: BLE001 - 관측이 발굴을 막지 않는다
+                        flow_fail += 1
                 obs.append((s["code"], s["name"], f["score"],
                             json.dumps({k: v for k, v in f.items() if k != "reasons"},
                                        ensure_ascii=False)))
@@ -355,7 +375,8 @@ class Discovery:
             kinds = Counter(p.get("pick_kind", "score") for p in top)
             self.progress = (f"완료: {len(symbols)}종목 분석 → 유동성 {len(pool)} → "
                              f"후보 {len(top)} (점수 {kinds['score']} · 무작위 "
-                             f"{kinds['random']}) · 지표 원장 {len(obs)}행")
+                             f"{kinds['random']}) · 지표 원장 {len(obs)}행"
+                             + (f" · 수급 실패 {flow_fail}" if flow_fail else ""))
             self.last_run = datetime.now(KST).isoformat(timespec="seconds")
             log.info("야간 발굴 %s", self.progress)
             return len(top)
