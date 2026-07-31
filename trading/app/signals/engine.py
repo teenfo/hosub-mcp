@@ -773,8 +773,12 @@ class SignalEngine:
         return n
 
     async def eod_backfill_loop(self, interval_sec: int = 120) -> None:
-        """평일 마감 후 1회. 재시작해도 당일 중복 실행하지 않는다."""
-        done_for = ""
+        """평일 마감 후 1회. **재시작해도** 당일 중복 실행하지 않는다.
+
+        완료 표시를 디스크에 둔다. 지역변수로 들고 있던 종전 구현은 재시작마다
+        초기화됐다 — 실측 2026-07-31: 배포 5회에 마감 백필이 5번 돌아 398종목
+        × 5 ≈ 2,000콜을 버렸다.
+        """
         while True:
             try:
                 cfg = settings.CONFIG.get("collection", {})
@@ -785,10 +789,10 @@ class SignalEngine:
                     and settings.KIWOOM_APP_KEY
                     and now.weekday() < 5
                     and now.strftime("%H:%M") >= cfg.get("eod_backfill_after", "15:35")
-                    and done_for != today
+                    and not await asyncio.to_thread(store.job_done, "eod_backfill", today)
                 ):
                     await self.eod_backfill_once()
-                    done_for = today
+                    await asyncio.to_thread(store.mark_job_done, "eod_backfill", today)
             except Exception:  # noqa: BLE001
                 log.exception("마감 백필 루프 오류")
             await asyncio.sleep(interval_sec)

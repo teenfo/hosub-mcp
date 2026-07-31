@@ -2,12 +2,14 @@
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from .. import settings
 
 DB_PATH = Path(settings.DATA_DIR) / "market.db"
+KST = ZoneInfo("Asia/Seoul")
 
 
 def _conn() -> sqlite3.Connection:
@@ -86,6 +88,36 @@ def prune_minutes(keep_days: int) -> int:
 # 0봉으로 끝난 시도를 몇 번까지 재시도할지. 상장폐지·거래정지 종목은 몇 번을
 # 불러도 0봉이므로 무한 재시도를 막아야 하고, 일시적 빈 응답은 살려야 한다.
 DEEP_MAX_ATTEMPTS = 3
+
+
+def job_done(job: str, day: str) -> bool:
+    """그 배치가 그날 이미 끝났는가 — **프로세스가 아니라 디스크에** 묻는다."""
+    with _conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS job_marks ("
+                     " job TEXT NOT NULL, d TEXT NOT NULL, done_at TEXT,"
+                     " PRIMARY KEY (job, d))")
+        return conn.execute("SELECT 1 FROM job_marks WHERE job=? AND d=?",
+                            (job, day)).fetchone() is not None
+
+
+def mark_job_done(job: str, day: str, now: str | None = None) -> None:
+    """하루 1회 배치의 완료 표시.
+
+    종전에는 루프의 지역변수(`done_for`)로만 들고 있었다. **재시작하면
+    초기화된다** — 실측 2026-07-31: 배포를 5번 하니 마감 백필이 5번 돌아
+    398종목 × 5 ≈ 2,000콜을 버렸다. 장중이 아니라 피해는 없었지만, 배포가
+    잦은 날 조용히 예산을 먹는다.
+
+    야간 발굴은 이 문제가 없다 — 그날 `picks` 가 DB 에 있으면 건너뛰기
+    때문이다. 결과가 DB 에 남지 않는 배치(마감 백필·수급)에 같은 성질을 준다.
+    """
+    with _conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS job_marks ("
+                     " job TEXT NOT NULL, d TEXT NOT NULL, done_at TEXT,"
+                     " PRIMARY KEY (job, d))")
+        conn.execute("INSERT OR REPLACE INTO job_marks (job, d, done_at)"
+                     " VALUES (?,?,?)",
+                     (job, day, now or datetime.now(KST).isoformat(timespec="seconds")))
 
 
 def deep_backfilled() -> set[str]:
