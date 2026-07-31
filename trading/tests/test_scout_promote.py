@@ -29,9 +29,11 @@ def _c(code="000001", score=0.9, price=10_000, groups=1, **kw):
                      else {"intraday": score / 2, "news": score / 2})
 
 
-def _cur(tier=None, since=None, protected=(), names=None):
+def _cur(tier=None, since=None, protected=(), names=None, held=()):
+    """`protected` 는 drop 금지(보유+수동), `held` 는 그중 demote 도 금지(보유만)."""
     return Current(tier=dict(tier or {}), since=dict(since or {}),
-                   protected=frozenset(protected), names=dict(names or {}))
+                   protected=frozenset(protected) | frozenset(held),
+                   held=frozenset(held), names=dict(names or {}))
 
 
 @pytest.fixture(autouse=True)
@@ -195,6 +197,82 @@ def test_trade_cap_blocks_new_trade_promotions():
                since={"000001": LONG_AGO, "000009": LONG_AGO})
     rows = _plan([_c(code="000001"), _c(code="000009")], cur, max_trade=1)
     assert _by(rows, "promote_trade") == []
+
+
+# --- ④-2 보호 종목도 매매 상한을 차지한다 (2026-07-31 교착) ---
+#
+# 승격은 매매 tier **전체**를 세고, 강등은 `live`(보호 제외)만 셌다. 그 비대칭이
+# 들어올 수도 나갈 수도 없는 상태를 만들었다:
+#   실측 — 매매 tier 28 · 보호 22 · 비보호 6 · max_trade 25
+#   승격: 28 >= 25 → 차단  /  강등: 6 - 25 = -19 → 0건
+# `promote_trade` 결정이 7/29 이후 0건이었고 같은 종목만 며칠씩 돌았다
+# (5일 106거래 / 고유 50종목, 상위 5종목이 27%·−34,642원).
+
+def test_보유_종목이_매매_상한을_차지한다():
+    """보유가 상한을 채우면 나머지는 0까지 밀린다 — 내릴 수 없는 쪽이 이긴다.
+
+    보유는 매매 tier 에서 내리면 분봉 백필 대상에서 빠져(`_collect_targets`)
+    청산 감시의 가격 폴백이 낡는다.
+    """
+    codes = ["000001", "000002", "000003"]
+    cur = _cur(tier={c: TRADE for c in codes},
+               since={c: LONG_AGO for c in codes},
+               protected={"000001", "000002"}, held={"000001", "000002"})
+    cands = [_c(code=c, score=0.9) for c in codes]
+    rows = _plan(cands, cur, max_trade=2)
+    # 보유 2 + 나머지 1 = 3 > 상한 2 → 1건이 내려간다
+    assert [r["code"] for r in _by(rows, "demote")] == ["000003"]
+
+
+def test_보유만으로_상한이_찼으면_나머지는_전부_내려간다():
+    cur = _cur(tier={"000001": TRADE, "000002": TRADE, "000003": TRADE},
+               since={c: LONG_AGO for c in ("000001", "000002", "000003")},
+               protected={"000001", "000002"}, held={"000001", "000002"})
+    cands = [_c(code=c, score=0.9) for c in ("000001", "000002", "000003")]
+    rows = _plan(cands, cur, max_trade=1)
+    assert [r["code"] for r in _by(rows, "demote")] == ["000003"]
+
+
+def test_수동은_매매_자리를_예약하지_않는다():
+    """사용자 결정 2026-07-31 — 수동은 관심 표시이지 매매 우선권이 아니다.
+
+    감시목록에서는 빠지지 않지만(정보 수집 계속) 상한이 모자라면 수집전용으로
+    내려간다. 실측: 매매 tier 28 중 22가 수동/seed 로 자리를 영구 점유했다.
+    """
+    codes = ["000001", "000002", "000003"]
+    cur = _cur(tier={c: TRADE for c in codes},
+               since={c: LONG_AGO for c in codes},
+               protected=set(codes))          # 전부 수동 — held 는 비어 있다
+    cands = [_c(code=c, score=0.9) for c in codes]
+    rows = _plan(cands, cur, max_trade=1)
+    assert len(_by(rows, "demote")) == 2, "수동이어도 상한 초과분은 내려간다"
+
+
+def test_수동은_감시목록에서는_빠지지_않는다():
+    """점수가 0이어도 drop 은 막는다 — 뉴스·공시가 계속 붙어야 한다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO},
+               protected={"000001"})
+    assert _by(_plan([], cur), "drop") == []
+
+
+def test_상한_안이면_보호가_있어도_강등하지_않는다():
+    """반대 방향 회귀 — 보호를 더한다고 멀쩡한 tier 를 깎으면 안 된다."""
+    cur = _cur(tier={"000001": TRADE, "000002": TRADE},
+               since={c: LONG_AGO for c in ("000001", "000002")},
+               protected={"000001"})
+    cands = [_c(code=c, score=0.9) for c in ("000001", "000002")]
+    assert _by(_plan(cands, cur, max_trade=5), "demote") == []
+
+
+def test_교착이_풀린다_승격과_강등이_같은_수를_본다():
+    """상한 초과 상태에서 강등이 나와야 다음 사이클에 승격 자리가 생긴다."""
+    trade = [f"0000{i:02d}" for i in range(1, 6)]      # 매매 5 (보호 3)
+    cur = _cur(tier={**{c: TRADE for c in trade}, "000099": COLLECT},
+               since={**{c: LONG_AGO for c in trade}, "000099": LONG_AGO},
+               protected=set(trade[:3]))
+    cands = [_c(code=c, score=0.9) for c in [*trade, "000099"]]
+    rows = _plan(cands, cur, max_trade=4)
+    assert len(_by(rows, "demote")) == 1, "5 > 4 이므로 비보호 하위 1건이 내려간다"
 
 
 # --- ⑤ 결정에 근거가 실린다 ---

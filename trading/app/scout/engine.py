@@ -105,8 +105,14 @@ def set_state(**patch) -> dict:
 def snapshot_current() -> Current:
     """지금 감시목록 상태 → 투영기 입력.
 
-    `protected` 에 보유 종목과 seed/manual 을 넣는다. 보유분이 감시목록에서
-    빠지면 청산 감시가 최대 15분 묵은 가격으로 돈다(watchlist._held 참조).
+    `protected`(감시목록에서 빼지 않음)에 보유 종목과 seed/manual 을 넣는다.
+    보유분이 감시목록에서 빠지면 청산 감시가 최대 15분 묵은 가격으로 돈다
+    (watchlist._held 참조).
+
+    `held` 는 그중 **매매 tier 에서도 내리지 않는** 것 — 보유만이다. 수동/seed 는
+    감시목록에는 남지만 매매 자리를 예약하지 않는다(사용자 결정 2026-07-31:
+    "수동 입력은 단순 관심 종목일 수 있으므로 특별 가중치를 두지 않는다.
+    다만 관련 정보를 계속 수집한다는 의미로 둔다").
     """
     from ..data import watchlist
 
@@ -121,15 +127,18 @@ def snapshot_current() -> Current:
         since[code] = _parse_ts(e.get("added"))
         if e.get("source") in ("seed", "manual"):
             protected.add(code)
+    held: set[str] = set()
     try:
         from ..trade import ledger
 
-        protected |= ledger.open_symbols()
+        held = set(ledger.open_symbols())
+        protected |= held
     except Exception:  # noqa: BLE001 - 조회 실패 시 아무것도 빼지 않는 쪽이 안전
         log.exception("보유 종목 조회 실패 — 이번 사이클은 강등하지 않는다")
         protected |= set(tier)
+        held = set(tier)
     return Current(tier=tier, since=since, protected=frozenset(protected),
-                   names=names)
+                   held=frozenset(held), names=names)
 
 
 def _parse_ts(raw) -> datetime:
