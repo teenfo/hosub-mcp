@@ -319,7 +319,9 @@ def _quoter(monkeypatch, calls, fail=()):
         return {"return_code": 0, "atn_stk_infr": [
             {"stk_cd": c, "stk_nm": f"종목{c}", "cur_prc": "-10100",
              "flu_rt": "-1.5", "cntr_str": "88.8", "trde_qty": "1000",
-             "trde_prica": "5000"} for c in codes]}
+             "trde_prica": "5000",
+             "buy_1th_bid": "-10000", "sel_1th_bid": "-10020"}  # 스프레드 0.2%
+            for c in codes]}
 
     monkeypatch.setattr(kc.client, "watch_info", wi)
     monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "K")
@@ -338,6 +340,29 @@ async def test_quotes_are_fetched_only_for_promotion_candidates(monkeypatch):
                           protected=frozenset(), names={})
     assert await e.refresh_quotes(cur) == 1
     assert calls == ["000001"]          # 수집 tier 인 것 하나만
+
+
+@pytest.mark.asyncio
+async def test_관측은_승격_판정과_무관하게_쌓인다(monkeypatch):
+    """`decisions` 에만 실으면 승격이 일어난 종목만 남는다.
+
+    실측 2026-07-31: 매매 tier 가 상한에 닿아 `promote_trade` 결정이 7/29 이후
+    0건이었고, 결정 15,939건 중 시세가 실린 것은 15건뿐이었다. 스프레드를 재려고
+    만든 경로가 데이터를 하나도 못 낸 것이다. 관측은 판정과 독립이어야 한다.
+    """
+    calls = []
+    _quoter(monkeypatch, calls)
+    e = _engine([_Src(model.VOLUME, [_sig("000001"), _sig("000002")])])
+    await e.collect_due()
+    e.candidates = scoring.aggregate(store.live(), datetime.now(UTC))
+    cur = promote.Current(tier={"000001": promote.COLLECT,
+                                "000002": promote.COLLECT},
+                          since={}, protected=frozenset(), names={})
+    await e.refresh_quotes(cur)          # 승격 결정은 한 건도 만들지 않는다
+    rows = {r["code"]: r for r in store.quote_stats()}
+    assert set(rows) == {"000001", "000002"}
+    assert rows["000001"]["spread_avg"] == pytest.approx(0.20, abs=1e-3)
+    assert rows["000001"]["name"] == "종목000001"
 
 
 @pytest.mark.asyncio
