@@ -104,11 +104,18 @@ def db(tmp_path, monkeypatch):
     monkeypatch.setattr(cases, "DB_PATH", tmp_path / "backtest.db")
 
 
-def _case(pos_id, day, rule="orb", hour=9, pnl=-1.0, lessons=None):
+def _case(pos_id, day, rule="orb", hour=9, pnl=-1.0, lessons=None, bars=20):
+    """봉이 2개 미만이면 이동폭을 낼 수 없다 — 측정치는 NULL 이어야 한다.
+    픽스처가 `bars=0` 인데 mfe 를 갖고 있으면 실제로 불가능한 상태를 테스트한다."""
+    measured = bars >= 2
     return {"pos_id": pos_id, "d": day, "symbol": "005930", "name": "삼성전자",
-            "rule": rule, "hour": hour, "pnl_pct": pnl, "bars": 20,
-            "mfe_pct": 1.0, "mae_pct": -1.5, "mfe_over_target": 0.4,
-            "mae_over_stop": 0.9, "entry_pos": 0.7, "mfe_3min": 0.2,
+            "rule": rule, "hour": hour, "pnl_pct": pnl, "bars": bars,
+            "mfe_pct": 1.0 if measured else None,
+            "mae_pct": -1.5 if measured else None,
+            "mfe_over_target": 0.4 if measured else None,
+            "mae_over_stop": 0.9 if measured else None,
+            "entry_pos": 0.7 if measured else None,
+            "mfe_3min": 0.2 if measured else None,
             "exit_reason": "stop", "lessons": lessons or ["테스트 라벨"]}
 
 
@@ -155,8 +162,34 @@ def test_누적_요약(db):
 
 def test_미측정_케이스는_요약에서_빠진다(db):
     """분봉이 없다고 케이스를 버리지는 않지만, 측정치 평균에 섞지도 않는다."""
-    cases.save([_case("a", "2026-08-03"), {**_case("b", "2026-08-03"), "bars": 0}])
+    cases.save([_case("a", "2026-08-03"), _case("b", "2026-08-03", bars=0)])
     assert cases.stats()["n"] == 1
+
+
+def test_봉이_1개면_측정치가_없고_못_간_건으로_세지_않는다(db):
+    """진입과 청산이 같은 분이면 bars=1 이라 이동폭을 낼 수 없다.
+    `bars > 0` 으로 거르고 NULL 을 0 으로 바꾸면 **'한 번도 유리하게 못 갔다'**
+    로 세어 버린다 — 실측 소급 적재에서 진짜 14건이 18건으로 부풀었다."""
+    cases.save([_case("a", "2026-08-03"), _case("b", "2026-08-03", bars=1)])
+    s = cases.stats()
+    assert s["n"] == 1                 # 측정된 것만 표본이다
+    assert s["never_up"] == 0          # NULL 을 0 으로 세지 않는다
+    assert cases.coverage() == {
+        "n": 2, "measured": 1, "unmeasured": 1, "measured_pct": 50.0,
+        "first_day": "2026-08-03", "last_day": "2026-08-03"}
+
+
+def test_비율의_분모를_함께_돌려준다(db):
+    """목표 도달률은 목표가 있는 건만, 손절 관통은 손절폭이 있는 건만이다 —
+    분모가 다른 지표를 같은 n 으로 나누면 비율이 틀린다."""
+    cases.save([
+        _case("a", "2026-08-03"),
+        {**_case("b", "2026-08-03"), "mfe_over_target": None},
+        {**_case("c", "2026-08-03"), "mae_over_stop": None},
+    ])
+    s = cases.stats()
+    assert s["n"] == 3
+    assert s["target_reached_of"] == 2 and s["stop_breached_of"] == 2
 
 
 def test_케이스가_없으면_빈_요약(db):
@@ -167,8 +200,8 @@ def test_커버리지는_미측정_건을_센다(db):
     """분봉이 없어 못 잰 건을 세지 않으면 평균이 조용히 '분봉 있는 종목' 쪽으로
     치우친다. 1분봉은 유니버스 전체가 아니라 감시목록·로스터에만 있다."""
     cases.save([_case("a", "2026-08-03"),
-                {**_case("b", "2026-08-03"), "bars": 0},
-                {**_case("c", "2026-08-04"), "bars": 0}])
+                _case("b", "2026-08-03", bars=0),
+                _case("c", "2026-08-04", bars=0)])
     cov = cases.coverage()
     assert cov["n"] == 3 and cov["measured"] == 1 and cov["unmeasured"] == 2
     assert cov["measured_pct"] == pytest.approx(33.3)
