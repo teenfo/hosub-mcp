@@ -678,7 +678,7 @@ async function renderWatchSection(container, ctx) {
 
 export default {
   id: "scout",
-  title: "발굴·감시",
+  title: "발굴 엔진",     // 메뉴 이름 — 사용자 확정 2026-08-01
   icon: "bi-binoculars",
   group: "트레이딩",
   aliases: ["discover"],      // 옛 페이지 해시(#/discover) 북마크 호환
