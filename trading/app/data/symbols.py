@@ -80,9 +80,28 @@ def resolve(query: str, limit: int = 20) -> list[dict]:
     return [dict(r) for r in like]
 
 
+def parse_stock_list(raw: dict) -> list[dict]:
+    """ka10099 응답에서 종목 배열 추출. 실제 응답은 배열 키 'list',
+    필드 code/name (문서의 stk_infr/stk_cd/stk_nm 과 다름 — 실호출 검증됨).
+    두 형식 모두 수용한다."""
+    items = None
+    for v in raw.values():
+        if isinstance(v, list) and v and isinstance(v[0], dict) and (
+            "code" in v[0] or "stk_cd" in v[0]
+        ):
+            items = v
+            break
+    out = []
+    for it in items or []:
+        code = str(it.get("code") or it.get("stk_cd") or "").lstrip("A_")
+        name = it.get("name") or it.get("stk_nm") or it.get("list_nm") or ""
+        if code.isdigit() and len(code) == 6:
+            out.append({"code": code, "name": name})
+    return out
+
+
 async def refresh() -> int:
     """ka10099 전종목 리스트로 마스터를 갱신. 반환: 종목 수."""
-    from ..scout.nightly import parse_stock_list  # 지연 임포트 (순환 방지)
     from ..kiwoom.client import client
 
     entries: list[dict] = []

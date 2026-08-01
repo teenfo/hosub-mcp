@@ -94,7 +94,7 @@ def test_config_can_override_lists():
 
 
 def test_default_cfg_reads_discovery_section():
-    """cfg 를 안 주면 config.yaml discovery 섹션을 쓴다 — 설정 자리가 하나다."""
+    """cfg 를 안 주면 config.yaml nightly 섹션을 쓴다 — 설정 자리가 하나다."""
     assert exclude.is_excluded("KODEX 레버리지") is True
 
 

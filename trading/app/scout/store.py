@@ -620,16 +620,30 @@ def purge(days: int = RETAIN_DAYS, now: datetime | None = None) -> int:
     with _conn() as conn:
         cur = conn.execute(
             "DELETE FROM signals WHERE observed_at < ? AND ttl_sec > 0", (cutoff,))
+        # ttl 0(수동 지정)도 정리한다 — ManualSource 가 300초마다 전 종목을
+        # 재기록해 종목당 288행/일이 **영구 면제**로 쌓이고 있었다(감사
+        # 2026-08-01 M9). live() 가 MAX(id) 만 읽으므로 코드·소스별 최신
+        # 1행만 남기면 의미가 보존된다.
+        n0 = conn.execute(
+            "DELETE FROM signals WHERE observed_at < ? AND ttl_sec <= 0"
+            " AND id NOT IN (SELECT MAX(id) FROM signals WHERE ttl_sec <= 0"
+            "                GROUP BY code, source)", (cutoff,))
         conn.execute("DELETE FROM decisions WHERE ts < ?", (cutoff,))
-    return cur.rowcount
+    return cur.rowcount + n0.rowcount
 
 
 # --- 결정 이력 ---------------------------------------------------------------
 
-def _decision_key(d: dict) -> tuple:
+def _decision_key(d: dict, applied: bool) -> tuple:
     """같은 결정인지 판별하는 키. **점수는 넣지 않는다** — 감쇠로 매 사이클
-    조금씩 움직이므로 점수를 넣으면 모든 행이 '새 결정' 이 된다."""
-    return (d["action"], d.get("from_tier"), d.get("to_tier"))
+    조금씩 움직이므로 점수를 넣으면 모든 행이 '새 결정' 이 된다.
+
+    `applied` 는 **넣는다**(감사 2026-08-01 H4). 안 넣으면 "적용 실패로
+    applied=0 기록 → 다음 사이클 재시도 성공" 의 성공 행이 같은 키로 삼켜져
+    `last_action_at`(applied=1 만 읽음)에 그 종목이 영영 안 잡히고, 회전이
+    승격 직후의 종목을 '침묵' 으로 오판해 바로 뺀다.
+    """
+    return (d["action"], d.get("from_tier"), d.get("to_tier"), 1 if applied else 0)
 
 
 def _last_keys(conn, codes: list[str]) -> dict[str, tuple]:
@@ -638,14 +652,16 @@ def _last_keys(conn, codes: list[str]) -> dict[str, tuple]:
         return {}
     marks = ",".join("?" * len(codes))
     rows = conn.execute(
-        f"SELECT code, action, from_tier, to_tier FROM decisions WHERE id IN ("
+        f"SELECT code, action, from_tier, to_tier, applied FROM decisions WHERE id IN ("
         f"  SELECT MAX(id) FROM decisions WHERE code IN ({marks}) GROUP BY code)",
         codes,
     ).fetchall()
-    return {r["code"]: (r["action"], r["from_tier"], r["to_tier"]) for r in rows}
+    return {r["code"]: (r["action"], r["from_tier"], r["to_tier"],
+                        1 if r["applied"] else 0) for r in rows}
 
 
-def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
+def log_decisions(rows: list[dict], mode: str,
+                  applied: bool | set | frozenset) -> int:
     """승격·강등 결정을 남긴다. **바뀔 때만 남긴다**(regime_log 와 같은 규약).
 
     shadow 에서도 남긴다 — 적용하지 않은 결정이야말로 "엔진이라면 이렇게 했을
@@ -661,10 +677,20 @@ def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
     """
     if not rows:
         return 0
+
+    # `applied` 는 배치 공용 bool(테스트·단순 호출) 또는 **적용된 코드 집합**
+    # (엔진 경로)이다. 종전에는 배치에 하나로 찍혀, 5건 중 1건만 성공해도
+    # 5건 전부 applied=1 이 됐다(감사 2026-08-01 H3) — collect 모드가 스킵한
+    # TRADE 결정까지 '적용됨' 으로 남아 회전 판정(last_action_at)이 오염됐다.
+    def _ok(d: dict) -> bool:
+        if isinstance(applied, (set, frozenset)):
+            return d["code"] in applied
+        return bool(applied)
+
     ts = datetime.now(UTC).isoformat()
     with _conn() as conn:
         last = _last_keys(conn, [d["code"] for d in rows])
-        fresh = [d for d in rows if last.get(d["code"]) != _decision_key(d)]
+        fresh = [d for d in rows if last.get(d["code"]) != _decision_key(d, _ok(d))]
         if not fresh:
             return 0
         # 시세 컬럼은 `DECISION_QUOTE_FIELDS` 로 **생성한다**. 손으로 나열하면
@@ -678,7 +704,7 @@ def log_decisions(rows: list[dict], mode: str, applied: bool) -> int:
             [(ts, d["code"], d.get("name"), d["action"], d.get("from_tier"),
               d.get("to_tier"), d.get("score"),
               json.dumps(sorted(d.get("sources") or []), ensure_ascii=False),
-              d.get("reason"), mode, 1 if applied else 0,
+              d.get("reason"), mode, 1 if _ok(d) else 0,
               *(d.get(f) for f in DECISION_QUOTE_FIELDS)) for d in fresh],
         )
     return len(fresh)

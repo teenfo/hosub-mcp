@@ -30,7 +30,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import pandas as pd
 
 from .. import export, settings
 from ..data import store
@@ -76,25 +75,9 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
-def parse_stock_list(raw: dict) -> list[dict]:
-    """ka10099 응답에서 종목 배열 추출. 실제 응답은 배열 키 'list',
-    필드 code/name (문서의 stk_infr/stk_cd/stk_nm 과 다름 — 실호출 검증됨).
-    두 형식 모두 수용한다."""
-    items = None
-    for v in raw.values():
-        if isinstance(v, list) and v and isinstance(v[0], dict) and (
-            "code" in v[0] or "stk_cd" in v[0]
-        ):
-            items = v
-            break
-    out = []
-    for it in items or []:
-        code = str(it.get("code") or it.get("stk_cd") or "").lstrip("A_")
-        name = it.get("name") or it.get("stk_nm") or it.get("list_nm") or ""
-        if code.isdigit() and len(code) == 6:
-            out.append({"code": code, "name": name})
-    return out
-
+# `parse_stock_list` 는 data/symbols.py 로 내렸다(2026-08-01 감사 — 응답
+# 파서가 scout 에 있으면 data 레이어가 scout 에 역의존한다). 재노출만 한다.
+from ..data.symbols import parse_stock_list  # noqa: E402,F401
 
 # 제외 정책은 data/exclude.py 가 단일 소스다 — scanner 와 서로 다르게 판정해
 # 실매수 사고가 났다(2026-07-27 462900 KoAct). 여기서는 재노출만 한다.
@@ -315,10 +298,14 @@ def compute_market(rows: list[dict], cfg: dict) -> dict:
     bmin = cfg.get("bearish_min_score", 2)
     bear = [r for r in base if r.get("bearish_score", 0) >= bmin]
     bear.sort(key=lambda r: (-r["bearish_score"], r.get("rs_20", 0)))
+    # `bearish_top_n` — 점수 표본 상한(top_n)과 **키를 공유하면 안 된다.**
+    # top_n 을 20→5 로 내린 근거(#242)는 점수 표본의 실거래 노출뿐인데, 같은
+    # 키를 읽던 이 슬라이스가 화면의 하락 후보 목록까지 5행으로 조용히 잘랐다
+    # (감사 2026-08-01). 두 자리는 서로 무관하다.
     bear_top = [{"code": r["code"], "name": r["name"], "close": r["close"],
                  "bearish_score": r["bearish_score"], "rs_20": r["rs_20"],
                  "near_low60_pct": r.get("near_low60_pct")}
-                for r in bear[: cfg.get("top_n", 20)]]
+                for r in bear[: cfg.get("bearish_top_n", 20)]]
     return {
         "regime": regime, "breadth_ma60": breadth60, "breadth_ma20": breadth20,
         "median_ret20": round(med20, 1), "analyzed": len(base),
@@ -329,9 +316,9 @@ def compute_market(rows: list[dict], cfg: dict) -> dict:
 def latest_picks() -> tuple[str | None, list[dict]]:
     """가장 최근 발굴일의 후보 목록 — **인스턴스 없이** DB 만 읽는다.
 
-    `Discovery` 싱글턴은 `main` 에 있어서, 그것을 통해 읽으면 어댑터가 main 을
+    `Nightly` 싱글턴은 `main` 에 있어서, 그것을 통해 읽으면 어댑터가 main 을
     임포트하게 되고 순환 참조가 된다. 발굴 엔진 어댑터는 진행률·국면이 아니라
-    후보만 필요하므로 여기서 끊는다. `Discovery.latest()` 도 이 함수를 쓴다.
+    후보만 필요하므로 여기서 끊는다. `Nightly.latest()` 도 이 함수를 쓴다.
     """
     with _conn() as conn:
         row = conn.execute("SELECT MAX(date) AS d FROM picks").fetchone()
@@ -388,7 +375,7 @@ class Nightly:
 
     async def run_once(self) -> int:
         """전종목 수집 + 스크리닝. 반환: 발굴 종목 수."""
-        from ..kiwoom.client import client  # 지연 임포트
+        from ..kiwoom.client import client  # 함수 스코프 — 테스트가 client 를 갈아끼운다
 
         if self.running:
             return 0
@@ -526,9 +513,9 @@ class Nightly:
                 ):
                     if self.latest().get("date") == today:
                         done_for = today  # 이미 오늘 실행됨 (재시작 후 중복 방지)
-                        continue
-                    await self.run_once()
-                    done_for = today
+                    else:
+                        await self.run_once()
+                        done_for = today
             except Exception:  # noqa: BLE001
                 log.exception("야간 발굴 오류")
             await asyncio.sleep(300)

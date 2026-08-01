@@ -30,6 +30,7 @@
     이어졌던 결함이다).
   - seed/manual — 사용자 의도를 엔진이 덮어쓰지 않는다.
 """
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -53,17 +54,24 @@ def in_session(now: datetime | None = None) -> bool:
 
 
 def session_open_before(now: datetime, sessions: int) -> datetime:
-    """`sessions`번째 직전 개장 시각(KST). probation 의 기준선이다.
+    """`sessions`번째 직전 **완료된** 세션의 개장 시각(KST). probation 기준선.
 
-    1 이면 가장 최근 개장(오늘 09:00 이후면 오늘, 아니면 직전 평일).
-    휴장일 캘린더는 없다 — 평일만 센다. 공휴일이 끼면 probation 이 하루
-    후해지는(길어지는) 쪽으로 틀리므로 보수적이다.
+    '완료' 가 핵심이다(감사 2026-08-01 M1·M2). 진행 중인 오늘 세션을 세면
+    기준선이 09:00 정각에 오늘로 점프해 — 08:59 편입이 09:00:00 에 통과하고,
+    주말·금요일 저녁 유입분(야간 배치 픽 최대 45건)이 **월요일 개장 첫
+    사이클에 전부 통과**한다. probation 의 목적("한 세션 관측된 종목만
+    매매로")이 정확히 그 지점에서 무너진다.
+
+    그래서 오늘은 마감(15:30) 후에만 센다. probation_sessions=1 의 실효:
+    주말·야간 유입분은 월요일 하루를 수집 tier 로 관측된 뒤 화요일에 승격
+    가능해진다. 휴장일 캘린더는 없다 — 공휴일이 끼면 길어지는(보수적인)
+    쪽으로 틀린다.
     """
     t = now.astimezone(KST)
     opens = 0
     day = t.date()
-    if t.weekday() >= 5 or t.strftime("%H:%M") < SESSION[0]:
-        day -= timedelta(days=1)     # 오늘 개장 전이거나 주말 — 오늘은 안 센다
+    if t.weekday() >= 5 or t.strftime("%H:%M") < SESSION[1]:
+        day -= timedelta(days=1)     # 오늘 세션은 아직 완료가 아니다
     while True:
         if day.weekday() < 5:
             opens += 1
@@ -98,6 +106,9 @@ DEFAULTS = {
     "silent_dwell_min": 390,     # 1거래일. 0 이면 회전 끔
     "silent_cooldown_min": 390,  # 밀려난 뒤 재승격 금지 기간
     "max_rotate": 3,             # 사이클당 회전 상한 — MAX_SHRINK 와 같은 서킷브레이커
+    # 상한 초과 강등의 사이클당 상한 — max_trade 급락·held 오산으로 매매 tier 를
+    # 한 사이클에 통째로 비우지 못하게 한다(진단 2026-08-01 M6)
+    "max_demote": 10,
 }
 
 
@@ -129,6 +140,9 @@ class Current:
     trade_since: dict[str, datetime] = field(default_factory=dict)
     last_signal: dict[str, datetime] = field(default_factory=dict)
     demoted_at: dict[str, datetime] = field(default_factory=dict)
+    # 회전 재료(위 세 dict)를 실제로 읽어 왔는가. False 면 회전을 멈춘다 —
+    # 빈 dict 를 '전부 침묵' 으로 읽는 사고를 막는다(감사 2026-08-01 H5).
+    rotation_ready: bool = True
 
 
 def _tradable(c: Candidate, cap: float) -> tuple[bool, str]:
@@ -193,6 +207,16 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
         t = cur.since.get(code)
         return t is None or t <= prob_line
 
+    # 동점 축출 tie-break — 일자 시드 셔플. NIGHTLY_STRENGTH 단일화로 야간
+    # 팔 45건이 전부 동점이 됐는데, 종전 tie-break(코드 오름차순)면 상한 축출이
+    # **종목코드 순으로 결정론**이 되어 무작위 대조군 표본의 생존 여부가
+    # 무작위가 아니게 된다(감사 2026-08-01 M5). 일자 시드라 같은 날 안에서는
+    # 안정적(진동 없음)이고 날이 바뀌면 순서가 섞인다.
+    _day = now.astimezone(KST).date().isoformat()
+
+    def shuffle_key(code: str) -> str:
+        return hashlib.md5(f"{_day}:{code}".encode()).hexdigest()
+
     # --- 기회비용 회전 ---
     silent_min = float(conf.get("silent_dwell_min", 0) or 0)
     cool = timedelta(minutes=float(conf.get("silent_cooldown_min", 0) or 0))
@@ -204,8 +228,8 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
         쓰면 어제 편입돼 오늘 자리를 받은 종목이 즉시 '오래 앉았다' 가 된다.
         원장에 없으면 편입 시각으로 폴백한다 — 엔진 이전에 들어온 종목이다.
         """
-        if silent_min <= 0:
-            return False
+        if silent_min <= 0 or not cur.rotation_ready:
+            return False                   # 재료가 없으면 침묵 판정 자체를 안 한다
         got = cur.trade_since.get(code) or cur.since.get(code)
         if got is None or (now - got) < timedelta(minutes=silent_min):
             return False                   # 아직 기회를 다 쓰지 않았다
@@ -218,6 +242,7 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
         return bool(cool) and t is not None and (now - t) < cool
 
     # --- 승격 ---
+    promoted_now: set[str] = set()     # 이번 사이클 승격분 — 회전 계산이 쓴다
     trade_now = sum(1 for t in cur.tier.values() if t == TRADE)
     total_now = sum(1 for t in cur.tier.values() if t != NONE)
     for c in cands:
@@ -245,6 +270,7 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
             if trade_now >= conf["max_trade"]:
                 continue
             trade_now += 1
+            promoted_now.add(c.code)
             out.append(_dec(c, "promote_trade", tier, TRADE,
                             f"체결가능 {c.live_price:,.0f}원 · 수집 체류 완료"))
 
@@ -279,7 +305,8 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     # 누구를 올릴지가 아니라 자리가 모자랄 때 누구를 뺄지.
     live = [code for code, t in cur.tier.items()
             if t != NONE and code not in dropped and code not in cur.protected]
-    live.sort(key=lambda code: (by_code[code].score if code in by_code else 0.0, code))
+    live.sort(key=lambda code: (by_code[code].score if code in by_code else 0.0,
+                                shuffle_key(code)))
     # 보호 종목은 **감시목록에 있는 것만** 센다. `protected` 에는 보유 종목이
     # 통째로 들어오는데(ledger.open_symbols) 감시목록 밖 보유(수동 매수 등)가
     # 섞이면 합계가 실제 감시목록보다 커져 비보호 종목을 과잉 drop 한다.
@@ -316,11 +343,15 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     # 상위에 계속 있는 종목은 계속 눈에 띈다. 자리의 목적은 신호 탐지다.
     in_trade.sort(key=lambda code: (not silent(code),
                                     by_code[code].score if code in by_code else 0.0,
-                                    code))
+                                    shuffle_key(code)))
     held_trade = sum(1 for code, t in cur.tier.items()
                      if t == TRADE and code in cur.held)
     over_t = len(in_trade) + held_trade - int(conf["max_trade"])
     demoted: set[str] = set()
+    # 사이클당 상한 — MAX_SHRINK(drop)와 같은 서킷브레이커가 여기엔 없었다
+    # (감사 2026-08-01 M6). max_trade 를 런타임에 확 낮추거나 held 계산이
+    # 튀어도 한 사이클에 매매 tier 를 통째로 비우지 못하게 한다.
+    over_t = min(over_t, int(conf.get("max_demote", 10)))
     for code in in_trade[:max(0, over_t)]:
         demoted.add(code)
         c = by_code.get(code)
@@ -339,13 +370,22 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     # 지목했는데 실제로 거래된 것은 50종목이다.
     rotate = int(conf.get("max_rotate", 0) or 0)
     if rotate > 0 and over_t <= 0:
+        # 대기자는 **승격의 네 게이트를 전부 통과한 종목**만 센다. probation 이
+        # 빠져 있던 종전에는 "채울 수 없는 자리를 비우는" 회전이 가능했다 —
+        # 오늘 장중 편입분이 대기자를 부풀리고, 밀려난 종목은 쿨다운 390분에
+        # 잠기는데 그 자리는 오늘 중 채워질 수 없었다(감사 2026-08-01 H1).
+        # 이번 사이클 승격분(promoted_now)도 뺀다 — cur.tier 스냅샷에는 아직
+        # COLLECT 라 대기자이면서 동시에 빈자리로 이중 계상됐다(H2).
         waiting = [c.code for c in cands
                    if cur.tier.get(c.code) == COLLECT
                    and c.code not in dropped
+                   and c.code not in promoted_now
                    and not cooling(c.code)
                    and held_long_enough(c.code)
+                   and probation_done(c.code)
                    and _tradable(c, cap)[0]]
-        room = int(conf["max_trade"]) - (len(in_trade) + held_trade)
+        room = int(conf["max_trade"]) - (len(in_trade) + held_trade
+                                         + len(promoted_now))
         need = min(len(waiting) - max(0, room), rotate)
         if need > 0:
             for code in [x for x in in_trade if silent(x) and x not in demoted][:need]:
