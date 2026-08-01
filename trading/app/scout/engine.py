@@ -140,6 +140,7 @@ def snapshot_current() -> Current:
     trade_since: dict[str, datetime] = {}
     last_signal: dict[str, datetime] = {}
     demoted_at: dict[str, datetime] = {}
+    rotation_ready = True
     try:
         from .. import journal
 
@@ -147,11 +148,17 @@ def snapshot_current() -> Current:
         demoted_at = store.last_action_at("demote")
         last_signal = journal.last_signal_at()
     except Exception:  # noqa: BLE001 - 회전은 부가 기능이다
+        # **플래그를 내려야 실제로 회전이 멈춘다.** 종전에는 빈 dict 로 두고
+        # 문구만 "회전하지 않는다" 였는데, silent() 는 재료가 없으면 편입
+        # 시각으로 폴백하고 last_signal 도 비어 **전 종목이 침묵으로 분류**됐다
+        # — DB 잠금 한 번에 매매 tier 가 사이클당 3건씩 강등될 수 있었다
+        # (감사 2026-08-01 H5).
+        rotation_ready = False
         log.exception("회전 판정 재료 조회 실패 — 이번 사이클은 회전하지 않는다")
     return Current(tier=tier, since=since, protected=frozenset(protected),
                    held=frozenset(held), names=names,
                    trade_since=trade_since, last_signal=last_signal,
-                   demoted_at=demoted_at)
+                   demoted_at=demoted_at, rotation_ready=rotation_ready)
 
 
 def _parse_ts(raw) -> datetime:
@@ -162,14 +169,19 @@ def _parse_ts(raw) -> datetime:
         return datetime.now(UTC)      # 알 수 없으면 '방금' — 체류시간 보호가 걸린다
 
 
-async def apply(decisions: list[dict]) -> int:
-    """결정을 감시목록에 반영한다. **모드가 허용하는 것만.**"""
+async def apply(decisions: list[dict]) -> frozenset[str]:
+    """결정을 감시목록에 반영한다. **모드가 허용하는 것만.**
+
+    반환은 **실제로 반영된 코드 집합**이다. 건수(int)였을 때는 배치에 5건 중
+    1건만 성공해도 로그가 5건 전부 applied=1 로 남았고(감사 2026-08-01 H3),
+    그 오염이 회전 판정(last_action_at → silent)까지 흘렀다.
+    """
     from ..data import watchlist
 
     m = mode()
     if m == "shadow" or frozen():
-        return 0
-    applied = 0
+        return frozenset()
+    done: set[str] = set()
     for d in decisions:
         to = d["to_tier"]
         if m == "collect" and (to == TRADE or d["from_tier"] == TRADE):
@@ -182,12 +194,12 @@ async def apply(decisions: list[dict]) -> int:
                 watchlist.set_mode(d["code"], collect_only=(to == COLLECT))
             else:
                 watchlist.set_mode(d["code"], collect_only=(to == COLLECT))
-            applied += 1
+            done.add(d["code"])
         except Exception:  # noqa: BLE001 - 한 종목 실패가 나머지를 막지 않는다
             log.exception("감시목록 반영 실패: %s", d["code"])
-    if applied:
+    if done:
         await watchlist.notify()
-    return applied
+    return frozenset(done)
 
 
 # ka10095 한 콜에 넣을 종목 수 상한. 89종목은 실측으로 확인했고(2026-07-30),
@@ -341,12 +353,12 @@ class Engine:
         rows = self.project(now, cur)
         self.last_decisions = rows
         applied = await apply(rows)
-        store.log_decisions(rows, mode=mode(), applied=bool(applied))
+        store.log_decisions(rows, mode=mode(), applied=applied)
         self.last_cycle = datetime.now(KST).isoformat(timespec="seconds")
         if rows:
             log.info("발굴 엔진(%s): 신호 %d · 결정 %d · 반영 %d",
-                     mode(), got, len(rows), applied)
-        return {"signals": got, "decisions": len(rows), "applied": applied}
+                     mode(), got, len(rows), len(applied))
+        return {"signals": got, "decisions": len(rows), "applied": len(applied)}
 
     async def loop(self, interval_sec: int = 30) -> None:
         purged_for = ""
@@ -355,19 +367,22 @@ class Engine:
                 if settings.CONFIG.get("scout", {}).get("enabled", True):
                     await self.run_once()
                     self.last_error = ""
-                    # 원장 정리 — 하루 1회. `purge()` 는 정의만 있고 호출부가
-                    # 없어 scout.db 가 무한 성장하고 있었다(감사 2026-08-01).
-                    # 멱등·저비용이라 재시작 후 재실행돼도 무해하다.
-                    today = datetime.now(KST).date().isoformat()
-                    if purged_for != today:
-                        n = await asyncio.to_thread(store.purge)
-                        purged_for = today
-                        if n:
-                            log.info("신호 원장 정리 — %d행 (보존 %d일)",
-                                     n, store.RETAIN_DAYS)
             except Exception as e:  # noqa: BLE001
                 self.last_error = str(e)
                 log.exception("발굴 엔진 오류")
+            try:
+                # 원장 정리 — 하루 1회. run_once 와 **다른 try** 다: 같은 블록에
+                # 두면 run_once 예외가 그날 정리를 영영 막고, 정리 실패가
+                # last_error 를 '엔진 오류' 로 오염시킨다(감사 2026-08-01 L3).
+                today = datetime.now(KST).date().isoformat()
+                if purged_for != today:
+                    n = await asyncio.to_thread(store.purge)
+                    purged_for = today
+                    if n:
+                        log.info("신호 원장 정리 — %d행 (보존 %d일)",
+                                 n, store.RETAIN_DAYS)
+            except Exception:  # noqa: BLE001 - 정리 실패가 엔진을 멈추지 않는다
+                log.exception("신호 원장 정리 실패 — 내일 다시 시도")
             await asyncio.sleep(interval_sec)
 
     # --- 상태 ---

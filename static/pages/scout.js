@@ -114,11 +114,11 @@ async function renderWatchSection(container, ctx) {
     let watchRows = [];      // 감시목록 원본 (필터가 다시 그린다)
     const invalidateSources = () => {
       changed.invalidate("source:scan");
-      changed.invalidate("source:disc");
+      changed.invalidate("source:nightly");
     };
     const afterWatchChange = () => {
       invalidateSources();             // '감시중' 표시가 바뀌므로 후보 표도 다시 그린다
-      loadWatch(); loadScanner(); loadDiscovery();
+      loadWatch(); loadScanner(); loadNightly();
     };
 
     // ==================================================================
@@ -278,7 +278,7 @@ async function renderWatchSection(container, ctx) {
     runBtn.onclick = async () => {
       if (!confirm("전종목 일봉 수집·분석을 시작할까요? (약 10~15분, 주문 없음)")) return;
       try { await postJSON("/api/trading/nightly/run"); } catch (e) { alert(e.message); }
-      loadDiscovery();
+      loadNightly();
     };
     statusC.body.append(stRegime, stCounts, stMeta,
       el("div", { class: "mt-2" }, runBtn));
@@ -427,7 +427,7 @@ async function renderWatchSection(container, ctx) {
       watch = Object.fromEntries(w.entries.map((e) => [e.code, e.name]));
       if (changed("watchCodes", codesKey)) {
         invalidateSources();
-        loadScanner(); loadDiscovery();
+        loadScanner(); loadNightly();
       }
       const wKey = w.entries.map((e) =>
         `${e.code}:${e.name}:${e.source}:${e.collect_only ? 1 : 0}`).join("|");
@@ -602,10 +602,10 @@ async function renderWatchSection(container, ctx) {
         ]))) : emptyRow("조건에 맞는 종목 없음"), ps.length);
     };
 
-    const loadDiscovery = async () => {
+    const loadNightly = async () => {
       let d;
       try { d = await fetchJSON("/api/trading/nightly"); } catch (e) { return; }
-      if (!changed("source:disc", d)) return;
+      if (!changed("source:nightly", d)) return;
 
       // 시장 국면
       const mk = d.market || {};
@@ -671,10 +671,10 @@ async function renderWatchSection(container, ctx) {
       });
     };
 
-    await Promise.all([loadWatch(), loadScanner(), loadDiscovery(), loadReport()]);
+    await Promise.all([loadWatch(), loadScanner(), loadNightly(), loadReport()]);
     ctx.addTimer(setInterval(refreshPrices, 2_000));
     ctx.addTimer(setInterval(loadScanner, 10_000));
-    ctx.addTimer(setInterval(() => { loadWatch(); loadDiscovery(); }, 30_000));
+    ctx.addTimer(setInterval(() => { loadWatch(); loadNightly(); }, 30_000));
     ctx.addTimer(setInterval(loadReport, 300_000));
 }
 

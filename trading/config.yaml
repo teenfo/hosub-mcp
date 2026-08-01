@@ -76,7 +76,10 @@ gainers:
 # 바꿨다(discovery → nightly). DB 파일명(discovery.db)과 무작위 시드 문자열은
 # 데이터 연속성 때문에 그대로다.
 nightly:
-  enabled: true
+  enabled: true                 # 야간 **배치** 스위치 (수집·표본 선정)
+  # 엔진 소비자(NightlySource) 스위치 — 배치와 별개다. 배치를 하루 꺼도
+  # 전날 picks 는 계속 신호로 올라간다(감사 2026-08-01 분리).
+  source_enabled: true
   vol_surge_ratio: 3.0          # 전일 거래량 ≥ 20일 평균 × N
   near_high_ratio: 0.97         # 60일 고가 대비 종가 비율
   min_price: 1000
@@ -138,6 +141,9 @@ nightly:
   # auto_watch(상위 5 직접 편입)는 2026-08-01 완전 통합에서 삭제 — 편입은
   # 엔진 단일 통로다(NightlySource 가 picks 를 신호로 올린다).
   bearish_min_score: 2          # 하락(숏) 후보 최소 점수(역배열·저점근접·60이평 하회 중)
+  # 하락 후보 표시 상한 — top_n(점수 표본)과 무관하다. 종전에는 top_n 을
+  # 공유해 #242 의 20→5 축소가 화면 하락 목록까지 잘랐다(감사 2026-08-01).
+  bearish_top_n: 20
   regime:                       # 시장 국면 판정(60이평 상회 종목 비율=breadth 기준)
     bull_breadth: 60            # 이 이상이면 강세장
     bear_breadth: 40            # 이 이하면 약세장 (사이는 중립)
@@ -574,6 +580,7 @@ scout:
   silent_dwell_min: 390       # 1거래일. 0 이면 회전 끔
   silent_cooldown_min: 390    # 밀려난 뒤 재승격 금지(없으면 즉시 복귀해 무의미)
   max_rotate: 3               # 사이클당 회전 상한 — 소스 장애로 인한 대량 회전 방어
+  max_demote: 10              # 상한 초과 강등의 사이클당 상한 — 매매 tier 일괄 붕괴 방어
   # --- 관측 전용 (2026-07-31) ---
   # 소스가 **아니다.** 신호를 내지 않고 원장에만 쌓인다 — 점수·승격 경로에
   # 닿지 않는다. 기관 순매수가 좋은 신호인지 나쁜 신호인지 측정된 적이 없고,

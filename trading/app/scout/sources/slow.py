@@ -4,6 +4,7 @@
 news 12시간) 한 번 들어온 종목이 그날 내내 후보로 남는다.
 """
 import logging
+from datetime import datetime
 
 from ... import settings
 from .. import model
@@ -29,7 +30,10 @@ class NightlySource:
         return settings.CONFIG.get("nightly", {})
 
     def enabled(self) -> bool:
-        return bool(self._cfg().get("enabled", True))
+        # 배치(`nightly.enabled`)와 **다른 키**다. 편입이 엔진 단일 통로가 된
+        # 지금, 배치를 하루 끄는 결정이 전날 picks 소비까지 멎게 하면 감시목록이
+        # 조용히 마른다(감사 2026-08-01). 소비자는 따로 끈다.
+        return bool(self._cfg().get("source_enabled", True))
 
     def interval_sec(self) -> int:
         return 1_800        # 30분마다 확인 — 배치가 끝났는지 보는 것뿐이라 싸다
@@ -38,6 +42,18 @@ class NightlySource:
         from ..nightly import latest_picks
 
         date, picks = latest_picks()
+        # **observed_at 은 배치 시각(그날 17:30 KST)이다 — 지금이 아니다.**
+        # 종전에는 30분마다 재수집하며 now 로 재스탬프해서 신호 나이가 항상
+        # ≤1800초였다: TTL 86400 은 영원히 안 닿고 half-life 감쇠도 하한
+        # 0.6575 에 고정돼 죽은 값이었다(감사 2026-08-01 M3). 배치가 며칠
+        # 실패해도 묵은 픽이 만점으로 계속 재주입됐다. 배치 시각으로 고정하면
+        # 감쇠·만료가 실제로 작동한다 — 새 배치가 없으면 다음 날 저녁 자연
+        # 만료되고, 아침(약 15.5시간)에는 0.667×0.64≈0.43 로 승격선(0.35)을
+        # 아직 넘는다.
+        try:
+            batch_at = datetime.fromisoformat(f"{date}T17:30:00+09:00")
+        except (TypeError, ValueError):
+            batch_at = None
         out: list[Signal] = []
         for p in picks:
             if not p.get("code"):
@@ -59,6 +75,7 @@ class NightlySource:
                 price=float(p.get("close", 0) or 0),
                 evidence={"date": date, "pick_kind": p.get("pick_kind") or "score",
                           "reasons": p.get("reasons") or []},
+                **({"observed_at": batch_at} if batch_at else {}),
             ))
         return out
 

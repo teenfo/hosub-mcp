@@ -95,11 +95,12 @@ async def collect_once(now: datetime | None = None) -> dict:
 async def loop(interval_sec: int = 300) -> None:
     """평일 마감 후 1회 — eod_backfill(15:35)이 분봉을 확정한 **뒤**여야 한다.
 
-    콜 0 짜리 계산이라 전면 실패 재시도 상한은 두지 않는다(flows 와 다른 점 —
-    그쪽은 실패 재시도가 API 예산을 태운다).
+    전면 실패(전 종목 ok=False)는 3회까지 재시도하고 그날은 접는다 — 콜 0
+    이어도 5분마다 200종목 × 3,900봉 DB 읽기는 공짜가 아니다(감사 M12).
     """
     from ..data import store as bars_store
 
+    fails: dict[str, int] = {}
     while True:
         try:
             now = datetime.now(store.KST)
@@ -109,8 +110,14 @@ async def loop(interval_sec: int = 300) -> None:
                     and not await asyncio.to_thread(
                         bars_store.job_done, JOB, today)):
                 got = await collect_once(now)
-                if got["profile"] or got["vpin"] or got["symbols"] == 0:
+                # 전 종목이 ok=False(분봉 부족 등)면 재시도하되 3회 상한 —
+                # 무한 반복이면 마감 후 자정까지 5분마다 200종목 × 3,900봉
+                # DB 읽기를 돌린다(감사 2026-08-01 M12). 콜 0 이어도 공짜가 아니다.
+                if (got["profile"] or got["vpin"] or got["symbols"] == 0
+                        or fails.get(today, 0) >= 2):
                     await asyncio.to_thread(bars_store.mark_job_done, JOB, today)
+                else:
+                    fails = {today: fails.get(today, 0) + 1}
         except Exception:  # noqa: BLE001
             log.exception("분봉 관측 루프 오류")
         await asyncio.sleep(interval_sec)

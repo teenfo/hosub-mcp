@@ -18,7 +18,10 @@ from app.scout.scoring import Candidate
 # 세션 안이어야 한다 — 밖이면 강등 테스트가 전부 무효가 된다.
 NOW = datetime(2026, 7, 27, 1, 0, tzinfo=UTC)
 AFTER_CLOSE = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)     # 19:00 KST
-LONG_AGO = NOW - timedelta(hours=2)
+# probation 이 '완료된 세션' 기준(감사 H1·M1·M2 수정)이 되면서 '충분히
+# 오래 전' 은 지난 세션 개장 이전이어야 한다. NOW(월 10:00 KST) 기준
+# 나흘 전 = 지난 목요일 — dwell·probation 둘 다 여유 있게 통과한다.
+LONG_AGO = NOW - timedelta(days=4)
 
 
 def _c(code="000001", score=0.9, price=10_000, groups=1, **kw):
@@ -111,18 +114,26 @@ def test_probation_blocks_immediate_trade_promotion():
     assert _by(_plan([_c()], cur), "promote_trade") == []
 
 
-def test_probation_은_세션_단위다_같은_날_편입은_차단():
-    """15분 dwell 을 넘겨도 **오늘 개장 후 편입**이면 매매로 못 간다.
+def test_probation_은_완료된_세션_기준이다():
+    """기준선은 **완료된** 세션의 개장이다(감사 2026-08-01 M1·M2 수정).
 
-    probation_sessions 는 config·주석에만 있고 코드가 안 읽던 죽은 키였다
-    (감사 2026-08-01) — 신규 종목이 편입 15분 뒤 매매 tier 까지 갈 수 있었다.
-    NOW 는 월요일 10:00 KST 다. 09:30 KST 편입(30분 전, dwell 통과)은 오늘
-    개장(09:00) **뒤**라 1세션을 못 채웠다.
+    진행 중인 오늘 세션을 세면 기준선이 09:00 정각에 점프해 — 주말·금요일
+    저녁 유입분(야간 배치 픽 최대 45건)이 월요일 개장 첫 사이클에 전부
+    통과했다. NOW 는 월요일 10:00 KST: 기준선은 **지난 금요일 09:00** 이다.
     """
+    # 오늘(월) 09:30 편입 — 차단
     cur = _cur(tier={"000001": COLLECT},
                since={"000001": NOW - timedelta(minutes=30)})
     assert _by(_plan([_c()], cur), "promote_trade") == []
-    # 개장 전(08:00 KST) 편입은 통과 — LONG_AGO 가 그 값이다
+    # 개장 1분 전(월 08:59) 편입 — 종전에는 09:00:00 에 통과하던 구멍. 차단
+    cur = _cur(tier={"000001": COLLECT},
+               since={"000001": NOW - timedelta(hours=1, minutes=1)})
+    assert _by(_plan([_c()], cur), "promote_trade") == []
+    # 주말(일요일) 편입 — 월요일 내내 차단(한 세션 관측 후 화요일 통과)
+    cur = _cur(tier={"000001": COLLECT},
+               since={"000001": NOW - timedelta(days=1)})
+    assert _by(_plan([_c()], cur), "promote_trade") == []
+    # 지난 목요일 편입 — 금요일 세션을 관측했으므로 통과
     ok = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
     assert len(_by(_plan([_c()], ok), "promote_trade")) == 1
 

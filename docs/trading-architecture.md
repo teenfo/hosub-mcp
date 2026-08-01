@@ -9,7 +9,7 @@
 ```
 [키움 REST/WS] ──시세──> collector(1분봉 집계) ──> store(SQLite bars)
       │                                              │
-      │  야간(17:30) 전종목 일봉 ──> discovery ──> features.csv + market(국면)
+      │  야간(17:30) 전종목 일봉 ──> scout/nightly(배치) ──> picks + features.csv + market(국면)
       │                                              │
       ▼                                              ▼
    engine.run_once(60초, 장중) ── rules.REGISTRY 평가 ──> 신호
@@ -26,8 +26,8 @@
 |---|---|---|---|
 | `engine.loop` | 60초 | 평일 09:00~15:30 | 감시목록 백필 + 규칙 평가 + 승인대기 생성 |
 | `engine.roster_loop` | 15분 | 평일 09:00~15:40 | 감시목록 이탈 종목 백필(수집 연속성, 유예 30일) |
-| `scanner.loop` | 60초 | 평일 장중 | 거래대금상위·거래량급증·KOSPI 급등률(자동편입) |
-| `discovery.loop` | 매일 | 평일 17:30 | 전종목 일봉 수집·스크리닝·국면 산출·auto 편입 |
+| `scanner.loop` | 60초 | 평일 장중 | 거래대금상위·거래량급증·급등률 조회·필터(표시·엔진 입력 — 직접 편입 없음) |
+| `nightly.loop` | 매일 | 평일 17:30 | 전종목 일봉 수집·3팔 표본(점수·조건식·무작위)·국면 산출 — **감시목록 직접 편입 없음**(엔진 단일 통로) |
 | `reporter.loop` | 매일 | 평일 15:40 | 분봉 축적분 자동 백테스트 리포트 |
 | `_ledger_loop` | 30초 | 장중 | 손절 자동청산(B모드)·목표 도달 청산 승인 제안 |
 | WS feed | 실시간 | 장중 | 감시목록 체결틱 → 1분봉 집계 + 주문체결 수신 |
@@ -64,7 +64,7 @@
 
 `유효국면 = anchor(야간리포트 편향 ?? 전일 breadth) ± 당일 시가갭 보정` (약세/중립/강세)
 
-- **전일 breadth**: discovery 가 산출(60일선 상회 비율; `datasets/latest.json → market.regime`)
+- **전일 breadth**: scout/nightly 배치가 산출(60일선 상회 비율; `datasets/latest.json → market.regime`)
 - **당일 시가갭**: 감시목록 시가갭 중앙값(±0.5% 임계)
 - **야간리포트 편향**: `/data/trading/night_bias.json` `{date, regime, reason, us_close}` — Cowork 야간 작업이 미국장 분석 후 기록(Notion 룰 3.5·5단계). date=오늘일 때만 반영
 - 하락장 수익 vehicle: **인버스 ETF 매수**(`config.inverse_etfs`) — 롱 규칙이 그대로 포착, 강세장에서만 게이트로 차단
@@ -84,7 +84,7 @@
 
 ## API 요약 (`/api/trading/*` 프록시 경유)
 
-status · orders(+승인/거부) · signals · prices(2초 폴링용) · **rules(기법 목록)** · watchlist(+add/remove/mode) · scanner · discovery(+run) · backtest/{code} · backtest/coverage · backtest/report(latest/run) · performance · risk(가드+국면) · bars/{code} · account · settings
+status · orders(+승인/거부) · signals · prices(2초 폴링용) · **rules(기법 목록)** · watchlist(+add/remove/mode) · scanner · nightly(+run) · backtest/{code} · backtest/coverage · backtest/report(latest/run) · performance · risk(가드+국면) · bars/{code} · account · settings
 
 ## 설정 지도 (`trading/config.yaml`)
 
@@ -93,7 +93,7 @@ status · orders(+승인/거부) · signals · prices(2초 폴링용) · **rules
 | `watchlist` | 최초 시드(운영 기준은 DB) |
 | `inverse_etfs` / `regime_gate` | 인버스 목록 / 국면 게이트(use_open_gap, use_night_bias) |
 | `scanner` / `gainers` | 급등 스캐너 / KOSPI 급등률 자동편입(top_n, trade_max_price) |
-| `discovery` | 야간 발굴(auto_watch, regime breadth 임계) |
+| `nightly` | 야간 배치(3팔 표본·regime breadth 임계 — 옛 discovery, 2026-08-01 이관) |
 | `collection` | 수집 로스터(retention 30일) |
 | `backtest` | 자동 리포트(min_days 3, keep 120일) |
 | `risk` | long_only, 거래당 리스크(UI 조정), 일일 목표/한도(UI 조정), TTL |
