@@ -51,6 +51,28 @@ def in_session(now: datetime | None = None) -> bool:
     t = (now or datetime.now(UTC)).astimezone(KST)
     return t.weekday() < 5 and SESSION[0] <= t.strftime("%H:%M") <= SESSION[1]
 
+
+def session_open_before(now: datetime, sessions: int) -> datetime:
+    """`sessions`번째 직전 개장 시각(KST). probation 의 기준선이다.
+
+    1 이면 가장 최근 개장(오늘 09:00 이후면 오늘, 아니면 직전 평일).
+    휴장일 캘린더는 없다 — 평일만 센다. 공휴일이 끼면 probation 이 하루
+    후해지는(길어지는) 쪽으로 틀리므로 보수적이다.
+    """
+    t = now.astimezone(KST)
+    opens = 0
+    day = t.date()
+    if t.weekday() >= 5 or t.strftime("%H:%M") < SESSION[0]:
+        day -= timedelta(days=1)     # 오늘 개장 전이거나 주말 — 오늘은 안 센다
+    while True:
+        if day.weekday() < 5:
+            opens += 1
+            if opens >= sessions:
+                break
+        day -= timedelta(days=1)
+    return datetime.combine(day, datetime.min.time(),
+                            tzinfo=KST).replace(hour=9)
+
 # tier 이름 — decisions 에 그대로 들어간다
 NONE, COLLECT, TRADE = "none", "collect", "trade"
 
@@ -58,8 +80,13 @@ DEFAULTS = {
     "promote_collect": 0.35,     # 이상 → 수집전용 후보
     "demote_below": 0.25,        # 미만 → 감시목록에서 제거 (승격 임계보다 낮다)
     "min_dwell_min": 15,         # 최소 체류 — 들락날락·WS 재구독 폭주 방지
-    "probation_sessions": 1,     # 매매 승격 전 수집 tier 체류 세션 수
-    "max_trade": 50,             # 매매 tier 상한
+    # 매매 승격 전 수집 tier 체류 **세션** 수. 15분 dwell 만으로는 신규 종목이
+    # 편입 15분 뒤 매매 tier 까지 갈 수 있었다 — 설계 검토 7번("probation 은
+    # '감시했지만 매매하지 않은 표본' 을 만든다")이 주석으로만 있었고 코드가
+    # 없었다(감사 2026-08-01 확인). 1 = 오늘 개장 전부터 감시하던 종목만 승격.
+    # 0 이면 종전 동작(15분 dwell 만).
+    "probation_sessions": 1,
+    "max_trade": 40,             # 매매 tier 상한 — config 와 동일값(드리프트 금지)
     "max_total": 120,            # 감시목록 전체 상한
     # --- 기회비용 회전 ---
     # 자리를 받고 이만큼 지나도록 신호가 한 건도 없으면 대기 후보에게 넘긴다.
@@ -150,6 +177,22 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
         t = cur.since.get(code)
         return t is None or (now - t) >= dwell
 
+    prob = int(conf.get("probation_sessions", 0) or 0)
+    prob_line = session_open_before(now, prob) if prob > 0 else None
+
+    def probation_done(code: str) -> bool:
+        """수집 tier 를 `probation_sessions`세션 거쳤는가 — 매매 승격의 게이트.
+
+        기준은 감시목록 편입 시각(`since`)이 기준선(가장 최근 개장 등)보다
+        이전인가다. 부수 효과가 목적의 절반이다: probation 을 거치는 종목은
+        '감시했지만 매매하지 않은 표본' 이 되어 사후 측정의 대조군을 만든다.
+        시각을 모르는 항목(엔진 이전 편입)은 통과 — 이미 오래 있었다.
+        """
+        if prob_line is None:
+            return True
+        t = cur.since.get(code)
+        return t is None or t <= prob_line
+
     # --- 기회비용 회전 ---
     silent_min = float(conf.get("silent_dwell_min", 0) or 0)
     cool = timedelta(minutes=float(conf.get("silent_cooldown_min", 0) or 0))
@@ -191,7 +234,9 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
         if tier == COLLECT:
             # 매매 승격은 **게이트로만** 판정한다 — 점수는 보지 않는다
             if not held_long_enough(c.code):
-                continue                       # probation — 최소 1세션 체류
+                continue                       # 최소 체류(분) — 진동 방지
+            if not probation_done(c.code):
+                continue                       # probation — 개장 전부터 감시하던 것만
             if cooling(c.code):
                 continue                       # 침묵으로 밀려난 직후 — 쿨다운
             ok, why = _tradable(c, cap)
@@ -235,7 +280,11 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     live = [code for code, t in cur.tier.items()
             if t != NONE and code not in dropped and code not in cur.protected]
     live.sort(key=lambda code: (by_code[code].score if code in by_code else 0.0, code))
-    over = len(live) + len(cur.protected) - int(conf["max_total"])
+    # 보호 종목은 **감시목록에 있는 것만** 센다. `protected` 에는 보유 종목이
+    # 통째로 들어오는데(ledger.open_symbols) 감시목록 밖 보유(수동 매수 등)가
+    # 섞이면 합계가 실제 감시목록보다 커져 비보호 종목을 과잉 drop 한다.
+    prot_in_watch = sum(1 for c in cur.protected if cur.tier.get(c, NONE) != NONE)
+    over = len(live) + prot_in_watch - int(conf["max_total"])
     for code in live[:max(0, over)]:
         dropped.add(code)
         c = by_code.get(code)

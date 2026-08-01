@@ -285,7 +285,11 @@ def facts(entry: dict) -> list[str]:
     # 그 값을 매일 눈앞에 둔다.
     cs = entry.get("cases") or {}
     if cs.get("n"):
-        line = (f"[누적 {cs['n']}건] 진입 후 최대 유리 {cs['mfe_pct']:+.2f}% vs "
+        # '누적' 이 아니라 **창이 있는 통계**다 — stats() 가 날짜 컷으로
+        # 바뀌었으므로(2026-08-01) 문구도 창을 밝힌다.
+        win = cs.get("window_days")
+        head = f"[최근 {win}일 {cs['n']}건]" if win else f"[누적 {cs['n']}건]"
+        line = (f"{head} 진입 후 최대 유리 {cs['mfe_pct']:+.2f}% vs "
                 f"최대 불리 {cs['mae_pct']:+.2f}%")
         if cs.get("entry_pos") is not None:
             line += f", 진입가는 직전 30분 범위의 {cs['entry_pos']:.2f} 지점"
@@ -304,6 +308,24 @@ def facts(entry: dict) -> list[str]:
                         target_r=settings.RULES.get("orb", {}).get("target_r"))
         if k:
             out.append(k)
+    # VI-거래 교집합 — `observe.overlap_today` 는 정의만 있고 어디서도 불리지
+    # 않아 대조가 실제로는 계산되지 않았다(감사 2026-08-01). 5거래일 실측
+    # 교집합 0건: 계속 0이면 VI 는 우리와 무관한 축이고, 0이 아니게 되는 날이
+    # 안전 필터를 논할 시점이다 — 그 날을 놓치지 않으려고 매일 일지에서 잰다.
+    try:
+        from datetime import datetime as _dt
+
+        from .scout import observe
+        syms = {p.get("symbol") for p in entry.get("positions", [])
+                if p.get("symbol")}
+        if syms:
+            hit = observe.overlap_today(
+                syms, now=_dt.fromisoformat(f"{entry['date']}T12:00:00+09:00"))
+            if hit:
+                out.append(f"오늘 거래 종목 중 VI 발동 {len(hit)}건: "
+                           f"{', '.join(sorted(hit))} — 안전 필터를 논할 시점이다.")
+    except Exception:  # noqa: BLE001 - 대조 실패가 일지를 막지 않는다
+        log.warning("VI 교집합 대조 실패", exc_info=True)
     if entry.get("carried"):
         out.append(
             f"다음 날로 넘어간 미청산 포지션 {len(entry['carried'])}건 — "
@@ -627,11 +649,16 @@ async def generate(day: str | None = None, with_summary: bool = True) -> dict:
 
 
 async def loop() -> None:
-    """평일 장 마감 후 1회 일지 작성. 재시작해도 당일 중복 실행 안 함.
-    (백테스트 리포트 잡과 같은 패턴 — 정각 스케줄러를 두지 않는다)"""
+    """평일 장 마감 후 1회 일지 작성.
+
+    완료 표시는 디스크(`job_marks`)에 남긴다 — 메모리 플래그였을 때는
+    15:45 이후 재배포마다 LLM 요약이 다시 돌았다(배포 5회 = 요약 5회,
+    eod_backfill 이 겪은 것과 같은 결함, 감사 2026-08-01 확인).
+    """
     import asyncio
 
-    done_for = ""
+    from .data import store as bars_store
+
     while True:
         try:
             cfg = settings.CONFIG.get("journal", {})
@@ -641,10 +668,11 @@ async def loop() -> None:
                 cfg.get("enabled", True)
                 and now.weekday() < 5
                 and now.strftime("%H:%M") >= cfg.get("run_after", "15:45")
-                and done_for != today
+                and not await asyncio.to_thread(
+                    bars_store.job_done, "journal", today)
             ):
                 entry = await generate(today)
-                done_for = today
+                await asyncio.to_thread(bars_store.mark_job_done, "journal", today)
                 log.info("매매일지 작성 %s — 청산 %d건 · 신호 %d건 · 요약 %s",
                          today, entry["trades"]["trades"],
                          entry["signals"]["total"],

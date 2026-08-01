@@ -169,10 +169,6 @@ DECISION_QUOTE_FIELDS = (
 # 이 순서는 화면 표시가 아니라 **누가 실제로 매매 대상이 되는가**를 정한다.
 NIGHTLY_STRENGTH = 0.667
 
-# 이전 이름. 호출부가 남아 있을 수 있어 별칭으로 둔다.
-RANDOM_STRENGTH = NIGHTLY_STRENGTH
-SCREEN_STRENGTH = NIGHTLY_STRENGTH
-
 def news_strength(score: float) -> float:
     """TNM 뉴스 점수 0~100 → 0~1."""
     return _clamp(score / 100.0)

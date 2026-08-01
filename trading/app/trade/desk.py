@@ -444,13 +444,17 @@ def _summarize(now: datetime) -> None:
     _LAST_SUMMARY["at"] = now
     d_ws = STATE["ws"] - _LAST_SUMMARY["ws"]
     d_rest = STATE["rest"] - _LAST_SUMMARY["rest"]
-    _LAST_SUMMARY.update(ws=STATE["ws"], rest=STATE["rest"])
+    # 청산도 델타로 — '최근 N초' 라고 말하는 줄에 프로세스 누적값을 섞으면
+    # 재시작 전까지 계속 같은 숫자가 찍혀 문구가 거짓이 된다(감사 2026-08-01).
+    d_exit = STATE["exits"] - _LAST_SUMMARY.get("exits", 0)
+    _LAST_SUMMARY.update(ws=STATE["ws"], rest=STATE["rest"], exits=STATE["exits"])
     if prev is None or (d_ws + d_rest) == 0:
         return
     pct = d_rest / (d_ws + d_rest) * 100
     fn = log.warning if pct > 20 else log.info
-    fn("데스크 요약(최근 %.0f초): 감시 %d종목 · WS %d · REST %d (%.0f%%) · 청산 %d",
-       SUMMARY_SEC, STATE["watched"], d_ws, d_rest, pct, STATE["exits"])
+    fn("데스크 요약(최근 %.0f초): 감시 %d종목 · WS %d · REST %d (%.0f%%) · "
+       "청산 %d (누적 %d)",
+       SUMMARY_SEC, STATE["watched"], d_ws, d_rest, pct, d_exit, STATE["exits"])
 
 
 # --------------------------------------------------------------------------

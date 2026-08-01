@@ -417,21 +417,27 @@ def close_position(pos_id: str, exit_px: float, reason: str = "manual",
 
 def monitor(price_of) -> int:
     """오픈 포지션의 손절/목표 터치를 확인해 청산. price_of(symbol)->float|None.
-    반환: 이번에 청산된 건수."""
+    반환: 이번에 청산된 건수.
+
+    **프로덕션 무호출 — 테스트 전용 헬퍼다.** 실경로는 데스크(2초)와
+    `main._ledger_loop`(발주 경유)이고, 이 함수는 발주 없이 원장만 닫으므로
+    실거래에 쓰면 고아 포지션을 만든다. 테스트가 청산 경로를 구동할 때만 쓴다.
+    판정선은 실경로와 같은 `effective_lines`(*_live 우선) — 여기만 원본
+    stop/target 을 보면 재사용되는 순간 현행 규약과 갈라진다(감사 2026-08-01).
+    """
     closed = 0
     with _conn() as conn:
         for row in conn.execute("SELECT * FROM positions WHERE status='open'").fetchall():
             p = price_of(row["symbol"])
             if p is None:
                 continue
+            stop, target = effective_lines(row)
             if row["side"] == "long":
-                hit = "stop" if p <= row["stop"] else ("target" if p >= row["target"] else None)
-                px = row["stop"] if hit == "stop" else row["target"]
+                hit = "stop" if p <= stop else ("target" if p >= target else None)
             else:
-                hit = "stop" if p >= row["stop"] else ("target" if p <= row["target"] else None)
-                px = row["stop"] if hit == "stop" else row["target"]
+                hit = "stop" if p >= stop else ("target" if p <= target else None)
             if hit:
-                _close(conn, row, float(px), hit)
+                _close(conn, row, float(stop if hit == "stop" else target), hit)
                 closed += 1
     return closed
 
@@ -644,7 +650,11 @@ def set_exit_pending(pos_id: str, val: int) -> None:
 
 
 def force_close_eod(price_of) -> int:
-    """장 마감 미청산 포지션을 현재가로 정리(reason=eod)."""
+    """장 마감 미청산 포지션을 현재가로 정리(reason=eod).
+
+    **프로덕션 무호출 — 테스트 전용 헬퍼다**(`monitor` 와 같은 이유).
+    실경로의 EOD 정리는 `main._ledger_loop` 가 시장가 발주를 거쳐 한다.
+    """
     closed = 0
     with _conn() as conn:
         for row in conn.execute("SELECT * FROM positions WHERE status='open'").fetchall():

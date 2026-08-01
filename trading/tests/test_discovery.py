@@ -17,31 +17,34 @@ def _daily(closes, volumes):
     )
 
 
+# 스크리닝 게이트는 compute_features 가 단일 소스다 — run_once 가 직접 쓰는
+# 것과 같은 함수를 검사한다(종전 screen_daily 래퍼는 중복이라 정리, 2026-08-01).
+from app.features import compute_features
+
+
 def test_screen_all_three_rules_fire():
     # 60일 완만 상승 → 마지막 날 신고가 + 거래량 5배
     closes = list(np.linspace(9000, 10000, 69)) + [10500]
     volumes = [200_000] * 69 + [1_000_000]
-    score, reasons = discovery.screen_daily(_daily(closes, volumes), CFG)
-    assert score >= 2
-    assert any("거래량" in r for r in reasons)
-    assert any("고가" in r for r in reasons)
+    f = compute_features(_daily(closes, volumes), CFG)
+    assert f["liquid"] and f["score"] >= 2
+    assert any("거래량" in r for r in f["reasons"])
+    assert any("고가" in r for r in f["reasons"])
 
 
 def test_screen_flat_stock_scores_zero():
-    df = _daily([10_000] * 70, [500_000] * 70)
-    score, reasons = discovery.screen_daily(df, CFG)
-    assert score < 2  # 급증도 정배열 전환도 없음
+    f = compute_features(_daily([10_000] * 70, [500_000] * 70), CFG)
+    assert f["score"] < 2  # 급증도 정배열 전환도 없음
 
 
 def test_screen_filters_low_liquidity():
-    # 거래대금 미달 (1000원 × 10만주 = 1억)
-    df = _daily([1_000] * 70, [100_000] * 70)
-    assert discovery.screen_daily(df, CFG) == (0.0, [])
+    # 거래대금 미달 (1000원 × 10만주 = 1억) — 피처는 나오되 후보 자격이 없다
+    f = compute_features(_daily([1_000] * 70, [100_000] * 70), CFG)
+    assert f is not None and not f["liquid"]
 
 
 def test_screen_needs_60_bars():
-    df = _daily([10_000] * 30, [500_000] * 30)
-    assert discovery.screen_daily(df, CFG) == (0.0, [])
+    assert compute_features(_daily([10_000] * 30, [500_000] * 30), CFG) is None
 
 
 def test_parse_stock_list_real_format():

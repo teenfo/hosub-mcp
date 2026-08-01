@@ -111,6 +111,40 @@ def test_probation_blocks_immediate_trade_promotion():
     assert _by(_plan([_c()], cur), "promote_trade") == []
 
 
+def test_probation_은_세션_단위다_같은_날_편입은_차단():
+    """15분 dwell 을 넘겨도 **오늘 개장 후 편입**이면 매매로 못 간다.
+
+    probation_sessions 는 config·주석에만 있고 코드가 안 읽던 죽은 키였다
+    (감사 2026-08-01) — 신규 종목이 편입 15분 뒤 매매 tier 까지 갈 수 있었다.
+    NOW 는 월요일 10:00 KST 다. 09:30 KST 편입(30분 전, dwell 통과)은 오늘
+    개장(09:00) **뒤**라 1세션을 못 채웠다.
+    """
+    cur = _cur(tier={"000001": COLLECT},
+               since={"000001": NOW - timedelta(minutes=30)})
+    assert _by(_plan([_c()], cur), "promote_trade") == []
+    # 개장 전(08:00 KST) 편입은 통과 — LONG_AGO 가 그 값이다
+    ok = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    assert len(_by(_plan([_c()], ok), "promote_trade")) == 1
+
+
+def test_probation_0_이면_종전_동작():
+    cur = _cur(tier={"000001": COLLECT},
+               since={"000001": NOW - timedelta(minutes=30)})
+    rows = _plan([_c()], cur, probation_sessions=0)
+    assert len(_by(rows, "promote_trade")) == 1
+
+
+def test_감시목록_밖_보유는_전체_상한을_잡아먹지_않는다():
+    """protected 에는 보유 종목이 통째로 들어오는데, 감시목록 **밖** 보유
+    (수동 매수 등)가 섞이면 합계가 실제 감시목록보다 커져 비보호 종목이
+    과잉 drop 됐다(감사 2026-08-01). 상한 계산은 감시목록 소속만 센다."""
+    tier = {f"{i:06d}": COLLECT for i in range(3)}
+    cur = _cur(tier=tier, since={c: LONG_AGO for c in tier},
+               protected={"999999"})          # 감시목록에 없는 보유 종목
+    rows = _plan([_c(code=c, score=0.5) for c in tier], cur, max_total=3)
+    assert _by(rows, "drop") == []             # 3+0 == 상한 3 — 초과 아님
+
+
 # --- ② 히스테리시스 — 경계에서 진동하지 않는다 ---
 
 def test_promote_threshold_is_above_demote_threshold():

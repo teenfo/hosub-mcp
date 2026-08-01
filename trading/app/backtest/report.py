@@ -190,8 +190,13 @@ class BacktestReporter:
         return out
 
     async def loop(self) -> None:
-        """평일 장 마감 후(run_after) 1회. 재시작해도 당일 중복 실행 안 함."""
-        done_for = ""
+        """평일 장 마감 후(run_after) 1회.
+
+        완료 표시는 디스크(`job_marks`) — 메모리 플래그였을 때는 재배포마다
+        약 15분짜리 백테스트가 다시 돌았다(감사 2026-08-01 확인).
+        """
+        from ..data import store as bars_store
+
         while True:
             try:
                 cfg = settings.CONFIG.get("backtest", {})
@@ -201,10 +206,12 @@ class BacktestReporter:
                     cfg.get("report_enabled", True)
                     and now.weekday() < 5
                     and now.strftime("%H:%M") >= cfg.get("run_after", "15:40")
-                    and done_for != today
+                    and not await asyncio.to_thread(
+                        bars_store.job_done, "backtest_report", today)
                 ):
                     await self.run_offloaded()
-                    done_for = today
+                    await asyncio.to_thread(
+                        bars_store.mark_job_done, "backtest_report", today)
             except Exception:  # noqa: BLE001
                 log.exception("백테스트 리포트 오류")
             await asyncio.sleep(300)

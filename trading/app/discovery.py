@@ -44,10 +44,10 @@ def _conn() -> sqlite3.Connection:
             PRIMARY KEY (date, code)
         )"""
     )
-    # 전종목 차트 지표 원장. 매일 3,900여 종목의 피처를 계산하고 있었지만
-    # `picks` 에 살아남는 것은 6~11건이고 나머지는 CSV 로 내보내고 버렸다.
-    # "평가 대상을 전체 종목 베이스로" 의 실체가 이 표다 — 4주 뒤 어느 지표가
-    # 실현 R 과 상관있는지 물으려면 그날 그 값이 얼마였는지가 남아 있어야 한다.
+    # 차트 지표 원장 — **유동성 통과 전량**(ETF/ETN/리츠 제외, 하루 약 780행)이다.
+    # 전종목 피처는 계산되지만 여기 남는 것은 매매 가능 유니버스뿐이다 — 4주 뒤
+    # 지표-실현 R 상관을 물을 표본의 정의가 이것이다. '전종목 원장' 으로 읽으면
+    # 표본 정의를 착각한다(전종목 피처는 features.csv 내보내기에만 실린다).
     conn.execute(
         """CREATE TABLE IF NOT EXISTS chart_obs (
             date TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
@@ -89,14 +89,6 @@ def parse_stock_list(raw: dict) -> list[dict]:
 # 제외 정책은 data/exclude.py 가 단일 소스다 — scanner 와 서로 다르게 판정해
 # 실매수 사고가 났다(2026-07-27 462900 KoAct). 여기서는 재노출만 한다.
 from .data.exclude import is_excluded  # noqa: E402  (기존 import 경로 유지)
-
-
-def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:
-    """일봉 → (점수, 사유). 유동성 게이트 미통과·60행 미만이면 (0, [])."""
-    f = compute_features(df, cfg)
-    if f is None or not f["liquid"]:
-        return 0.0, []
-    return f["score"], f["reasons"]
 
 
 def screen_pass(f: dict, cfg: dict) -> bool:
