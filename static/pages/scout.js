@@ -98,8 +98,10 @@ async function renderWatchSection(container, ctx) {
     const sourceC = card("후보 발굴", null, { wide: true, icon: "bi-rocket-takeoff" });
     const watchC = card("감시목록", null, { wide: true, icon: "bi-eye" });
     const reportC = card("AI 분석 리포트", null, { wide: true, icon: "bi-journal-text" });
-    const CARDS = [["status", statusC, 12], ["source", sourceC, 12],
-                   ["watch", watchC, 12], ["report", reportC, 12]];
+    // 짧은 요약 둘(국면·리포트 목록)을 첫 줄에 짝지어 세로를 아낀다.
+    // 표 중심 카드(후보·감시목록)는 전폭 — 좁히면 열이 부러진다.
+    const CARDS = [["status", statusC, 6], ["report", reportC, 6],
+                   ["source", sourceC, 12], ["watch", watchC, 12]];
     CARDS.forEach(([id, c, w], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
@@ -683,24 +685,51 @@ export default {
   group: "트레이딩",
   aliases: ["discover"],      // 옛 페이지 해시(#/discover) 북마크 호환
   async render(container, ctx) {
-    // 발굴·감시 섹션을 먼저 건다 — row 를 동기적으로 붙이므로 화면 순서는
-    // 위(실무)·아래(엔진 판단)로 고정되고, 네트워크 대기는 병렬로 진행된다.
-    const watchSection = renderWatchSection(container, ctx);
+    // 페이지를 두 판으로 가른다 — 운영(후보·감시목록)과 엔진 판단.
+    // 통합 직후에는 카드 9장이 한 기둥으로 쌓여 세로 스크롤이 너무 길었다.
+    // 매일 보는 것(운영)과 가끔 대조하는 것(엔진 판단)은 리듬이 다르다 —
+    // 탭으로 갈라 각자 첫 화면에 들어오게 한다. 선택은 세션에 기억된다.
+    const opsPane = el("div");
+    const engPane = el("div", { class: "d-none" });
+    const engBadge = el("span", { class: "badge text-bg-secondary ms-1" }, "·");
+    const navDefs = [
+      ["ops", "운영 — 후보·감시목록", "bi-eye", opsPane, null],
+      ["engine", "엔진 판단", "bi-diagram-3", engPane, engBadge],
+    ];
+    const nav = el("ul", { class: "nav nav-pills gap-1 mb-3" });
+    const showPane = (id) => {
+      navDefs.forEach(([tid, , , pane]) => pane.classList.toggle("d-none", tid !== id));
+      nav.querySelectorAll("button").forEach((b) =>
+        b.classList.toggle("active", b.dataset.tab === id));
+      try { sessionStorage.setItem("scout:tab", id); } catch (e) { /* 프라이빗 모드 */ }
+    };
+    navDefs.forEach(([tid, label, icon, , bdg]) => {
+      const b = el("button", { class: "nav-link", type: "button", "data-tab": tid },
+        [el("i", { class: `bi ${icon} me-1` }), label, bdg || el("span")]);
+      b.onclick = () => showPane(tid);
+      nav.appendChild(el("li", { class: "nav-item" }, b));
+    });
+    container.append(nav, opsPane, engPane);
+    showPane(sessionStorage.getItem("scout:tab") === "engine" ? "engine" : "ops");
+
+    const watchSection = renderWatchSection(opsPane, ctx);
     const changed = makeChanged();
     const row = el("div", { class: "row g-3" });
-    container.appendChild(row);
+    engPane.appendChild(row);
 
     const stateC = card("엔진 상태 · 소스", null, { wide: true, icon: "bi-diagram-3" });
     const queueC = card("후보 큐", null, { wide: true, icon: "bi-list-ol" });
     const diffC = card("판단 대조 (엔진 ↔ 실제 감시목록)", null, { wide: true, icon: "bi-arrow-left-right" });
     const srcC = card("소스별 원시 결과 (패키지 단위)", null, { wide: true, icon: "bi-boxes" });
     const histC = card("승격·강등 이력", null, { wide: true, icon: "bi-clock-history" });
-    const CARDS = [["state", stateC], ["queue", queueC],
-                   ["diff", diffC], ["source", srcC], ["hist", histC]];
-    CARDS.forEach(([id, c], i) => {
+    // 후보 큐와 판단 대조를 나란히 — "엔진이 보는 것"과 "실제 반영"을
+    // 한 시선에 대조하는 것이 이 판의 존재 이유다.
+    const CARDS = [["state", stateC, 12], ["queue", queueC, 6],
+                   ["diff", diffC, 6], ["source", srcC, 12], ["hist", histC, 12]];
+    CARDS.forEach(([id, c, w], i) => {
       c.col.dataset.cardId = id;
       c.col.dataset.cardIndex = i;
-      c.col.className = "col-12 col-xl-12";
+      c.col.className = "col-12 col-xl-" + w;
       row.appendChild(c.col);
     });
     makeLayoutEditable(row, { key: "scout" });
@@ -1030,6 +1059,8 @@ export default {
       renderSources(d);
 
       const pending = d.pending || [];
+      engBadge.textContent = String(pending.length);
+      engBadge.className = "badge ms-1 " + (pending.length ? "text-bg-warning" : "text-bg-secondary");
       diffTabs.set("pending", pending.length ? decisionRows(pending, false)
         : emptyRow("지금 바꿀 것이 없습니다 — 후보와 감시목록이 일치합니다"), pending.length);
       const wl = d.watchlist || [];
