@@ -24,6 +24,7 @@ from starlette.responses import (
     JSONResponse,
     RedirectResponse,
     Response,
+    StreamingResponse,
 )
 from starlette.routing import Route
 
@@ -643,6 +644,31 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
                 {"error": f"trading 서비스 연결 실패: {exc}"}, status_code=502
             )
 
+    async def api_trading_price_stream(request):
+        """실시간 가격 SSE 패스스루 — 일반 프록시는 응답을 버퍼링하므로 별도 경로.
+
+        브라우저 EventSource → (세션 인증) → trading /api/prices/stream 을
+        내부 토큰으로 이어 붙인다. 끊기면 브라우저가 자동 재접속하고, 화면
+        폴링(2초)이 폴백이라 스트림 없이도 가격은 계속 움직인다.
+        """
+        if (d := _require_auth_json(request)):
+            return d
+
+        async def gen():
+            try:
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream(
+                        "GET", f"{TRADING_URL}/api/prices/stream",
+                        headers={"X-Internal-Token": TRADING_TOKEN},
+                    ) as r:
+                        async for chunk in r.aiter_raw():
+                            yield chunk
+            except Exception:  # noqa: BLE001 - 종단 끊김은 정상 시나리오다
+                return
+
+        return StreamingResponse(gen(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache"})
+
     async def api_tnm(request):
         if (d := _require_auth_json(request)):
             return d
@@ -721,6 +747,8 @@ def build_routes(ctx: AppContext, password: str) -> list[Route]:
         Route("/api/llm/models/delete", api_llm_model_delete, methods=["DELETE"]),
         Route("/api/docker", api_docker),
         Route("/api/weather", api_weather),
+        # 스트림은 일반 프록시(전체 버퍼링)보다 먼저 매칭돼야 한다
+        Route("/api/trading/prices/stream", api_trading_price_stream, methods=["GET"]),
         Route("/api/trading/{path:path}", api_trading, methods=["GET", "POST"]),
         Route("/api/tnm/{path:path}", api_tnm, methods=["GET", "POST"]),
         Route("/api/jw/summary", api_jw_summary),

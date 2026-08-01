@@ -53,6 +53,30 @@ async def _on_fill(fill: dict) -> None:
 
 
 feed.on_fill = _on_fill   # 주문체결 실시간 → 실측 체결 기록
+
+# 실시간 가격 스트림(SSE) 구독자 — 화면이 폴링(2초) 대신 틱을 즉시 받는다
+_price_subs: set[asyncio.Queue] = set()
+
+
+async def _tick_router(symbol: str, price: float, volume: int, ts: str) -> None:
+    """WS 틱 단일 진입점 — 봉 집계 → 보유 종목 즉시 판정 → 화면 스트림.
+
+    순서가 중요하다: 데스크 판정이 봉 집계 **뒤**라야 fresh_price/스냅샷과
+    같은 값을 본다. 스트림은 느린 소비자가 있어도 틱 수신을 막지 않도록
+    가득 찬 큐는 조용히 버린다(다음 틱이 곧 온다).
+    """
+    await aggregator.on_tick(symbol, price, volume, ts)
+    try:
+        await desk.on_tick(symbol, float(price))
+    except Exception:  # noqa: BLE001 - 판정 오류가 시세 수신을 막지 않는다
+        log.exception("틱 드리븐 판정 오류 %s", symbol)
+    if _price_subs:
+        for q in list(_price_subs):
+            if not q.full():
+                q.put_nowait((symbol, price, ts))
+
+
+feed.on_tick = _tick_router
 signer = URLSafeSerializer(settings.SESSION_SECRET, salt="dash")
 
 
@@ -667,6 +691,39 @@ async def api_signals(_=Depends(require_auth)):
 async def api_prices(_=Depends(require_auth)):
     """감시목록 종목의 현재가 맵 — 프론트가 가격 셀만 2초 주기로 부분 갱신."""
     return {"prices": {code: _price_of(code) for code in settings.WATCHLIST}}
+
+
+@app.get("/api/prices/stream")
+async def api_prices_stream(_=Depends(require_auth)):
+    """실시간 가격 스트림(SSE) — WS 틱이 도착하는 즉시 화면으로 밀어낸다.
+
+    폴링(/api/prices, 2초)은 폴백으로 유지된다 — 스트림이 끊겨도 화면은
+    종전 주기로 계속 움직인다. 하트비트(15초 주석)로 프록시 유휴 종단을 막는다.
+    """
+    import json as _json
+
+    from fastapi.responses import StreamingResponse
+
+    q: asyncio.Queue = asyncio.Queue(maxsize=500)
+    _price_subs.add(q)
+
+    async def gen():
+        try:
+            yield ": stream open\n\n"
+            while True:
+                try:
+                    sym, px, ts = await asyncio.wait_for(q.get(), timeout=15)
+                    yield ("data: "
+                           + _json.dumps({"s": sym, "p": px, "t": ts})
+                           + "\n\n")
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            _price_subs.discard(q)
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache",
+                                      "X-Accel-Buffering": "no"})
 
 
 # 종목 기본정보 캐시. 사람이 목록에서 종목을 연달아 누르면 같은 종목을 몇 번씩
