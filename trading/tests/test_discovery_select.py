@@ -201,7 +201,12 @@ def test_조건식_팔을_켜도_무작위_대조군은_같은_시드를_쓴다(
 # --- 무작위 표본이 실제로 관측 팔이 되는가 --------------------------------------
 
 def test_무작위_표본은_승격선을_넘는_강도를_받는다(monkeypatch):
-    """강도 0 이면 신호는 남지만 후보가 되지 않아 관측 팔이 존재하지 않는다."""
+    """강도 0 이면 신호는 남지만 후보가 되지 않아 관측 팔이 존재하지 않는다.
+
+    그리고 **점수 표본과 같은 강도**여야 한다. 감시목록이 상한에 차 있을 때
+    강도는 화면 표시가 아니라 누가 매매 대상이 되는가를 정한다. 점수 표본은
+    변동성 정합 대조군 대비 -0.168R(t=-10.70) 이라 앞자리를 줄 근거가 없다.
+    """
     import asyncio
 
     from app.scout import model
@@ -219,11 +224,13 @@ def test_무작위_표본은_승격선을_넘는_강도를_받는다(monkeypatch
 
     sigs = asyncio.run(slow.NightlySource().collect())
     by = {s.code: s for s in sigs}
-    assert by["000002"].strength == model.RANDOM_STRENGTH
+    assert by["000002"].strength == model.NIGHTLY_STRENGTH
     assert by["000002"].kind == "nightly:random"
-    # 사유가 있는 후보가 자리를 먼저 가져간다
-    assert by["000001"].strength > by["000002"].strength
     assert by["000001"].kind == "nightly"
+    # 두 팔이 같은 강도로 자리를 다툰다 — 점수에는 앞자리를 줄 근거가 없다
+    assert by["000001"].strength == by["000002"].strength
+    # 원시 점수는 사라지지 않는다 — 사후 대조에 쓴다
+    assert by["000001"].raw == 2.0 and by["000002"].raw == 0.0
 
 
 def test_조건식_표본도_구분되는_강도와_kind_를_받는다(monkeypatch):
@@ -247,10 +254,8 @@ def test_조건식_표본도_구분되는_강도와_kind_를_받는다(monkeypat
 
     by = {s.code: s for s in asyncio.run(slow.NightlySource().collect())}
     assert by["000002"].kind == "nightly:screen"
-    assert by["000002"].strength == model.SCREEN_STRENGTH
     assert by["000002"].evidence["pick_kind"] == "screen"
-    # 무작위 < 조건식 < 점수 — 자리 다툼의 순서이지 예측력 주장이 아니다
-    assert (by["000003"].strength < by["000002"].strength
-            < by["000001"].strength)
-    # 세 팔이 서로 다른 kind 로 남는다
+    # 세 팔이 같은 강도다 — 어느 팔이 나은지 측정된 적이 없다
+    assert {s.strength for s in by.values()} == {model.NIGHTLY_STRENGTH}
+    # 그래도 kind 로는 끝까지 구분된다 (사후 대조의 전제)
     assert len({s.kind for s in by.values()}) == 3
