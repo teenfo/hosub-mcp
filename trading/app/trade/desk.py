@@ -364,6 +364,8 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
     stat["watched"] = len(rows)
 
     for pos in rows:
+        if pos.get("stop") is None:
+            continue     # 외부(rule='external') 포지션 — 감시·기록만, 자동 청산 없음
         px = fresh_price(pos["symbol"])
         if px is not None:
             stat["ws"] += 1
