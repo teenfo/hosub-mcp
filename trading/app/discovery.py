@@ -376,24 +376,6 @@ class Discovery:
                 "progress": self.progress, "last_run": self.last_run,
                 "market": market}
 
-    async def apply_auto_watch(self, top: list[dict], cfg: dict) -> bool:
-        """발굴 상위 종목을 감시목록에 편입한다(이전 auto 항목은 교체). 반환: 썼는가.
-
-        **엔진이 `full` 이면 물러난다** — 이 호출이 엔진과 중복되는 유일한 부분이다.
-        수집·피처·국면 계산은 그대로 돈다(엔진의 입력이지 중복이 아니다).
-        """
-        from .data import watchlist
-        from .scout import engine as scout
-
-        if not (cfg.get("auto_watch", True) and top):
-            return False
-        if scout.owns_watchlist():
-            log.info("발굴 자동편입 보류 — 감시목록은 엔진(full)이 소유")
-            return False
-        watchlist.replace_auto(top[: cfg.get("auto_watch_n", 5)])
-        await watchlist.notify()
-        return True
-
     async def run_once(self) -> int:
         """전종목 수집 + 스크리닝. 반환: 발굴 종목 수."""
         from .kiwoom.client import client  # 지연 임포트
@@ -501,7 +483,10 @@ class Discovery:
                     "INSERT OR REPLACE INTO chart_obs VALUES (?,?,?,?,?)",
                     [(today, *o) for o in obs],
                 )
-            await self.apply_auto_watch(top, cfg)
+            # 감시목록에 쓰지 않는다 — 편입은 엔진(scout)의 단일 통로다.
+            # NightlySource 가 30분마다 picks 를 읽어 신호로 올린다. 종전
+            # apply_auto_watch(top[:5]) 직접 편입은 2026-08-01 완전 통합에서
+            # 회수됐다. 수집·피처·국면은 그대로다 — 엔진의 입력이다.
             kinds = Counter(p.get("pick_kind", "score") for p in top)
             self.progress = (f"완료: {len(symbols)}종목 분석 → 유동성 {len(pool)} → "
                              f"후보 {len(top)} (점수 {kinds['score']} · 조건식 "

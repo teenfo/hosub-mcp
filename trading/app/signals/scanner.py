@@ -159,21 +159,6 @@ def filter_gainers(items: list[dict], cfg: dict,
     return picked
 
 
-def _engine_owns() -> bool:
-    """엔진(full)이 감시목록을 소유하면 스캐너는 **직접 쓰지 않는다.**
-
-    파싱·필터 결과(`self.results`/`self.gainers`)는 그대로 남는다 — 화면이 읽고
-    엔진의 volume·gainers 어댑터가 같은 함수를 재사용한다. 회수되는 것은
-    '감시목록에 직접 쓰는' 부분뿐이다.
-    """
-    from ..scout import engine as scout
-
-    if scout.owns_watchlist():
-        log.info("스캐너 자동편입 보류 — 감시목록은 엔진(full)이 소유")
-        return True
-    return False
-
-
 class Scanner:
     def __init__(self) -> None:
         self.results: list[dict] = []       # 이미 급등 중 (편승 후보)
@@ -187,15 +172,14 @@ class Scanner:
 
         cfg = settings.CONFIG.get("scanner", {})
         raw = await client.trade_value_rank(cfg.get("market", "000"))
-        # 기존 active 소스는 이미 감시 중이어도 후보 유지(교체 시 탈락 방지)
+        # 이미 감시 중인 종목도 후보에 유지 — 소스가 보고를 멈추면 엔진 쪽
+        # TTL 만료 → 강등 → 재보고 발진이 난다(설계 검토 2번)
         keep = frozenset(e["code"] for e in watchlist.entries()
                          if e.get("source") == "active")
         self.results = filter_candidates(parse_rank(raw), cfg, keep=keep)
-        if cfg.get("auto_watch", False) and not _engine_owns():
-            # 거래대금 상위는 '시장이 실제로 돈을 넣는' 종목이라 유동성이 안전하다.
-            # 이 필터 결과가 종전에는 화면 표시로만 쓰이고 감시목록에 닿지 않았다.
-            watchlist.replace_active(self.results)
-            await watchlist.notify()
+        # **감시목록에 쓰지 않는다.** 편입은 발굴 엔진(scout, full)의 단일
+        # 통로다 — VolumeSource 어댑터가 같은 필터 결과를 신호로 올린다.
+        # 직접 쓰기(replace_active)는 2026-08-01 완전 통합에서 회수됐다.
         try:
             # 개장 워밍업 — 급증률의 분모(직전 누적 거래량)가 개장 직후에는
             # 사실상 비어 있어 대형주가 수백만 % 를 받는다(실측 2026-07-28
@@ -244,10 +228,7 @@ class Scanner:
         keep = frozenset(e["code"] for e in watchlist.entries()
                          if e.get("source") == "gainer")
         self.gainers = filter_gainers(items, cfg, keep=keep)
-        if cfg.get("auto_watch", True) and not _engine_owns():
-            # 성공한 스캔은 빈 결과라도 반영 — 더 이상 급등이 아닌 종목을 정리
-            watchlist.replace_gainers(self.gainers)
-            await watchlist.notify()
+        # 감시목록에 쓰지 않는다 — scan_once 와 같은 규약(GainersSource 가 소비)
         return self.gainers
 
     async def loop(self, interval_sec: int = 60) -> None:

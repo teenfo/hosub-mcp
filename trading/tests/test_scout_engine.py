@@ -85,7 +85,8 @@ def spy_watchlist(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shadow_never_writes_to_the_watchlist(spy_watchlist):
-    """이 계획의 핵심 안전장치. 여기가 깨지면 3거래일 관찰이 무의미해진다."""
+    """이 계획의 핵심 안전장치 — 완전 통합(config 기본 full) 후에는 명시로 켠다."""
+    eng.set_state(mode="shadow")
     e = _engine([_Src(model.VOLUME, [_sig()])])
     out = await e.run_once()
     assert eng.mode() == "shadow"
@@ -96,6 +97,7 @@ async def test_shadow_never_writes_to_the_watchlist(spy_watchlist):
 @pytest.mark.asyncio
 async def test_shadow_still_records_decisions(spy_watchlist):
     """적용하지 않은 결정이야말로 '엔진이라면 이렇게 했을 것' 의 기록이다."""
+    eng.set_state(mode="shadow")
     await _engine([_Src(model.VOLUME, [_sig()])]).run_once()
     rows = store.recent_decisions()
     assert rows and rows[0]["mode"] == "shadow" and rows[0]["applied"] == 0
@@ -136,11 +138,16 @@ def test_unknown_mode_rejected():
         eng.set_state(mode="없는모드")
 
 
-def test_mode_falls_back_to_shadow_on_corrupt_state(monkeypatch, tmp_path):
+def test_mode_falls_back_to_config_on_corrupt_state(monkeypatch, tmp_path):
+    """오버라이드 파일이 깨지면 config 기본값으로 — 완전 통합 후 기본은 full 이다.
+
+    종전에는 shadow 폴백이었지만, 직접 편입 경로가 삭제된 지금 shadow 는
+    '감시목록 동결' 이라 깨진 파일 하나로 편입이 통째로 멈추는 쪽이 더 위험하다.
+    """
     f = tmp_path / "engine.json"
     f.write_text("{ 깨진 json", encoding="utf-8")
     monkeypatch.setattr(eng, "STATE_FILE", f)
-    assert eng.mode() == "shadow"
+    assert eng.mode() == "full"
 
 
 # --- ② 재시작 직후 폭주 방어 ---
@@ -171,6 +178,7 @@ async def test_다시_켜진_소스는_첫_수집까지_투영을_막는다(spy_
     `ready()` 가 True 가 되고, 장중 소스 점수 0 인 상태로 투영해 **개장 직후
     대량 강등**이 나간다. 종전에는 밤새 폴링했으므로 이 창이 없었다.
     """
+    eng.set_state(mode="shadow")             # 투영 게이트만 본다 — 쓰기는 별도 검증
     vol = _Src(model.VOLUME, [_sig()])
     e = _engine([vol, _Src(model.NEWS, [_sig(code="000002", source=model.NEWS)])])
     await e.run_once()
@@ -254,6 +262,7 @@ async def test_disabled_source_is_skipped():
 
 @pytest.mark.asyncio
 async def test_status_exposes_source_health(spy_watchlist):
+    eng.set_state(mode="shadow")
     e = _engine([_Src(model.VOLUME, [_sig()]), _Src(model.NEWS, boom=True)])
     await e.run_once()
     st = e.status()

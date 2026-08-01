@@ -49,7 +49,7 @@ def test_scout_returns_the_shape_the_screen_expects(client):
     d = r.json()
     assert {"status", "candidates", "pending", "watchlist", "decisions"} <= set(d)
     st = d["status"]
-    assert st["mode"] == "shadow"
+    assert st["mode"] == "full"       # 완전 통합 후 config 기본값
     assert {"frozen", "ready", "sources", "thresholds", "max_score"} <= set(st)
     assert {s["name"] for s in st["sources"]}      # 소스 목록이 비어 있지 않다
 
