@@ -28,6 +28,7 @@ def env(tmp_path, monkeypatch):
         "enabled": True, "interval_sec": 2, "stale_sec": 5, "max_symbols": 0}})
     # 승인 규약은 명시한다 — 기본값에 기대면 config 가 바뀔 때 조용히 뒤집힌다
     monkeypatch.setitem(settings.RISK, "auto_approve", True)
+    desk._REST_CACHE.clear()   # 스로틀 캐시가 테스트 간에 새면 REST 계측이 오염된다
     return tmp_path
 
 

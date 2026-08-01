@@ -13,6 +13,27 @@ log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
 
+def tick_lag_ms(ts: str, now: datetime | None = None) -> float | None:
+    """체결시각(HHMMSS) 대비 수신 시각의 지연(ms). 판정 불가면 None.
+
+    "실시간 가격이 늦다" 를 수치로 만들기 위한 계측(2026-08-01). 음수(시계
+    오차)는 0 으로 접고, 10분 초과는 파싱 오류·장 경계로 보고 버린다 —
+    못 잰 것을 큰 지연으로 세면 안 된다.
+    """
+    if not ts or len(ts) != 6 or not ts.isdigit():
+        return None
+    now = now or datetime.now(KST)
+    try:
+        tick_dt = now.replace(hour=int(ts[0:2]), minute=int(ts[2:4]),
+                              second=int(ts[4:6]), microsecond=0)
+    except ValueError:
+        return None
+    delta = (now - tick_dt).total_seconds()
+    if delta > 600:
+        return None
+    return max(0.0, delta * 1000)
+
+
 class BarAggregator:
     """체결 틱을 받아 1분봉을 만들고, 봉이 닫힐 때 store 에 저장한다."""
 
@@ -22,15 +43,42 @@ class BarAggregator:
         # 거래가 뜸하면 봉은 남아 있는데 값이 낡는다. 매매 데스크가 "이 가격을
         # 믿어도 되는가" 를 판정하려면 도착 시각이 필요하다.
         self._seen: dict[str, float] = {}
+        # 수신 지연 집계 — 분당 한 행으로 접어 원장에 남긴다(개선 전후 비교 기준선)
+        self._lag = {"minute": None, "n": 0, "sum": 0.0, "max": 0.0}
+        self.lag_last = {"minute": None, "n": 0, "avg_ms": None, "max_ms": None}
+
+    def _lag_add(self, ms: float, minute: datetime) -> None:
+        cur = self._lag
+        if cur["minute"] is not None and cur["minute"] != minute and cur["n"]:
+            avg = cur["sum"] / cur["n"]
+            self.lag_last = {"minute": cur["minute"].isoformat(), "n": cur["n"],
+                             "avg_ms": round(avg, 0), "max_ms": round(cur["max"], 0)}
+            try:
+                store.record_tick_lag(cur["minute"].isoformat(), cur["n"],
+                                      avg, cur["max"])
+            except Exception:  # noqa: BLE001 - 계측 실패가 시세 수신을 막지 않는다
+                log.warning("틱 지연 기록 실패", exc_info=True)
+            if avg > 2000:    # 평균 2초 넘게 늦으면 그 분은 실시간이 아니었다
+                log.warning("틱 수신 지연 — %s 평균 %.0fms · 최대 %.0fms (%d건)",
+                            cur["minute"].strftime("%H:%M"), avg, cur["max"], cur["n"])
+            self._lag = {"minute": minute, "n": 0, "sum": 0.0, "max": 0.0}
+        if cur is self._lag:      # 같은 분이거나 첫 틱
+            cur["minute"] = cur["minute"] or minute
+        self._lag["n"] += 1
+        self._lag["sum"] += ms
+        self._lag["max"] = max(self._lag["max"], ms)
 
     async def on_tick(self, symbol: str, price: float, volume: int, ts: str) -> None:
         self._seen[symbol] = time.monotonic()
         now = datetime.now(KST)
+        lag = tick_lag_ms(ts, now)
         if len(ts) == 6:  # HHMMSS
             now = now.replace(
                 hour=int(ts[0:2]), minute=int(ts[2:4]), second=int(ts[4:6]), microsecond=0
             )
         minute = now.replace(second=0, microsecond=0)
+        if lag is not None:
+            self._lag_add(lag, minute)
         bar = self._current.get(symbol)
         if bar and bar["minute"] != minute:
             self._flush(symbol, bar)

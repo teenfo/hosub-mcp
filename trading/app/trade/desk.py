@@ -43,6 +43,7 @@
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -75,10 +76,13 @@ DEFAULTS = {
 # 화면이 읽는 계측. "WS 로 몇 건, REST 로 몇 건" 이 이 설계의 성적표다 —
 # REST 가 늘고 있으면 분리한 의미가 사라지는 중이므로 눈에 보여야 한다.
 STATE: dict = {
-    "cycles": 0, "ws": 0, "rest": 0, "no_price": 0, "exits": 0, "lines": 0,
-    "proposed": 0, "watched": 0, "degraded": False,
+    "cycles": 0, "ws": 0, "rest": 0, "rest_cache": 0, "no_price": 0, "exits": 0,
+    "lines": 0, "proposed": 0, "watched": 0, "degraded": False,
     "last_tick": None, "last_line": None,
 }
+
+# REST 폴백 캐시 — symbol -> (monotonic, price). tick() 의 스로틀 주석 참조.
+_REST_CACHE: dict[str, tuple[float, float]] = {}
 
 
 def status() -> dict:
@@ -350,8 +354,8 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
     위해서다. 이 설계의 값이 거기서 나온다 — 콜이 늘면 분리한 의미가 없다.
     """
     now = now or datetime.now(KST)
-    stat = {"watched": 0, "ws": 0, "rest": 0, "no_price": 0, "exits": 0,
-            "lines": 0, "proposed": 0}
+    stat = {"watched": 0, "ws": 0, "rest": 0, "rest_cache": 0, "no_price": 0,
+            "exits": 0, "lines": 0, "proposed": 0}
     rows = [p for p in ledger.positions(status="open", limit=200)
             if not p.get("exit_pending")]
     limit = int(_num("max_symbols"))
@@ -364,11 +368,22 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
         if px is not None:
             stat["ws"] += 1
         else:
-            px = await rest_price(pos["symbol"])
-            if px is None:
-                stat["no_price"] += 1
-                continue          # 가격을 모르면 판정하지 않는다
-            stat["rest"] += 1
+            # REST 폴백은 종목당 stale_sec 에 한 번만 — 종전에는 stale 이 지속되면
+            # **매 사이클(2초)** 콜이 나갔다(실측 2026-07-31: 보유 2종목 분당 47콜).
+            # 사이 사이클은 마지막 REST 값으로 판정한다 — stale_sec 이내 값은
+            # 어차피 '믿는 나이' 안이다.
+            mono = time.monotonic()
+            hit = _REST_CACHE.get(pos["symbol"])
+            if hit and mono - hit[0] < _num("stale_sec"):
+                px = hit[1]
+                stat["rest_cache"] += 1
+            else:
+                px = await rest_price(pos["symbol"])
+                if px is None:
+                    stat["no_price"] += 1
+                    continue      # 가격을 모르면 판정하지 않는다
+                _REST_CACHE[pos["symbol"]] = (mono, float(px))
+                stat["rest"] += 1
 
         lines = update_lines(pos, float(px))
         if lines is not None:
@@ -418,7 +433,7 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
             ledger.set_exit_pending(pos["id"], 0)   # 실패면 다음 사이클에 다시 본다
 
     STATE["cycles"] += 1
-    for k in ("ws", "rest", "no_price", "exits", "lines", "proposed"):
+    for k in ("ws", "rest", "rest_cache", "no_price", "exits", "lines", "proposed"):
         STATE[k] += stat[k]
     STATE["watched"] = stat["watched"]
     STATE["last_tick"] = now.strftime("%H:%M:%S")
@@ -427,7 +442,7 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
 
 
 # 주기 요약 — 2초 루프라 매 사이클 찍으면 로그가 무의미해진다. 1분에 한 줄.
-_LAST_SUMMARY: dict = {"at": None, "ws": 0, "rest": 0}
+_LAST_SUMMARY: dict = {"at": None, "ws": 0, "rest": 0, "rest_cache": 0}
 SUMMARY_SEC = 60.0
 
 
@@ -444,17 +459,23 @@ def _summarize(now: datetime) -> None:
     _LAST_SUMMARY["at"] = now
     d_ws = STATE["ws"] - _LAST_SUMMARY["ws"]
     d_rest = STATE["rest"] - _LAST_SUMMARY["rest"]
+    # 캐시 히트도 REST 계열로 센다 — 이 경보의 목적은 호출량이 아니라 **WS 가
+    # 죽었는지**다. 스로틀(2026-08-01)이 콜을 줄여도 'WS 아님' 비율은 그대로
+    # 보여야 13시대 좀비 같은 상황이 로그에 남는다.
+    d_cache = STATE["rest_cache"] - _LAST_SUMMARY.get("rest_cache", 0)
     # 청산도 델타로 — '최근 N초' 라고 말하는 줄에 프로세스 누적값을 섞으면
     # 재시작 전까지 계속 같은 숫자가 찍혀 문구가 거짓이 된다(감사 2026-08-01).
     d_exit = STATE["exits"] - _LAST_SUMMARY.get("exits", 0)
-    _LAST_SUMMARY.update(ws=STATE["ws"], rest=STATE["rest"], exits=STATE["exits"])
-    if prev is None or (d_ws + d_rest) == 0:
+    _LAST_SUMMARY.update(ws=STATE["ws"], rest=STATE["rest"],
+                         rest_cache=STATE["rest_cache"], exits=STATE["exits"])
+    if prev is None or (d_ws + d_rest + d_cache) == 0:
         return
-    pct = d_rest / (d_ws + d_rest) * 100
+    pct = (d_rest + d_cache) / (d_ws + d_rest + d_cache) * 100
     fn = log.warning if pct > 20 else log.info
-    fn("데스크 요약(최근 %.0f초): 감시 %d종목 · WS %d · REST %d (%.0f%%) · "
-       "청산 %d (누적 %d)",
-       SUMMARY_SEC, STATE["watched"], d_ws, d_rest, pct, d_exit, STATE["exits"])
+    fn("데스크 요약(최근 %.0f초): 감시 %d종목 · WS %d · REST %d(캐시 %d) "
+       "(%.0f%%) · 청산 %d (누적 %d)",
+       SUMMARY_SEC, STATE["watched"], d_ws, d_rest, d_cache, pct, d_exit,
+       STATE["exits"])
 
 
 # --------------------------------------------------------------------------

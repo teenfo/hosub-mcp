@@ -90,6 +90,34 @@ def prune_minutes(keep_days: int) -> int:
 DEEP_MAX_ATTEMPTS = 3
 
 
+def record_tick_lag(minute: str, n: int, avg_ms: float, max_ms: float) -> None:
+    """WS 틱 수신 지연 — 분당 한 행. "실시간이 늦다" 의 수치 원장(2026-08-01).
+
+    개선(증분 구독·좀비 감시) 전후를 같은 자로 비교하기 위한 기준선이다.
+    관측 전용 — 어떤 판정에도 쓰지 않는다.
+    """
+    with _conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS tick_lag_obs ("
+                     " minute TEXT PRIMARY KEY, n INTEGER,"
+                     " avg_ms REAL, max_ms REAL)")
+        conn.execute("INSERT OR REPLACE INTO tick_lag_obs VALUES (?,?,?,?)",
+                     (minute, int(n), round(float(avg_ms), 1),
+                      round(float(max_ms), 1)))
+
+
+def tick_lag_rows(day: str) -> list[dict]:
+    """그날의 분당 수신 지연. 화면·점검용."""
+    with _conn() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS tick_lag_obs ("
+                     " minute TEXT PRIMARY KEY, n INTEGER,"
+                     " avg_ms REAL, max_ms REAL)")
+        cur = conn.execute(
+            "SELECT minute, n, avg_ms, max_ms FROM tick_lag_obs"
+            " WHERE substr(minute,1,10)=? ORDER BY minute", (day,))
+        return [{"minute": r[0], "n": r[1], "avg_ms": r[2], "max_ms": r[3]}
+                for r in cur.fetchall()]
+
+
 def job_done(job: str, day: str) -> bool:
     """그 배치가 그날 이미 끝났는가 — **프로세스가 아니라 디스크에** 묻는다."""
     with _conn() as conn:
