@@ -1193,6 +1193,31 @@ async def api_ranking(_=Depends(require_auth)):
     return await asyncio.to_thread(ranking.latest)
 
 
+@app.get("/api/research/timeofday")
+async def api_timeofday(_=Depends(require_auth)):
+    """진입 시간대 분석 최신 결과(조회성 — 주문 없음)."""
+    from .research import timeofday
+
+    return await asyncio.to_thread(timeofday.latest)
+
+
+_timeofday_running = {"on": False}
+
+
+@app.post("/api/research/timeofday/run")
+async def api_timeofday_run(_=Depends(require_auth)):
+    """진입 시간대 분석 실행. 합성 표본이 전 종목 백테스트라 무겁다 — 별도 프로세스."""
+    from .backtest import offload
+
+    if _timeofday_running["on"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    _timeofday_running["on"] = True
+    try:
+        return await offload.run_job("timeofday")
+    finally:
+        _timeofday_running["on"] = False
+
+
 _rank_running = {"on": False}
 
 
