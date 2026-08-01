@@ -623,6 +623,8 @@ def due_exits(price_of, now: datetime | None = None) -> list[dict]:
             "AND (exit_pending IS NULL OR exit_pending=0)"
         ).fetchall()
     for row in rows:
+        if row["stop"] is None:
+            continue     # 외부(rule='external') 포지션 — 감시·기록만, 자동 청산 없음
         p = price_of(row["symbol"])
         if p is None:
             continue
@@ -807,17 +809,34 @@ def _agg(rows: list[sqlite3.Row]) -> dict:
 
 
 def realized_today(equity: float) -> dict:
-    """당일(KST) 청산된 포지션의 실현손익 합계 → {krw, pct, trades}.
-    일일 목표·손실 가드의 기준값이 된다(실제 청산 기록이 소스)."""
+    """당일(KST) 실현손익 → {krw, pct, trades, source, model_krw}.
+
+    일일 목표·손실 가드의 기준값이다. **주값은 증권사 계산값**(broker_daily,
+    ka10074 순액 — 수동 매매 포함, 실비용 반영)이고, 동기화가 낡았거나 없으면
+    시스템 원장 합계(모델·대사 혼합)로 폴백한다(source 로 구분).
+
+    모델값으로 가드가 판정하던 것이 실측 구멍이었다 — 2026-07-29 모델이 손실을
+    1,796원 과대계상한 상태로 가드가 잠겼다. 실거래 원장 대치(2026-08-01)의
+    2단계가 이 전환이다.
+    """
     today = datetime.now(KST).date().isoformat()
     with _conn() as conn:
         rows = conn.execute(
             "SELECT pnl_krw FROM positions WHERE status='closed' "
             "AND substr(closed,1,10)=?", (today,)
         ).fetchall()
-    krw = sum((r["pnl_krw"] or 0) for r in rows)
+    model_krw = sum((r["pnl_krw"] or 0) for r in rows)
+    krw, source = model_krw, "model"
+    try:
+        from . import fills
+        br = fills.broker_realized_today()
+        if br is not None:
+            krw, source = br, "broker"
+    except Exception:  # noqa: BLE001 - 대치 레이어 오류가 가드를 세우면 안 된다
+        pass
     pct = (krw / equity * 100) if equity else 0.0
-    return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows)}
+    return {"krw": round(krw, 1), "pct": round(pct, 4), "trades": len(rows),
+            "source": source, "model_krw": round(model_krw, 1)}
 
 
 def open_pnl(price_of, equity: float) -> dict:

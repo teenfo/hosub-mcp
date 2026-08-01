@@ -192,6 +192,9 @@ async def _ledger_loop() -> None:
                     # 체결되지 않은 주문이 손익으로 남지 않게 계좌와 대조해 회수한다.
                     # 청산 판정보다 **먼저** 돌려야 유령 포지션에 청산 주문이 나가지 않는다.
                     await _reap_unfilled(ledger)
+                    # 실거래 원장 동기화(60초 스로틀) — 유령·수동매매·실현손익을
+                    # 증권사 체결내역 기준으로 정렬한다. 분당 2콜.
+                    await _fills_sync()
                     # 보유 종목이 WS 구독에 들어와 있는지 매 사이클 보정한다.
                     # `watchlist.notify` 는 감시목록이 바뀔 때만 도는데, 포지션은
                     # 감시목록과 무관하게 열린다(수동 매수·인버스 대체). 집합이
@@ -376,6 +379,53 @@ async def _holdings_map() -> dict[str, int] | None:
         except (TypeError, ValueError):
             continue
     return out
+
+
+_fills_at = {"mono": 0.0}
+
+
+async def _fills_sync(force: bool = False) -> dict | None:
+    """실거래 원장 동기화(60초 스로틀) — 증권사 체결이 원본이다(trade/fills.py).
+
+    스냅샷 저장 → 원장 정렬(유령·놓친 청산·수동 매매) → 대사(실체결가·실비용
+    확정) → 증권사 실현손익 저장(가드 주값). 실패해도 기존 경로는 그대로 돈다.
+    """
+    import time as _t
+
+    if not force and _t.monotonic() - _fills_at["mono"] < 60:
+        return None
+    if not settings.KIWOOM_APP_KEY:
+        return None
+    _fills_at["mono"] = _t.monotonic()
+    from .kiwoom.client import client
+    from .kiwoom.realized import parse_daily, parse_executions
+    from .trade import fills, ledger
+
+    day = datetime.now(KST).date().isoformat()
+    try:
+        execs = parse_executions(await client.executions())
+    except Exception as e:  # noqa: BLE001 - 조회 실패가 청산 감시를 막지 않는다
+        log.warning("체결내역 동기화 실패: %s", e)
+        return None
+    fills.store_today(execs, day)
+    holdings = await _holdings_map()
+    got: dict = {}
+    try:
+        got = fills.sync_from_fills(day, holdings)
+    except Exception:  # noqa: BLE001
+        log.exception("실거래 원장 정렬 오류")
+    try:
+        ledger.reconcile_executions(execs)
+    except Exception:  # noqa: BLE001
+        log.exception("체결 대사 오류")
+    try:
+        d8 = day.replace("-", "")
+        fills.store_daily(day, parse_daily(await client.daily_realized(d8, d8)))
+    except Exception as e:  # noqa: BLE001
+        log.warning("증권사 실현손익 동기화 실패: %s", e)
+    if got and any(got.values()):
+        log.warning("실거래 원장 정렬: %s", got)
+    return {"fills": len(execs), **got}
 
 
 async def _reap_unfilled(ledger) -> None:
@@ -1388,6 +1438,30 @@ async def api_account_realized(days: int = 30, _=Depends(require_auth)):
     if broker.get("ok"):
         _realized_cache.update(ts=now, data=data)
     return data
+
+
+@app.get("/api/fills")
+async def api_fills(_=Depends(require_auth)):
+    """실거래 체결 원장 + 시스템 원장 대조 리포트 (조회 전용)."""
+    from .trade import fills
+
+    holdings = await _holdings_map()
+    day = datetime.now(KST).date().isoformat()
+    return {
+        "day": day,
+        "fills": await asyncio.to_thread(fills.today_fills, day),
+        "divergence": await asyncio.to_thread(fills.divergence, day, holdings),
+        "broker_realized": await asyncio.to_thread(fills.broker_realized_today),
+    }
+
+
+@app.post("/api/fills/sync")
+async def api_fills_sync(_=Depends(require_auth)):
+    """실거래 원장 동기화 즉시 실행(스로틀 무시). 조회·기록 경로 — 주문 없음."""
+    got = await _fills_sync(force=True)
+    if got is None:
+        return JSONResponse({"ok": False, "error": "API 키 미설정 또는 조회 실패"}, 502)
+    return {"ok": True, **got}
 
 
 @app.post("/api/account/reconcile")

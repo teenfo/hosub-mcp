@@ -72,7 +72,7 @@ _TRADING_GET_RE = re.compile(
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}|stock/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
     r"|research/(event-study|ranking|news-impact|trailing|trailing/real|timeofday|flowsignal)|scout|regime/history"
-    r"|cases|premarket|flows|kelly|profile|vpin)$"
+    r"|cases|premarket|flows|fills|kelly|profile|vpin)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
@@ -83,7 +83,7 @@ _TRADING_POST_RE = re.compile(
     r"|research/flowsignal/(run|backfill)"
     r"|scout/(mode|run)|account/reconcile"
     r"|positions/[0-9a-f]{12}/(close|void)|desk|cases/build|flows/run"
-    r"|bars-obs/run)$"
+    r"|fills/sync|bars-obs/run)$"
 )
 # 백테스트는 오래 걸린다(전 종목 리포트 수십 초, 종목별 재생도 봉이 쌓일수록·
 # 스윕과 겹칠수록 수 초~수십 초) — 이 경로들만 프록시 타임아웃을 늘린다.
