@@ -120,7 +120,7 @@ function routeId() {
 async function renderRoute() {
   clearTimers();
   const id = routeId();
-  const page = PAGES.find((p) => p.id === id) || PAGES[0];
+  const page = PAGES.find((p) => p.id === id || (p.aliases || []).includes(id)) || PAGES[0];
   content.innerHTML = "";
   // 사이드바 활성화
   document.querySelectorAll("#sidebar-nav .nav-link").forEach((l) =>
