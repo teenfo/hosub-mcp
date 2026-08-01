@@ -410,3 +410,46 @@ def test_every_source_is_registered_once():
 
     names = [c().name for c in sources.ALL]
     assert sorted(names) == sorted(model.SOURCES)
+
+
+# --- 문서 정합 관측 — 3분 거래량 (연구 문서 §2.3, 2026-08-01) -------------------
+
+@pytest.mark.asyncio
+async def test_presurge_문서_정의_관측_이력이_모자라면_None(fake_client):
+    """첫 관측에는 3분 전 누적이 없다 — 0 이 아니라 None 이어야 한다."""
+    fake_client(surge=_surge_payload(["000001"]))
+    got = await intraday.PresurgeSource().collect()
+    assert got[0].evidence["vol_3min"] is None
+    assert got[0].evidence["doc_surge"] is None
+
+
+@pytest.mark.asyncio
+async def test_presurge_문서_정의_관측_3분_증가분과_문턱(fake_client, monkeypatch):
+    """누적 50만 → (3분 뒤) 62만 이면 vol_3min=12만 — 문서 문턱(10만) 통과."""
+    from datetime import UTC, datetime, timedelta
+
+    src = intraday.PresurgeSource()
+    t0 = datetime(2026, 8, 3, 1, 0, tzinfo=UTC)          # 10:00 KST
+    # 과거 관측을 심는다 — collect 를 두 번 돌리는 대신 이력만 직접 만든다
+    src._vol_hist["000001"] = [(t0 - timedelta(seconds=180), 500_000)]
+    monkeypatch.setattr(intraday, "datetime", _FixedDT(t0), raising=False)
+
+    fake_client(surge={"trde_qty_sdnin": [
+        {"stk_cd": "000001", "stk_nm": "가", "cur_prc": "10000",
+         "flu_rt": "1.0", "sdnin_rt": "5.0", "now_trde_qty": "620000"}]})
+    got = await src.collect()
+    ev = got[0].evidence
+    assert ev["vol_3min"] == 120_000
+    assert ev["doc_surge"] == 1                          # >= 100,000 주
+    # 세기·순위 판정은 문서 필드와 무관하게 종전 그대로다(관측 전용)
+    assert got[0].raw == 5.0
+
+
+class _FixedDT:
+    """intraday.datetime.now 를 고정한다 — 이력 비교가 실행 시각에 안 흔들리게."""
+
+    def __init__(self, t):
+        self._t = t
+
+    def now(self, tz=None):
+        return self._t if tz is None else self._t.astimezone(tz)
