@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from app import discovery
+from app.scout import nightly as discovery
 
 
 @pytest.fixture

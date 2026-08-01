@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from app import discovery
+from app.scout import nightly as discovery
 from app.signals import scanner
 
 CFG = {"vol_surge_ratio": 3.0, "near_high_ratio": 0.97, "min_price": 1_000,

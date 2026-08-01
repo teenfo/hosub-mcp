@@ -6,8 +6,8 @@ import { postJSON, fmt, makeChanged, priceCellHTML, stockHTML } from "./tradelib
 
 // 발굴·감시 페이지 (트레이딩 그룹) — 종목이 '어디서 와서 어디로 가는가' 를 따라간다.
 //
-//   [후보 발굴]  실시간(거래대금·급등률·조짐) + 야간(상승·하락)
-//        ↓ 자동편입 / 수동 추가
+//   [후보 발굴]  실시간(거래대금·급등률·조짐) + 야간 배치(scout/nightly)
+//        ↓ 발굴 엔진(단일 통로) / 수동 추가
 //   [감시목록]  매매 tier / 수집전용 tier
 //        ↓
 //   (매매 데스크 — 신호·주문은 그쪽 담당)
@@ -216,7 +216,7 @@ export default {
       "지금 야간 분석 실행");
     runBtn.onclick = async () => {
       if (!confirm("전종목 일봉 수집·분석을 시작할까요? (약 10~15분, 주문 없음)")) return;
-      try { await postJSON("/api/trading/discovery/run"); } catch (e) { alert(e.message); }
+      try { await postJSON("/api/trading/nightly/run"); } catch (e) { alert(e.message); }
       loadDiscovery();
     };
     statusC.body.append(stRegime, stCounts, stMeta,
@@ -543,7 +543,7 @@ export default {
 
     const loadDiscovery = async () => {
       let d;
-      try { d = await fetchJSON("/api/trading/discovery"); } catch (e) { return; }
+      try { d = await fetchJSON("/api/trading/nightly"); } catch (e) { return; }
       if (!changed("source:disc", d)) return;
 
       // 시장 국면

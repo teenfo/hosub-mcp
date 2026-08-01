@@ -71,7 +71,7 @@ def load_daily(exclude_etf: bool = True) -> pd.DataFrame:
         from ..data.exclude import is_excluded
         from ..data.symbols import DB_PATH as SYM_DB
 
-        cfg = settings.CONFIG.get("discovery", {})
+        cfg = settings.CONFIG.get("nightly", {})
         try:
             with sqlite3.connect(SYM_DB) as conn:
                 names = dict(conn.execute("SELECT code, name FROM symbol_master"))
@@ -323,7 +323,7 @@ CAVEATS = [
 
 def run_once() -> dict:
     """전 구간 이벤트 스터디 실행 → 결과 저장. CPU 무거워 자식 프로세스로 돈다."""
-    cfg = settings.CONFIG.get("discovery", {})
+    cfg = settings.CONFIG.get("nightly", {})
     cost = float(settings.CONFIG.get("research", {}).get(
         "cost_pct", settings.COSTS.get("round_trip_pct", 0.28)))
     daily = load_daily()

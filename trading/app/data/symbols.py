@@ -82,7 +82,7 @@ def resolve(query: str, limit: int = 20) -> list[dict]:
 
 async def refresh() -> int:
     """ka10099 전종목 리스트로 마스터를 갱신. 반환: 종목 수."""
-    from ..discovery import parse_stock_list  # 지연 임포트 (순환 방지)
+    from ..scout.nightly import parse_stock_list  # 지연 임포트 (순환 방지)
     from ..kiwoom.client import client
 
     entries: list[dict] = []

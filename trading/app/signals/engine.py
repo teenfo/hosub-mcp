@@ -751,7 +751,7 @@ class SignalEngine:
         univ = int(cfg0.get("eod_universe_max", 0))
         if univ > 0:
             try:
-                from ..discovery import liquid_universe
+                from ..scout.nightly import liquid_universe
                 before = len(targets)
                 targets.update(dict.fromkeys(liquid_universe(univ)))
                 log.info("마감 백필 대상 확장: %d → %d종목", before, len(targets))

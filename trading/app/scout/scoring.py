@@ -109,7 +109,7 @@ def aggregate(signals: list[Signal], now: datetime | None = None) -> list[Candid
 
     tie-break 를 못박는 이유: 현행 발굴은 `scored.sort(key=-score)` 만 하는데
     점수가 0~3 정수라 동점이 대량 발생하고, 상위 5 선택이 전종목 API 응답
-    순서에 의존한다(discovery.py:205). 같은 편중을 물려받지 않는다.
+    순서에 의존한다(옛 discovery 의 정렬 결함). 같은 편중을 물려받지 않는다.
     """
     now = now or datetime.now(UTC)
     by_code: dict[str, Candidate] = {}

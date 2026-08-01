@@ -275,7 +275,7 @@ def test_min_score_comes_from_config_by_default():
     from app import settings
 
     ctx = ranking.prepare(_panel(n_days=6))
-    assert ctx["min_score"] == float(settings.CONFIG["discovery"]["min_score"])
+    assert ctx["min_score"] == float(settings.CONFIG["nightly"]["min_score"])
 
 
 def test_days_short_of_top_n_are_skipped(monkeypatch):

@@ -12,7 +12,7 @@
 """
 import pytest
 
-from app import discovery
+from app.scout import nightly as discovery
 from app.data import exclude
 from app.signals import scanner
 

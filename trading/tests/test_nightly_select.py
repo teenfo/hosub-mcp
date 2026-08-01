@@ -4,7 +4,7 @@
 늘린 자리를 점수 순으로 채우지 않는 근거는 1.5단계 실측(무작위가 모든 랭킹을 이겼다).
 조건식 팔의 근거는 그 반례다 — 외부 문서 조건식만 백테스트에서 무작위를 이겼다.
 """
-from app.discovery import _select, screen_pass
+from app.scout.nightly import _select, screen_pass
 
 
 def _pool(n, score=lambda i: 0.0, screen=lambda i: 0):
@@ -153,7 +153,7 @@ def test_배포_기본값은_꺼짐이다():
 
     cfg = yaml.safe_load(
         Path(__file__).resolve().parents[1].joinpath("config.yaml")
-        .read_text(encoding="utf-8"))["discovery"]
+        .read_text(encoding="utf-8"))["nightly"]
     assert cfg["screen_fill"] == 0
     assert cfg["random_fill"] > 0          # 대조군 팔은 계속 돈다
 
@@ -219,7 +219,7 @@ def test_무작위_표본은_승격선을_넘는_강도를_받는다(monkeypatch
             {"code": "000002", "name": "무작위", "close": 2000, "score": 0.0,
              "reasons": [], "pick_kind": "random"},
         ]), raising=False)
-    monkeypatch.setattr("app.discovery.latest_picks", slow.latest_picks,
+    monkeypatch.setattr("app.scout.nightly.latest_picks", slow.latest_picks,
                         raising=False)
 
     sigs = asyncio.run(slow.NightlySource().collect())
@@ -249,7 +249,7 @@ def test_조건식_표본도_구분되는_강도와_kind_를_받는다(monkeypat
             {"code": "000003", "name": "무작위", "close": 3000, "score": 0.0,
              "reasons": [], "pick_kind": "random"},
         ]), raising=False)
-    monkeypatch.setattr("app.discovery.latest_picks", slow.latest_picks,
+    monkeypatch.setattr("app.scout.nightly.latest_picks", slow.latest_picks,
                         raising=False)
 
     by = {s.code: s for s in asyncio.run(slow.NightlySource().collect())}
