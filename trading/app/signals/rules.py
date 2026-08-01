@@ -14,6 +14,7 @@ Exit 우선 원칙: stop/target 없는 신호는 존재할 수 없다.
 공통 안전장치(손절폭 대역 min_stop_pct~max_stop_pct, 돌파 확인 confirm_on_close)와
 엔진 게이트(롱 전용·국면·잔고·리스크 사이징·종목 중복)는 모든 규칙에 자동 적용된다.
 """
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, time
@@ -22,6 +23,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from . import indicators as ind
+
+log = logging.getLogger(__name__)
 
 KST = ZoneInfo("Asia/Seoul")
 
@@ -516,6 +519,37 @@ def breakdown_retest(df: pd.DataFrame, cfg: dict) -> Signal | None:
     return Signal("breakdown_retest", "short", float(last.close), stop,
                   _target(float(last.close), stop, "short", 1.5),
                   f"지지 {support:,.0f} 붕괴 후 리테스트 실패", ts=df.index[-1])
+
+
+def entry_window_note(rule: str, now: datetime, rules_cfg: dict) -> str | None:
+    """진입 시간창 게이트 — 차단이면 사유 문자열, 통과면 None.
+
+    시간대 분석(2026-08-01, 합성 7,094체결)이 근거다. 발주만 막고 신호는
+    기록한다 — "신호는 전부 기록, 주문 생성만 게이트" 규약 그대로.
+
+      entry_cutoff       : 전 규칙 공통. 이 시각 이후 신규 진입 차단
+                           (15:00 이후 진입은 eod 강제 청산 71% — 시간이 없다)
+      <rule>.no_entry    : 규칙별 차단 창 ["HH:MM-HH:MM", ...]
+                           (pullback 10:00~11:30 — 평균 −0.65R, n=1,086)
+
+    형식이 깨진 창은 조용히 무시하지 않고 경고 로그를 남긴 뒤 통과시킨다 —
+    오타 하나로 규칙이 영구 차단되는 것이 차단 실패보다 나쁘다.
+    """
+    hhmm = now.strftime("%H:%M")
+    cutoff = str(rules_cfg.get("entry_cutoff", "") or "")
+    if cutoff and hhmm >= cutoff:
+        return (f"진입 시간창 — {cutoff} 이후 신규 진입 차단"
+                "(마감까지 목표 도달 시간 부족 — 시간대 분석 2026-08-01)")
+    for win in (rules_cfg.get(rule, {}) or {}).get("no_entry", []) or []:
+        try:
+            a, b = str(win).split("-")
+        except ValueError:
+            log.warning("no_entry 창 형식 오류(%s: %r) — 무시하고 통과", rule, win)
+            continue
+        if a <= hhmm < b:
+            return (f"진입 시간창 — {rule} 은 {win} 신규 진입 차단"
+                    "(시간대 분석 2026-08-01)")
+    return None
 
 
 def evaluate_all(df: pd.DataFrame, rules_cfg: dict,
