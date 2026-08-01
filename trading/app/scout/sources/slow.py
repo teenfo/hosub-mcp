@@ -42,20 +42,19 @@ class NightlySource:
         for p in picks:
             if not p.get("code"):
                 continue
-            # 무작위·조건식 표본은 3규칙 점수가 0 일 수 있고, 그대로 두면 강도
-            # 0 → 영원히 후보가 되지 않는다. 관측 팔이 존재하려면 승격선을 넘어야
-            # 하므로 **팔마다 고정 강도**를 준다. 이건 확신이 아니라 "표본에 자리를
-            # 준다" 는 뜻이고, kind 로 끝까지 구분되므로 사후 대조에서 섞이지 않는다.
-            # 3규칙 점수를 섞지 않는 것도 같은 이유다 — 팔이 그 점수로 판정받으면
-            # 무엇을 재는 팔인지가 흐려진다.
+            # **강도는 팔에 상관없이 하나다**(`NIGHTLY_STRENGTH`). 종전에는 점수
+            # 표본만 `score_strength` 를 받아 자리가 모자랄 때 앞자리를 가져갔는데,
+            # 변동성 정합 대조군으로 재니 점수 표본이 -0.168R(t=-10.70) 이고 점수가
+            # 높을수록 더 나빴다. 그 순서는 거꾸로였다. 무작위를 위에 두지도
+            # 않는다 — 대조군이지 이긴 쪽이 아니다. 둘 다 모르므로 같은 값이다.
+            #
+            # 원시 점수는 `raw` 와 `evidence` 에 그대로 남는다. 팔 구분은 `kind`
+            # 가 하므로 사후 대조에서 섞이지 않는다.
             arm = p.get("pick_kind") or "score"
-            fixed = {"random": model.RANDOM_STRENGTH,
-                     "screen": model.SCREEN_STRENGTH}.get(arm)
             out.append(Signal(
                 code=p["code"], name=p.get("name") or p["code"], source=self.name,
-                kind=self.name if fixed is None else f"{self.name}:{arm}",
-                strength=(fixed if fixed is not None
-                          else model.score_strength(float(p.get("score", 0)))),
+                kind=self.name if arm == "score" else f"{self.name}:{arm}",
+                strength=model.NIGHTLY_STRENGTH,
                 raw=float(p.get("score", 0)),
                 price=float(p.get("close", 0) or 0),
                 evidence={"date": date, "pick_kind": p.get("pick_kind") or "score",

@@ -288,7 +288,10 @@ async def test_nightly_consumes_existing_picks(monkeypatch):
                         lambda self: ran.append(1))     # 불리면 안 된다
     got = await slow.NightlySource().collect()
     assert ran == []
-    assert [s.strength for s in got] == [1.0, pytest.approx(2 / 3)]
+    # 강도는 3규칙 점수를 따르지 않는다 — 3점이 2점보다 앞자리를 받으면 안 된다.
+    # 변동성 정합 대조군 대비 3점 만점이 -0.238R 로 **가장 나빴다**(2026-08-01).
+    assert [s.strength for s in got] == [model.NIGHTLY_STRENGTH] * 2
+    assert [s.raw for s in got] == [3.0, 2.0]      # 원시 점수는 그대로 남는다
     assert got[0].evidence["reasons"] == ["거래량급증"]
 
 
