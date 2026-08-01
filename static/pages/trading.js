@@ -6,6 +6,10 @@ import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge, sto
 // 매매 데스크 (트레이딩 그룹): 장중 실행에 필요한 것만 — 상태·가드·승인대기·신호·1분봉.
 // 종목 소싱은 '발굴·감시', 리뷰는 '성과·백테스트' 페이지가 담당한다.
 
+// 실시간 가격 스트림(SSE) — 페이지 재진입 시 이전 연결을 닫기 위한 싱글턴.
+// 스트림이 죽어도 2초 폴링(refreshPrices)이 폴백이라 화면은 계속 움직인다.
+let priceStream = null;
+
 export default {
   id: "trading",
   title: "매매 데스크",
@@ -1353,8 +1357,27 @@ export default {
       for (const r of holdRows) paintHold(r, prices[r.h.code]);
     };
 
+    // 틱 도착 즉시 해당 종목 셀만 갱신 — 폴링(2초)은 SSE 가 못 받는 구간의 폴백.
+    // EventSource 는 끊기면 자동 재접속하므로 onerror 는 조용히 둔다.
+    const patchPrice = (sym, p) => {
+      if (p == null) return;
+      container.querySelectorAll(`[data-px="${sym}"]`).forEach((cell) =>
+        priceCellHTML(cell, p, cell.getAttribute("data-entry")));
+      for (const r of holdRows) if (r.h.code === sym) paintHold(r, p);
+    };
+    if (priceStream) { try { priceStream.close(); } catch (e) { /* 무시 */ } }
+    try {
+      priceStream = new EventSource("/api/trading/prices/stream");
+      priceStream.onmessage = (ev) => {
+        try {
+          const d = JSON.parse(ev.data);
+          if (d && d.s) patchPrice(d.s, Number(d.p));
+        } catch (e) { /* 깨진 프레임은 버린다 */ }
+      };
+    } catch (e) { priceStream = null; }
+
     await Promise.all([loadStatus(), loadOrders(), loadSignals(), loadRisk()]);
-    ctx.addTimer(setInterval(refreshPrices, 2_000));   // 현재가 셀만 2초 갱신
+    ctx.addTimer(setInterval(refreshPrices, 2_000));   // 현재가 셀만 2초 갱신(SSE 폴백)
     ctx.addTimer(setInterval(tickCountdown, 1_000));   // 다음 스캔 카운트다운
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); }, 10_000));
     ctx.addTimer(setInterval(loadRisk, 30_000));

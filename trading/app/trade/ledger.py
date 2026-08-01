@@ -651,6 +651,20 @@ def set_exit_pending(pos_id: str, val: int) -> None:
         conn.execute("UPDATE positions SET exit_pending=? WHERE id=?", (val, pos_id))
 
 
+def claim_exit(pos_id: str) -> bool:
+    """청산 잠금을 **원자적으로** 획득 — 한쪽만 True 를 받는다.
+
+    틱 드리븐 판정(2026-08-01)부터는 2초 루프와 틱 콜백이 같은 포지션을 거의
+    동시에 볼 수 있다. 각자 '읽고 나서 세우는' 방식이면 둘 다 발주한다 —
+    UPDATE 의 WHERE exit_pending=0 조건이 경쟁을 DB 에서 끊는다.
+    """
+    with _conn() as conn:
+        cur = conn.execute(
+            "UPDATE positions SET exit_pending=1 WHERE id=? AND status='open'"
+            " AND (exit_pending IS NULL OR exit_pending=0)", (pos_id,))
+        return cur.rowcount == 1
+
+
 def force_close_eod(price_of) -> int:
     """장 마감 미청산 포지션을 현재가로 정리(reason=eod).
 

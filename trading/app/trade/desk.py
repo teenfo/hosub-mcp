@@ -78,11 +78,21 @@ DEFAULTS = {
 STATE: dict = {
     "cycles": 0, "ws": 0, "rest": 0, "rest_cache": 0, "no_price": 0, "exits": 0,
     "lines": 0, "proposed": 0, "watched": 0, "degraded": False,
+    "tick_judged": 0,               # 틱 드리븐 판정 횟수 — 이 경로가 사는지의 계측
     "last_tick": None, "last_line": None,
 }
 
 # REST 폴백 캐시 — symbol -> (monotonic, price). tick() 의 스로틀 주석 참조.
 _REST_CACHE: dict[str, tuple[float, float]] = {}
+
+# --- 틱 드리븐 판정 (2026-08-01) ---
+# 2초 루프는 하트비트로 남고, 보유 종목의 WS 틱이 도착하면 **즉시** 판정한다.
+# 판정 지연 ≤2초 → ~0초(틱 수신 지연만 남음). 추가 API 콜 0. 급변 구간(하필
+# 손절이 발동하는 순간)의 1~2초가 0.1~0.2% 슬리피지가 되던 것을 없앤다.
+_HOOKS: dict = {"execute_exit": None, "propose_exit": None}
+_POS_CACHE: dict = {"rows": {}}      # symbol -> 열린 포지션 — tick() 이 2초마다 갱신
+_TICK_AT: dict[str, float] = {}      # symbol -> 마지막 틱 판정(monotonic)
+TICK_MIN_SEC = 0.3                   # 체결 폭주 시 판정 폭주 방지(종목당)
 
 
 def status() -> dict:
@@ -340,6 +350,93 @@ def _auto(reason: str) -> bool:
     return reason in ("stop", "timeout") and ex.get("stop_mode", "auto") == "auto"
 
 
+async def _judge_one(pos: dict, px: float, now: datetime,
+                     execute_exit, propose_exit, stat: dict) -> None:
+    """포지션 하나의 라인 갱신 + 청산 판정 + 발주 — 루프와 틱 판정이 공유한다."""
+    lines = update_lines(pos, px)
+    if lines is not None:
+        if ledger.set_lines(pos["id"], lines[0], lines[1], now=now):
+            stat["lines"] += 1
+            pos = {**pos, "stop_live": lines[0], "target_live": lines[1]}
+            # 틱 판정이 낡은 라인으로 래칫을 되돌리지 않게 캐시도 갱신한다
+            if _POS_CACHE["rows"].get(pos["symbol"], {}).get("id") == pos["id"]:
+                _POS_CACHE["rows"][pos["symbol"]] = pos
+            STATE["last_line"] = {
+                "at": now.strftime("%H:%M:%S"), "symbol": pos["symbol"],
+                "name": pos.get("name"), "stop": lines[0], "target": lines[1]}
+
+    stop, target = ledger.effective_lines(pos)
+    if pos["side"] == "long":
+        reason = "stop" if px <= stop else ("target" if px >= target else None)
+    else:
+        reason = "stop" if px >= stop else ("target" if px <= target else None)
+    if not reason:
+        return
+
+    line_px = float(stop if reason == "stop" else target)
+    # 발주 **전에** 원자적으로 잠근다 — 2초 루프와 틱 판정이 같은 포지션을 거의
+    # 동시에 볼 수 있다. claim 을 한쪽만 통과한다(ledger.claim_exit).
+    if not ledger.claim_exit(pos["id"]):
+        return
+    _POS_CACHE["rows"].pop(pos["symbol"], None)   # 잠긴 포지션은 틱 판정 대상에서 제외
+
+    if not _auto(reason) and propose_exit is not None:
+        # 승인 모드 — 기존 30초 루프와 같은 규약이다. 승인 대기에만 올린다
+        try:
+            await asyncio.to_thread(propose_exit, pos, reason, line_px)
+        except Exception:  # noqa: BLE001
+            log.exception("데스크 청산 승인 등록 오류 %s", pos.get("symbol"))
+            ledger.set_exit_pending(pos["id"], 0)
+            return
+        stat["proposed"] += 1
+        log.info("데스크 청산 승인 대기 %s(%s) %s", pos.get("name"),
+                 pos.get("symbol"), reason)
+        return
+
+    try:
+        r = await execute_exit(pos, reason, line_px)
+    except Exception:  # noqa: BLE001
+        log.exception("데스크 청산 발주 오류 %s", pos.get("symbol"))
+        ledger.set_exit_pending(pos["id"], 0)
+        return
+    if r and r.get("ok"):
+        stat["exits"] += 1
+        log.info("데스크 청산 %s %s(%s) @ %s", reason, pos.get("name"),
+                 pos.get("symbol"), px)
+    else:
+        ledger.set_exit_pending(pos["id"], 0)   # 실패면 다음 사이클에 다시 본다
+
+
+async def on_tick(symbol: str, px: float) -> None:
+    """WS 틱 도착 즉시 보유 종목 판정 — 2초 루프는 하트비트로 남는다.
+
+    포지션 목록은 루프가 2초마다 갱신한 캐시를 쓴다(틱마다 DB 를 읽지 않는다).
+    종목당 TICK_MIN_SEC 스로틀 — 체결이 몰려도 판정이 초당 수십 회가 되지 않게.
+    """
+    if not enabled() or STATE.get("degraded") or not in_session():
+        return
+    execute_exit = _HOOKS.get("execute_exit")
+    if execute_exit is None:          # 루프가 아직 훅을 등록하기 전
+        return
+    pos = _POS_CACHE["rows"].get(symbol)
+    if pos is None or pos.get("stop") is None:
+        return
+    mono = time.monotonic()
+    if mono - _TICK_AT.get(symbol, 0.0) < TICK_MIN_SEC:
+        return
+    _TICK_AT[symbol] = mono
+    stat = {"lines": 0, "proposed": 0, "exits": 0}
+    try:
+        await _judge_one(pos, float(px), datetime.now(KST),
+                         execute_exit, _HOOKS.get("propose_exit"), stat)
+    except Exception:  # noqa: BLE001 - 틱 경로 오류가 시세 수신을 막지 않는다
+        log.exception("틱 판정 오류 %s", symbol)
+        return
+    STATE["tick_judged"] += 1
+    for k in ("lines", "proposed", "exits"):
+        STATE[k] += stat[k]
+
+
 async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = None,
                propose_exit=None) -> dict:
     """보유 포지션 1회 판정. 반환: 계측값(화면·로그용).
@@ -362,6 +459,8 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
     if limit > 0:
         rows = rows[:limit]      # 0 이면 보유 전량 — 감시 밖으로 나가는 종목이 없다
     stat["watched"] = len(rows)
+    # 틱 드리븐 판정용 캐시 — 외부(stop 없음) 포지션은 애초에 판정 대상이 아니다
+    _POS_CACHE["rows"] = {p["symbol"]: p for p in rows if p.get("stop") is not None}
 
     for pos in rows:
         if pos.get("stop") is None:
@@ -387,52 +486,7 @@ async def tick(fresh_price, rest_price, execute_exit, now: datetime | None = Non
                 _REST_CACHE[pos["symbol"]] = (mono, float(px))
                 stat["rest"] += 1
 
-        lines = update_lines(pos, float(px))
-        if lines is not None:
-            if ledger.set_lines(pos["id"], lines[0], lines[1], now=now):
-                stat["lines"] += 1
-                pos = {**pos, "stop_live": lines[0], "target_live": lines[1]}
-                STATE["last_line"] = {
-                    "at": now.strftime("%H:%M:%S"), "symbol": pos["symbol"],
-                    "name": pos.get("name"), "stop": lines[0], "target": lines[1]}
-
-        stop, target = ledger.effective_lines(pos)
-        if pos["side"] == "long":
-            reason = "stop" if px <= stop else ("target" if px >= target else None)
-        else:
-            reason = "stop" if px >= stop else ("target" if px <= target else None)
-        if not reason:
-            continue
-
-        line_px = float(stop if reason == "stop" else target)
-        # 발주 **전에** 잠근다. 2초 루프에서는 발주 왕복 안에 다음 사이클이 온다.
-        ledger.set_exit_pending(pos["id"], 1)
-
-        if not _auto(reason) and propose_exit is not None:
-            # 승인 모드 — 기존 30초 루프와 같은 규약이다. 승인 대기에만 올린다
-            try:
-                await asyncio.to_thread(propose_exit, pos, reason, line_px)
-            except Exception:  # noqa: BLE001
-                log.exception("데스크 청산 승인 등록 오류 %s", pos.get("symbol"))
-                ledger.set_exit_pending(pos["id"], 0)
-                continue
-            stat["proposed"] += 1
-            log.info("데스크 청산 승인 대기 %s(%s) %s", pos.get("name"),
-                     pos.get("symbol"), reason)
-            continue
-
-        try:
-            r = await execute_exit(pos, reason, line_px)
-        except Exception:  # noqa: BLE001
-            log.exception("데스크 청산 발주 오류 %s", pos.get("symbol"))
-            ledger.set_exit_pending(pos["id"], 0)
-            continue
-        if r and r.get("ok"):
-            stat["exits"] += 1
-            log.info("데스크 청산 %s %s(%s) @ %s", reason, pos.get("name"),
-                     pos.get("symbol"), px)
-        else:
-            ledger.set_exit_pending(pos["id"], 0)   # 실패면 다음 사이클에 다시 본다
+        await _judge_one(pos, float(px), now, execute_exit, propose_exit, stat)
 
     STATE["cycles"] += 1
     for k in ("ws", "rest", "rest_cache", "no_price", "exits", "lines", "proposed"):
@@ -488,6 +542,8 @@ async def loop(fresh_price, rest_price, execute_exit, ws_ok, propose_exit=None) 
 
     ws_ok() -> bool : WS 연결 상태. 끊겼으면 주기를 강등해 REST 폭주를 막는다.
     """
+    # 틱 드리븐 판정(on_tick)이 같은 발주 훅을 쓰도록 등록해 둔다
+    _HOOKS.update(execute_exit=execute_exit, propose_exit=propose_exit)
     while True:
         interval = _num("interval_sec")
         try:
