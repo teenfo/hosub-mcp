@@ -106,94 +106,12 @@ def remove(code: str) -> bool:
     return bool(cur.rowcount)
 
 
-def _held() -> set[str]:
-    """지금 포지션이 열려 있는 종목 — 자동 교체에서 절대 빼면 안 되는 집합.
-
-    감시목록에서 빠지면 WS 구독이 해제되고(`aggregator.snapshot()` → None),
-    장중 분봉 백필 대상(`engine._collect_targets`)에서도 제외된다. 그러면
-    청산 감시(30초)가 `ledger.latest_price` 로 폴백하는데 그 값은 이탈 종목
-    수집 루프(15분 주기)로만 갱신된다 — **손절이 최대 15분 묵은 가격으로
-    판정된다.** 실거래 손실로 직결되므로 여기서 원천 차단한다.
-    """
-    try:
-        from ..trade import ledger      # 지연 임포트 — 순환 참조 방지
-
-        return ledger.open_symbols()
-    except Exception:  # noqa: BLE001 - 조회 실패 시 아무것도 지우지 않는 쪽이 안전
-        log.exception("보유 종목 조회 실패 — 자동 교체를 보수적으로 처리")
-        return {r["code"] for r in entries()}
-
-
-def replace_auto(picks: list[dict]) -> None:
-    """auto 항목을 새 발굴 상위로 교체. seed/manual·보유 종목은 건드리지 않는다."""
-    keep = [p["code"] for p in picks] + sorted(_held())
-    now = datetime.now(UTC).isoformat()
-    with _conn() as conn:
-        if keep:
-            ph = ",".join("?" * len(keep))
-            conn.execute(
-                f"DELETE FROM watchlist WHERE source='auto' AND code NOT IN ({ph})",
-                keep,
-            )
-        else:
-            conn.execute("DELETE FROM watchlist WHERE source='auto'")
-        conn.executemany(
-            "INSERT OR IGNORE INTO watchlist (code, name, source, added) "
-            "VALUES (?,?,?,?)",
-            [(p["code"], p.get("name") or p["code"], "auto", now) for p in picks],
-        )
-        _rebuild_runtime(conn)
-    log.info("발굴 자동 편입: %s", [p["code"] for p in picks])
-
-
-def replace_scanned(source: str, picks: list[dict]) -> None:
-    """스캔 기반 자동편입 — 해당 source 항목을 새 목록으로 전량 교체한다.
-
-    seed/manual/auto 로 이미 감시 중인 종목은 건드리지 않는다(중복 편입 방지).
-    각 pick 의 collect_only 로 매매/수집전용 tier 를 지정한다.
-    **보유 종목은 순위에서 밀려도 남긴다** — 빠지면 손절 감시가 묵은 가격으로
-    돈다(_held 참조).
-    """
-    now = datetime.now(UTC).isoformat()
-    held = _held()
-    with _conn() as conn:
-        if held:
-            ph = ",".join("?" * len(held))
-            conn.execute(
-                f"DELETE FROM watchlist WHERE source=? AND code NOT IN ({ph})",
-                (source, *sorted(held)),
-            )
-        else:
-            conn.execute("DELETE FROM watchlist WHERE source=?", (source,))
-        existing = {r["code"] for r in conn.execute("SELECT code FROM watchlist")}
-        added = 0
-        for p in picks:
-            if p["code"] in existing:
-                continue   # 이미 다른 소스로 감시 중 → 유지
-            conn.execute(
-                "INSERT INTO watchlist (code, name, source, added, collect_only) "
-                "VALUES (?,?,?,?,?)",
-                (p["code"], p.get("name") or p["code"], source, now,
-                 1 if p.get("collect_only") else 0),
-            )
-            existing.add(p["code"])
-            added += 1
-        _rebuild_runtime(conn)
-    log.info("%s 자동편입: 후보 %d종목 중 %d종목 신규", source, len(picks), added)
-
-
-def replace_gainers(picks: list[dict]) -> None:
-    """급등률 상위 자동편입 (source='gainer')."""
-    replace_scanned("gainer", picks)
-
-
-def replace_active(picks: list[dict]) -> None:
-    """거래대금 상위 자동편입 (source='active').
-
-    급등률 상위(gainer)는 '많이 오른 것', 거래대금 상위는 '시장이 실제로 돈을
-    넣고 있는 것'이라 겹치지 않는다. 후자가 유동성 면에서 안전한 후보다.
-    """
-    replace_scanned("active", picks)
+# `replace_auto` / `replace_scanned` / `replace_gainers` / `replace_active` 는
+# 2026-08-01 완전 통합에서 **삭제**됐다. 감시목록 쓰기는 발굴 엔진(scout, full)의
+# `apply_decisions` 경로(add/remove/set_mode)와 사용자 수동 조작만 남는다.
+# 전량 교체(DELETE+INSERT) 계열이 만들던 문제들 — 60초마다 편입·이탈 반복,
+# source 귀속 영구 고정, 조회 1회 실패 시 tier 증발 — 이 통로와 함께 사라졌다.
+# 보유 종목 보호는 엔진의 protected(promote.plan)가 담당한다.
 
 
 async def notify() -> None:

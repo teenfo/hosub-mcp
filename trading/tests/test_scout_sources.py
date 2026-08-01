@@ -91,8 +91,8 @@ async def test_adapters_never_touch_the_watchlist(fake_client, monkeypatch):
     import app.data.watchlist as wl
 
     called = []
-    for fn in ("replace_active", "replace_gainers", "replace_auto",
-               "replace_scanned", "add", "remove"):
+    # replace_* 계열은 2026-08-01 완전 통합에서 삭제 — 남은 쓰기 통로 전부를 가로챈다
+    for fn in ("add", "remove", "set_mode"):
         monkeypatch.setattr(wl, fn, lambda *a, _f=fn, **k: called.append(_f))
     fake_client(rank=_rank_payload(["000001", "000002"]),
                 surge=_surge_payload(["000003"]))

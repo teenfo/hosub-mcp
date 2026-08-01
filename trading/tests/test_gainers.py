@@ -26,28 +26,6 @@ def test_filter_gainers_tiers_and_excludes(monkeypatch):
     assert tier["005930"] is True                         # 고가주 → 수집전용
 
 
-def test_replace_gainers_rotates_and_skips_existing(tmp_path, monkeypatch):
-    monkeypatch.setattr(watchlist, "DB_PATH", tmp_path / "trading.db")
-    monkeypatch.setattr(settings, "WATCHLIST", {})
-    monkeypatch.setattr(settings, "COLLECT_ONLY", set())
-    watchlist.add("010140", "삼성중공업", source="manual")  # 수동 종목(보호돼야 함)
-
-    watchlist.replace_gainers([
-        {"code": "010140", "name": "삼성중공업", "collect_only": True},   # 이미 manual → 스킵
-        {"code": "011200", "name": "HMM", "collect_only": False},
-        {"code": "005930", "name": "삼성전자", "collect_only": True},
-    ])
-    src = {e["code"]: (e["source"], e["collect_only"]) for e in watchlist.entries()}
-    assert src["010140"][0] == "manual"                   # 수동 종목은 그대로
-    assert src["011200"] == ("gainer", 0)                 # 신규 급등주 매매
-    assert src["005930"] == ("gainer", 1)                 # 신규 급등주 수집전용
-
-    # 다음 스캔에서 011200 이 빠지면 gainer 소스만 교체된다
-    watchlist.replace_gainers([{"code": "005930", "name": "삼성전자", "collect_only": True}])
-    codes = {e["code"] for e in watchlist.entries()}
-    assert codes == {"010140", "005930"}                  # 011200(gainer) 제거, manual 유지
-
-
 def test_liquidity_floor_drops_thin_names(monkeypatch):
     """유동성 하한 — 거래대금이 얇으면 소액 주문에도 시장 충격이 난다.
     (실측 2026-07-27: 3~10억짜리가 감시목록에 들어와 실제로 매매·손절됨)"""

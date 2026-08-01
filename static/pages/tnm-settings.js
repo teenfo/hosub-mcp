@@ -453,9 +453,10 @@ export default {
     };
 
     // 운영 트리거 — 주기를 기다리지 않고 지금 돌린다
+    // promote/run 은 2026-08-01 완전 통합에서 삭제 — 편입은 trading 발굴 엔진의
+    // NewsSource 가 /api/items 를 소비하는 단일 통로다.
     const TRIGGERS = [
       ["collect/run", "수집 지금 실행", "DART·뉴스를 즉시 한 바퀴", "outline-primary"],
-      ["promote/run", "편입 지금 실행", "고점수 종목을 감시목록으로", "outline-primary"],
       ["reclassify_failed", "실패분 재분류", "llm_failed 레코드를 다시 큐에", "outline-warning"],
       ["notify/test", "슬랙 테스트 발송", "채널 연결 확인", "outline-secondary"],
     ];

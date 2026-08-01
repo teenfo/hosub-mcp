@@ -122,13 +122,7 @@ alerts:
   shadow_mode: true            # true 면 어떤 조건에도 발송하지 않고 기록만 (M8 전환 시 false)
 
 # 고점수 뉴스·공시 종목의 트레이딩 감시목록 편입 — **수집전용으로만**.
-# 뉴스 점수는 아직 검증되지 않았다(Shadow 라벨링 2주 미완, 점수×수익률 이벤트
-# 스터디 미실시). 검증 전 신호로 매매하는 것은 발굴 3규칙에서 이미 겪은 실수다.
-# 지금 하는 일은 데이터를 먼저 쌓는 것뿐이고, 매매 tier 승격은 측정을 통과한 뒤
-# 사람이 결정한다.
-promote:
-  enabled: true
-  min_score: 70          # 알림 기본 임계(60)보다 높게 — 편입은 알림보다 보수적으로
-  window_hours: 24       # 최근 N시간 내 분석만
-  max_per_run: 5         # 사이클당 편입 상한(감시목록 급팽창 방지)
-  interval_min: 60
+# promote(직접 편입 루프)는 2026-08-01 완전 통합에서 삭제됐다 — trading 쪽
+# 발굴 엔진 NewsSource 가 /api/items 를 소비한다. 종전 promote 의 보수적
+# 게이트(min_score 70 · negative/unclear 차단)는 그쪽 설정으로 옮겨졌다
+# (trading config.yaml scout.news 참조).

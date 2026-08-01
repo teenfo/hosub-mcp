@@ -103,32 +103,8 @@ def test_filter_candidates_keeps_existing_active(monkeypatch):
     assert [x["code"] for x in kept] == ["000001"]
 
 
-def test_replace_active_round_trip(tmp_path, monkeypatch):
-    monkeypatch.setattr(watchlist, "DB_PATH", tmp_path / "trading.db")
-    monkeypatch.setattr(settings, "WATCHLIST", {})
-    monkeypatch.setattr(settings, "COLLECT_ONLY", set())
-    watchlist.add("005930", "삼성전자", source="manual")
-    watchlist.replace_active([
-        {"code": "000660", "name": "A", "collect_only": False},
-        {"code": "035420", "name": "B", "collect_only": True},
-        {"code": "005930", "name": "중복", "collect_only": False},   # manual 유지
-    ])
-    rows = {e["code"]: e for e in watchlist.entries()}
-    assert rows["000660"]["source"] == "active"
-    assert rows["005930"]["source"] == "manual"       # 다른 소스는 건드리지 않는다
-    assert settings.COLLECT_ONLY == {"035420"}
-    # 다음 스캔에서 전량 교체 — 더 이상 상위가 아닌 종목은 빠진다
-    watchlist.replace_active([{"code": "000660", "name": "A"}])
-    codes = {e["code"] for e in watchlist.entries() if e["source"] == "active"}
-    assert codes == {"000660"}
-    assert "005930" in {e["code"] for e in watchlist.entries()}   # manual 은 그대로
-
-
-def test_config_wires_active_auto_watch():
-    """거래대금 상위 → 감시목록 배선이 살아 있는지(되돌아가면 잡는다)."""
-    sc = settings.CONFIG["scanner"]
-    assert sc.get("auto_watch") is True
-    assert sc.get("market") == "000"          # 전체 시장(코스닥 포함)
+# `replace_active` 라운드트립·auto_watch 배선 테스트는 2026-08-01 완전 통합에서
+# 경로 자체가 삭제되며 함께 갔다 — 편입은 엔진 단일 통로다(test_scout_* 가 검증).
 
 
 def test_config_gainers_cover_both_markets():

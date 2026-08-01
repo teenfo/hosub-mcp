@@ -64,11 +64,11 @@ class NightlySource:
 
 
 class NewsSource:
-    """뉴스·공시 (TNM) — 기존 `GET /api/items` 를 그대로 소비한다.
+    """뉴스·공시 (TNM) — `GET /api/items` 를 소비하는 **유일한** 편입 채널.
 
-    TNM 의 `promote.loop()` 이 직접 편입하던 것을 대체한다. 지금은 trading API 에
-    `manual` 로 넣어서 **어떤 정리 경로도 지우지 않아 영구 잔류**한다.
-    소스를 `news` 로 태깅해야 만료·강등이 정상 동작한다.
+    TNM 의 `promote.loop()` 직접 편입은 2026-08-01 완전 통합에서 삭제됐다.
+    그쪽의 보수적 게이트(min_score 70 · negative/unclear 차단)를 이 소스가
+    계승한다. 소스를 `news` 로 태깅해야 만료·강등이 정상 동작한다.
     """
 
     name = model.NEWS
@@ -103,8 +103,11 @@ class NewsSource:
         out = []
         for it in items:
             code = str(it.get("ticker") or "").strip()
-            # 악재는 매수 후보가 아니다 — 원장에는 남기지 않고 여기서 건너뛴다
-            if not code or it.get("impact_direction") == "negative":
+            # 악재·방향미상은 매수 후보가 아니다 — 폐기된 TNM promote 의
+            # 게이트(negative·unclear 차단)를 계승한다(2026-08-01 완전 통합).
+            # 방향이 빈 값은 통과 — 분류가 아직 안 붙은 것이지 '미상 판정' 이
+            # 아니다(promote 의 규약과 동일).
+            if not code or it.get("impact_direction") in ("negative", "unclear"):
                 continue
             out.append(Signal(
                 code=code, name=it.get("name") or code, source=self.name,

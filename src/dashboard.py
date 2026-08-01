@@ -101,7 +101,7 @@ _TNM_GET_RE = re.compile(
 # encodeURIComponent 로 보내고 starlette 가 풀어 주므로 여기서는 '/' 만 막는다.
 _TNM_POST_RE = re.compile(
     r"^(items/\d+/label|watch|watch/sync|watch/\d{6}/(exclude|include|settings)"
-    r"|settings|collect/run|promote/run|notify/test|reclassify_failed"
+    r"|settings|collect/run|notify/test|reclassify_failed"
     r"|brokers|brokers/[^/]+|brokers/[^/]+/delete|research/run)$"
 )
 # 리서치 1회 수집은 목록 9콜 + 상세 최대 20콜 + 해외 24콜이라 기본 15초를 넘긴다.
