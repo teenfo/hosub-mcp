@@ -295,6 +295,58 @@ def rsi_dip(df: pd.DataFrame, cfg: dict) -> Signal | None:
                   ts=df.index[-1])
 
 
+@register("divergence", side="long")
+def divergence_long(df: pd.DataFrame, cfg: dict) -> Signal | None:
+    """상승 다이버전스(롱) — 연구 문서(2026-08-01 §2.2) 반영. **기본 꺼짐.**
+
+    가격은 더 낮은 저점을 만드는데 RSI 는 더 높은 저점을 만들면, 하락이
+    이어지는 것처럼 보여도 실질 매도 압력이 소진되고 있다는 것이 문서의
+    주장이다(속임수 하락, Bear Trap 판별). 두 문서가 공통으로 권고했는데
+    규칙 10종 어디에도 없던 공백이었다(반영도 점검 2026-08-01).
+
+    켜지 않는 이유는 rsi_dip 과 같다 — **이 주장은 우리 데이터에서 측정된
+    적이 없다.** 규칙은 신호 로그를 남기는 유일한 통로라 코드로 먼저 만들되,
+    켜는 것은 사용자 결정이고 켜기 전 스윕 성적을 확인한다(rsi_dip 은 스윕
+    -0.66R 로 꺼졌다 — 같은 평균회귀 계열이라 낙관할 근거가 없다).
+
+    판정: 뒤쪽 창의 저점이 앞쪽 창의 저점보다 낮고(가격 LL), 그 두 저점의
+    RSI 는 반대로 높아졌으며(RSI HL), 마지막 봉이 반등 양봉으로 확인될 때.
+    """
+    look = int(cfg.get("lookback", 30))
+    if len(df) < max(int(cfg.get("min_bars", 60)), look + 5):
+        return None
+    win = df.iloc[-(look + 1):-1]                  # 확인봉(마지막) 제외
+    half = len(win) // 2
+    a, b = win.iloc[:half], win.iloc[half:]
+    ia, ib = a["low"].idxmin(), b["low"].idxmin()
+    low_a, low_b = float(a.loc[ia, "low"]), float(b.loc[ib, "low"])
+    # 가격: 뒤 저점이 앞 저점보다 유의하게 낮다(같은 값 재방문은 이중바닥이지
+    # 다이버전스가 아니다)
+    if low_b >= low_a * (1 - cfg.get("min_price_gap_pct", 0.15) / 100):
+        return None
+    rsi = ind.rsi(df["close"], cfg.get("rsi_period", 14))
+    ra, rb = float(rsi.loc[ia]), float(rsi.loc[ib])
+    if pd.isna(ra) or pd.isna(rb):
+        return None
+    # RSI: 반대로 높아졌고, 저점다운 영역이어야 한다(중립대 미세 교차는 소음)
+    if not (rb >= ra + cfg.get("min_rsi_gap", 3.0)
+            and rb <= cfg.get("rsi_low_max", 45.0)):
+        return None
+    last = df.iloc[-1]
+    # 확인: 반등 양봉 + 직전 봉 고가 회복 — 문서도 다이버전스 단독이 아니라
+    # 반전 '확인 후' 진입을 말한다
+    if not (last.close > last.open and last.close > float(df["high"].iloc[-2])):
+        return None
+    stop = low_b - _atr_buffer(df, cfg, low_b * 0.001)
+    if stop >= last.close:
+        return None
+    r = cfg.get("target_r", 1.5)
+    return Signal("divergence", "long", float(last.close), stop,
+                  _target(float(last.close), stop, "long", r),
+                  f"상승 다이버전스 — 저가 {low_a:,.0f}→{low_b:,.0f} · "
+                  f"RSI {ra:.0f}→{rb:.0f}", ts=df.index[-1])
+
+
 @register("gap_fill", needs_prev_close=True, side="long")
 def gap_fill(df: pd.DataFrame, cfg: dict, prev_close: float | None) -> Signal | None:
     """갭필 평균회귀(롱). 갭하락(-min_gap_pct 이상)으로 시작한 날, 세션 초반 고가를

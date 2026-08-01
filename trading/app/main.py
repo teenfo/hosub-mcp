@@ -23,6 +23,7 @@ from .signals.scanner import Scanner
 from .backtest import sweep as rule_sweep
 from .backtest.report import BacktestReporter
 from .scout.engine import engine as scout
+from .scout import bars_obs as scout_bars_obs
 from .scout import observe as scout_observe
 from .scout import flows as scout_flows
 from .scout import premarket as scout_premarket
@@ -433,6 +434,8 @@ async def lifespan(app: FastAPI):
         # 수급 — 마감 후 1회. 감시목록 세부(기관 13주체·공매도·장전비중).
         # 전종목 수급은 야간 발굴 루프가 함께 가져온다(discovery.py).
         asyncio.create_task(scout_flows.loop()),
+        # 매물대·VPIN — 저장 분봉만 쓰는 마감 관측(API 콜 0)
+        asyncio.create_task(scout_bars_obs.loop()),
         asyncio.create_task(reporter.loop()),
         asyncio.create_task(rule_sweep.loop()),   # 주간 기법 스윕(토 09시)
         asyncio.create_task(journal.loop()),      # 매매일지(평일 마감 후)
@@ -882,6 +885,31 @@ async def api_flows_run(_=Depends(require_auth)):
     from .scout import flows
 
     return {"ok": True, **await flows.collect_once()}
+
+
+@app.get("/api/profile")
+async def api_profile(day: str | None = None, code: str | None = None,
+                      _=Depends(require_auth)):
+    """매물대 관측 원장(조회 전용). day 없으면 가장 최근 날."""
+    from .scout import store as scout_store
+
+    return {"rows": await asyncio.to_thread(scout_store.profile_rows, day, code)}
+
+
+@app.get("/api/vpin")
+async def api_vpin(days: int = 30, code: str | None = None,
+                   _=Depends(require_auth)):
+    """VPIN 관측 원장(조회 전용) — 최근 N일. 절대 문턱은 없다, 분포로 본다."""
+    from .scout import store as scout_store
+
+    return {"rows": await asyncio.to_thread(
+        scout_store.vpin_rows, max(1, min(365, days)), code)}
+
+
+@app.post("/api/bars-obs/run")
+async def api_bars_obs_run(_=Depends(require_auth)):
+    """매물대·VPIN 을 지금 1회 계산한다(DB 읽기만 — API 콜 0·주문 없음)."""
+    return {"ok": True, **await scout_bars_obs.collect_once()}
 
 
 @app.get("/api/premarket")

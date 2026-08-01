@@ -49,6 +49,11 @@ scanner:
   min_volume_surge_pct: 0.5    # 거래량 급증률 최소 (%)
   change_pct_min: -1.0         # 등락률 범위 — 이미 급등한 종목은 위 스캐너 몫
   change_pct_max: 3.0
+  # 문서 정합 관측(연구 문서 2026-08-01 §2.3) — "3분봉 거래량 10만~15만 주
+  # 이상 급증". 우리 세기(sdnin_rt)와 정의가 달라 신호 evidence 에 둘 다
+  # 남긴다(vol_3min·doc_surge). 판정에는 쓰지 않는다 — 4주 뒤 어느 정의가
+  # 실현 R 과 상관있는지 가른 뒤에 정한다.
+  doc_surge_shares: 100000
 
 # KOSPI 급등률 상위(ka10027) 실시간 조회 + 저가주 자동 감시편입
 gainers:
@@ -433,6 +438,21 @@ rules:
     target_r: 1.5
   # RSI 급락 눌림(롱) — Connors RSI-2 계열의 장중 적응(주식 승률 75%+ 문헌 엣지).
   # 연구 후보(주간 스윕 검증 후 활성).
+  # 상승 다이버전스(롱) — 연구 문서 §2.2 반영(2026-08-01). **기본 꺼짐** —
+  # 두 문서가 공통 권고했지만 우리 데이터에서 측정된 적이 없다. 켜기 전에
+  # 주간 스윕 성적을 볼 것(같은 평균회귀 계열 rsi_dip 은 -0.66R 로 꺼졌다).
+  divergence:
+    priority: 0.30          # rsi_dip 과 같은 급 — 측정 전이라 근거 없이 못 올린다
+    enabled: false
+    lookback: 30            # 저점 두 개를 찾는 창(분봉)
+    min_bars: 60
+    rsi_period: 14          # 문서 기준(14) — rsi_dip 의 단기(3)와 다른 축
+    min_price_gap_pct: 0.15 # 가격 저점이 이만큼은 낮아져야 LL 로 본다
+    min_rsi_gap: 3.0        # RSI 저점은 이만큼 높아져야 HL 로 본다
+    rsi_low_max: 45         # 저점다운 영역에서만 — 중립대 교차는 소음
+    atr_stop_mult: 0.5      # 손절 = 다이버전스 저점 − ATR 여유
+    atr_period: 14
+    target_r: 1.5
   rsi_dip:
     priority: 0.30          # 발주 우선순위(스윕 −0.66R)
     enabled: false
@@ -634,6 +654,17 @@ scout:
       end: "08:50"
       interval_sec: 120
       market: "000"           # 000 전체 / 001 코스피 / 101 코스닥
+    # 저장 분봉 기반 마감 관측 — 매물대(§3.2)·VPIN(§6). **API 콜 0** —
+    # 재료가 전부 DB 의 1분봉이다. eod_backfill(15:35)이 봉을 확정한 뒤 돈다.
+    # 관측 전용: 4주 뒤 질문은 "진입가의 매물대 위치가 실현 R 과 상관있나" ·
+    # "높은 VPIN 날의 다음 날이 실제로 나빴나".
+    bars:
+      enabled: true
+      after: "15:55"
+      profile_days: 10        # 매물대 계산 창(일) — 지지·저항은 하루로 안 선다
+      bins: 24                # 가격대 칸 수
+      vpin_buckets: 50        # 원 논문 관례값
+      max_symbols: 200
   news:
     enabled: true
     url: http://127.0.0.1:8602

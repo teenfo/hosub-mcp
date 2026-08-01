@@ -125,6 +125,12 @@ class PresurgeSource:
 
     name = model.PRESURGE
 
+    def __init__(self) -> None:
+        # 종목별 (관측 시각, 당일 누적 거래량) 이력 — 문서 정합 관측의 재료.
+        # 장중에만 자라고 프로세스 재시작이면 비는 메모리 값이다(관측 필드가
+        # 몇 분 빌 뿐이라 디스크에 남길 이유가 없다).
+        self._vol_hist: dict[str, list[tuple[datetime, int]]] = {}
+
     def _cfg(self) -> dict:
         return settings.CONFIG.get("scanner", {})
 
@@ -155,16 +161,42 @@ class PresurgeSource:
         raw = await client.volume_surge_rank(cfg.get("market", "000"))
         items = scanner.filter_presurge(scanner.parse_surge(raw), cfg,
                                         keep=watched_keep())
+        now = datetime.now(UTC)
+        doc_shares = int(cfg.get("doc_surge_shares", 100_000))
+        out: list[Signal] = []
         # 순위가 아니라 급증률 자체를 세기로 쓴다 — 목록 길이에 좌우되지 않게
-        return [
-            Signal(
+        for it in items:
+            if not it.get("code"):
+                continue
+            # 문서 정합 관측 — 연구 문서(2026-08-01 §2.3)는 급증을 "3분봉
+            # 거래량 10만~15만 주 이상" 으로 정의한다. 우리 세기(sdnin_rt,
+            # 누적 대비 %)와 정의가 다르므로 **둘 다 남겨** 4주 뒤 어느
+            # 정의가 실현 R 과 상관있는지 가른다. 3분 거래량은 누적 거래량
+            # (now_volume)의 약 3분 전 대비 증가분으로 근사한다 — 콜 0.
+            vol3 = self._vol_3min(it["code"], int(it.get("now_volume") or 0), now)
+            out.append(Signal(
                 code=it["code"], name=it.get("name") or it["code"], source=self.name,
                 kind=self.name,
                 strength=model.surge_strength(float(it.get("surge_pct", 0.0))),
                 raw=float(it.get("surge_pct", 0.0)),
                 price=float(it.get("price", 0.0)),
                 evidence={"surge_pct": it.get("surge_pct"),
-                          "change_pct": it.get("change_pct")},
-            )
-            for it in items if it.get("code")
-        ]
+                          "change_pct": it.get("change_pct"),
+                          "vol_3min": vol3,
+                          "doc_surge": (None if vol3 is None
+                                        else int(vol3 >= doc_shares))},
+            ))
+        return out
+
+    def _vol_3min(self, code: str, now_volume: int,
+                  now: datetime) -> int | None:
+        """약 3분 전 누적 거래량 대비 증가분. 이력이 모자라면 None —
+        0 으로 채우면 '거래 없음' 과 '아직 못 쟀다' 가 섞인다."""
+        hist = self._vol_hist.setdefault(code, [])
+        base = next((v for t, v in hist
+                     if 150 <= (now - t).total_seconds() <= 360), None)
+        hist.append((now, now_volume))
+        del hist[:-6]                          # 최근 6관측(약 6분)만 유지
+        if base is None or now_volume < base:
+            return None                        # 이력 부족 또는 일자 경계
+        return now_volume - base

@@ -205,6 +205,28 @@ def _conn() -> sqlite3.Connection:
             mean_rvol REAL,              -- 종목 평균 RVOL(15분 평균 / 직전 평균)
             seen_at TEXT
         );
+        -- 매물대 원장 — 저장 분봉으로 마감 후 계산(연구 문서 §3.2, 관측 전용).
+        -- 종목·일당 한 행. 판단에 쓰지 않는다 — 4주 뒤 "진입가의 매물대 위치가
+        -- 실현 R 과 상관있나" 를 물을 재료다.
+        CREATE TABLE IF NOT EXISTS profile_obs (
+            d TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            poc REAL,                    -- 최다 거래 가격대(Point of Control)
+            va_high REAL, va_low REAL,   -- 밸류에어리어(70%) 상·하단
+            close REAL, in_va INTEGER, above_poc INTEGER,
+            total_volume INTEGER, levels TEXT,   -- 상위 매물대 JSON
+            seen_at TEXT,
+            PRIMARY KEY (d, code)
+        );
+        CREATE INDEX IF NOT EXISTS ix_profile_obs_code ON profile_obs (code, d);
+        -- VPIN 원장 — BVC 근사(연구 문서 §6, 관측 전용). 절대 문턱은 없다 —
+        -- 분포부터 쌓는다. "높은 VPIN 다음 날이 실제로 나빴나" 가 4주 뒤 질문.
+        CREATE TABLE IF NOT EXISTS vpin_obs (
+            d TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            vpin REAL, buckets INTEGER, bucket_volume INTEGER,
+            seen_at TEXT,
+            PRIMARY KEY (d, code)
+        );
+        CREATE INDEX IF NOT EXISTS ix_vpin_obs_code ON vpin_obs (code, d);
         """
     )
     have = {r[1] for r in conn.execute("PRAGMA table_info(quote_obs)")}
@@ -454,6 +476,75 @@ def opening_days(limit: int = 60) -> list[dict]:
     with _conn() as conn:
         return [dict(r) for r in conn.execute(
             "SELECT * FROM opening_obs ORDER BY d DESC LIMIT ?", (limit,))]
+
+
+def record_profile(day: str, code: str, prof: dict, name: str | None = None,
+                   now: datetime | None = None) -> None:
+    """매물대 관측 한 행. 같은 날 재계산은 덮어쓴다 — 재료(분봉)가 같으므로
+    결과도 같고, 마감 백필이 늦게 확정한 봉을 반영하는 쪽이 낫다."""
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="seconds")
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO profile_obs (d, code, name, poc, va_high,"
+            " va_low, close, in_va, above_poc, total_volume, levels, seen_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (day, code, name, prof.get("poc"), prof.get("va_high"),
+             prof.get("va_low"), prof.get("close"), prof.get("in_va"),
+             prof.get("above_poc"), prof.get("total_volume"),
+             json.dumps(prof.get("levels") or [], ensure_ascii=False), ts))
+
+
+def record_vpin(day: str, code: str, vp: dict, name: str | None = None,
+                now: datetime | None = None) -> None:
+    """VPIN 관측 한 행. 덮어쓰기 규약은 record_profile 과 같다."""
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="seconds")
+    with _conn() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO vpin_obs (d, code, name, vpin, buckets,"
+            " bucket_volume, seen_at) VALUES (?,?,?,?,?,?,?)",
+            (day, code, name, vp.get("vpin"), vp.get("buckets"),
+             vp.get("bucket_volume"), ts))
+
+
+def profile_rows(day: str | None = None, code: str | None = None,
+                 limit: int = 300) -> list[dict]:
+    """매물대 원장 읽기 — day 없으면 가장 최근 날."""
+    with _conn() as conn:
+        if day is None:
+            r = conn.execute("SELECT MAX(d) AS d FROM profile_obs").fetchone()
+            day = r["d"] if r else None
+        if not day:
+            return []
+        sql = "SELECT * FROM profile_obs WHERE d=?"
+        args: list = [day]
+        if code:
+            sql += " AND code=?"
+            args.append(code)
+        rows = [dict(r) for r in conn.execute(
+            sql + " ORDER BY code LIMIT ?", (*args, limit))]
+    for r in rows:
+        r["levels"] = _loads_list(r.get("levels"))
+    return rows
+
+
+def vpin_rows(days: int = 30, code: str | None = None) -> list[dict]:
+    """VPIN 원장 읽기 — 최근 N일. 분포를 보는 용도라 일 단위로 넓게 준다."""
+    with _conn() as conn:
+        sql = ("SELECT * FROM vpin_obs WHERE d >= date('now', ?)")
+        args: list = [f"-{int(days)} day"]
+        if code:
+            sql += " AND code=?"
+            args.append(code)
+        return [dict(r) for r in conn.execute(
+            sql + " ORDER BY d DESC, code", args)]
+
+
+def _loads_list(raw) -> list:
+    try:
+        v = json.loads(raw) if raw else []
+        return v if isinstance(v, list) else []
+    except (TypeError, ValueError):
+        return []
 
 
 def vi_codes(day: str) -> set[str]:
