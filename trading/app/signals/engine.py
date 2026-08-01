@@ -480,8 +480,13 @@ class SignalEngine:
                 rec["over_weight"] = True
             rec["qty"] = qty
             actionable = False
+            # 진입 시간창 게이트(시간대 분석 2026-08-01) — 신호는 기록, 발주만 차단
+            window_note = rules.entry_window_note(
+                sig.rule, datetime.now(KST), settings.RULES)
+            if window_note:
+                rec["note"] = window_note
             # 국면 게이트: 인버스 ETF(직접 또는 숏→인버스 매핑)는 강세장 매수 보류.
-            if self._inverse_blocked(symbol, sig.side):
+            elif self._inverse_blocked(symbol, sig.side):
                 rec["note"] = f"국면 게이트 — {self.regime}장이라 인버스 매수 보류"
             # 롱 전용 모드: 현물 계좌는 개별주 공매도가 불가하므로 숏 신호는
             # (감사용으로 기록만 하고) 발주하지 않는다 — 규칙 종류와 무관하게 차단.
