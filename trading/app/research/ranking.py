@@ -172,7 +172,7 @@ def prepare(df: pd.DataFrame, min_score: float | None = None) -> dict:
     쓰인다) 가중치는 손절폭과 무관하게 한 번만 구하면 된다.
     """
     if min_score is None:
-        min_score = float(settings.CONFIG.get("discovery", {}).get("min_score", 2))
+        min_score = float(settings.CONFIG.get("nightly", {}).get("min_score", 2))
     dates = sorted(df["date"].unique())
     groups = {d: g for d, g in df.groupby("date")}
     liquid = {d: g[g["liquid"] == 1] for d, g in groups.items()}
@@ -181,7 +181,7 @@ def prepare(df: pd.DataFrame, min_score: float | None = None) -> dict:
         "dates": dates,
         "groups": groups,
         "liquid": liquid,
-        # 실제 야간 발굴이 후보로 삼는 풀과 같은 조건(discovery.run_once 의
+        # 실제 야간 배치가 후보로 삼는 풀과 같은 조건(scout/nightly.run_once 의
         # min_score 게이트 — 줄 번호로 가리키지 않는다, 주석 부패의 원인이었다)
         "gated": {d: g[g["score"] >= min_score] for d, g in liquid.items()},
         "min_score": min_score,
@@ -281,7 +281,7 @@ def run_once() -> dict:
     daily = eventstudy.load_daily()
     if daily.empty:
         return {"ok": False, "error": "일봉 데이터 없음 — 야간 발굴이 먼저 돌아야 합니다"}
-    df = eventstudy.build_panel(daily, settings.CONFIG.get("discovery", {}))
+    df = eventstudy.build_panel(daily, settings.CONFIG.get("nightly", {}))
     if df.empty or "fwd_dn_1" not in df.columns:
         return {"ok": False, "error": "패널이 비었거나 하방 목적어가 없습니다"}
     df = df.dropna(subset=["fwd_up_1", "fwd_dn_1", "fwd_1"])

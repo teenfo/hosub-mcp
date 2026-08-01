@@ -1,4 +1,14 @@
-"""야간 종목 발굴 — 전일자 전종목 일봉을 수집·분석해 익일 후보를 추린다.
+"""야간 배치 — 발굴 엔진(scout)의 전종목 수집 팔. 옛 `app/discovery.py`.
+
+2026-08-01 완전 폐기 이관: 감시목록 직접 편입이 먼저 삭제됐고(#245), 남아 있던
+수집 기능(전종목 일봉·피처·국면·표본 선정)도 엔진 패키지로 들어왔다.
+독립 모듈 discovery 는 더 이상 존재하지 않는다 — 이 배치는 엔진의 한 팔이고,
+산출물(picks)은 NightlySource 가 신호로 올린다.
+
+데이터 연속성을 위해 바꾸지 않은 것 둘: DB 파일명(discovery.db — 원장 이력이
+이어져야 4주 측정이 성립한다)과 무작위 시드 문자열(f"{day}:discovery" —
+시드가 바뀌면 같은 날 표본이 달라져 재현성이 깨진다). 이름이 아니라 데이터
+규약이다.
 
 흐름 (평일 장 마감 후 1회):
   1. 전종목 리스트 조회 (ka10099, 코스피+코스닥)
@@ -22,12 +32,12 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from . import export, settings
-from .data import store
-from .data.collector import parse_chart_response
-from .features import compute_features
-from .kiwoom import flows as kflows
-from .scout import store as scout_store
+from .. import export, settings
+from ..data import store
+from ..data.collector import parse_chart_response
+from ..features import compute_features
+from ..kiwoom import flows as kflows
+from . import store as scout_store
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -88,7 +98,7 @@ def parse_stock_list(raw: dict) -> list[dict]:
 
 # 제외 정책은 data/exclude.py 가 단일 소스다 — scanner 와 서로 다르게 판정해
 # 실매수 사고가 났다(2026-07-27 462900 KoAct). 여기서는 재노출만 한다.
-from .data.exclude import is_excluded  # noqa: E402  (기존 import 경로 유지)
+from ..data.exclude import is_excluded  # noqa: E402  (기존 import 경로 유지)
 
 
 def screen_pass(f: dict, cfg: dict) -> bool:
@@ -104,7 +114,7 @@ def screen_pass(f: dict, cfg: dict) -> bool:
     ## 이 팔은 기본값이 꺼져 있다 — 근거가 무너졌기 때문이다
 
     **이 함수는 켜기 위해서가 아니라 무엇을 쟀는지 남기려고 있다.**
-    `discovery.screen_fill` 기본값은 0 이고, 아래 측정이 그 이유다.
+    `nightly.screen_fill` 기본값은 0 이고, 아래 측정이 그 이유다.
 
     처음 보고한 값은 "손절 2.5% 기준 -0.135R vs 무작위 -0.304R, 우리가 만든
     랭킹 중 유일하게 무작위를 이겼다" 였다. 그 표본을 다시 열어 보니 **87.4%가
@@ -150,7 +160,7 @@ def screen_pass(f: dict, cfg: dict) -> bool:
 
     ## 되살리려면
 
-    `discovery.screen_fill` 을 0 이 아닌 값으로 두면 그날부터 팔이 돈다. 다만
+    `nightly.screen_fill` 을 0 이 아닌 값으로 두면 그날부터 팔이 돈다. 다만
     되살리기 전에 **변동성 정합 대조군을 이기는가**를 먼저 통과해야 한다 —
     그냥 무작위를 이기는 것으로는 부족하다는 것이 이 절의 결론이다.
 
@@ -362,7 +372,7 @@ def liquid_universe(limit: int = 0) -> list[str]:
     return codes[:limit] if limit else codes
 
 
-class Discovery:
+class Nightly:
     def __init__(self) -> None:
         self.running = False
         self.progress = ""
@@ -378,12 +388,12 @@ class Discovery:
 
     async def run_once(self) -> int:
         """전종목 수집 + 스크리닝. 반환: 발굴 종목 수."""
-        from .kiwoom.client import client  # 지연 임포트
+        from ..kiwoom.client import client  # 지연 임포트
 
         if self.running:
             return 0
         self.running = True
-        cfg = settings.CONFIG.get("discovery", {})
+        cfg = settings.CONFIG.get("nightly", {})
         try:
             symbols: list[dict] = []
             for mkt in ("0", "10"):  # 0=코스피, 10=코스닥 (실호출 검증)
@@ -392,7 +402,7 @@ class Discovery:
                 except Exception as e:  # noqa: BLE001
                     log.warning("종목 리스트 조회 실패 (mrkt=%s): %s", mkt, e)
             if symbols:  # 종목 마스터(코드↔명)도 함께 갱신
-                from .data import symbols as symbol_master
+                from ..data import symbols as symbol_master
 
                 symbol_master.upsert(symbols)
             limit = cfg.get("max_symbols", 0)
@@ -512,7 +522,7 @@ class Discovery:
                     and now.weekday() < 5
                     and now.strftime("%H:%M") >= "17:30"
                     and done_for != today
-                    and settings.CONFIG.get("discovery", {}).get("enabled", True)
+                    and settings.CONFIG.get("nightly", {}).get("enabled", True)
                 ):
                     if self.latest().get("date") == today:
                         done_for = today  # 이미 오늘 실행됨 (재시작 후 중복 방지)

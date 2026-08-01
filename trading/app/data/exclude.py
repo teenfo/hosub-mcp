@@ -46,11 +46,11 @@ _PREF_RE = re.compile(r"[0-9]?우[0-9]?B?(\([^)]*\))?$")
 def is_excluded(name: str, cfg: dict | None = None) -> bool:
     """ETF·ETN·리츠·스팩·채권형·우선주 등 대상에서 뺄 종목이면 True.
 
-    cfg 를 주지 않으면 `config.yaml discovery` 섹션을 쓴다 — 정책이 하나이므로
-    설정 자리도 하나다(`discovery.exclude_keywords/suffixes/prefixes`).
+    cfg 를 주지 않으면 `config.yaml nightly` 섹션을 쓴다 — 정책이 하나이므로
+    설정 자리도 하나다(`nightly.exclude_keywords/suffixes/prefixes`).
     """
     if cfg is None:
-        cfg = settings.CONFIG.get("discovery", {})
+        cfg = settings.CONFIG.get("nightly", {})
     raw = name or ""
     n = raw.upper().replace(" ", "")
     if any(str(kw).upper() in n for kw in cfg.get("exclude_keywords", DEFAULT_KEYWORDS)):

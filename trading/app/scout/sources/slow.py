@@ -13,7 +13,7 @@ log = logging.getLogger(__name__)
 
 
 class NightlySource:
-    """야간 전종목 발굴 (평일 17:30) — `discovery.latest()` 를 소비한다.
+    """야간 전종목 배치 (평일 17:30, scout/nightly.py) — picks 를 소비한다.
 
     **발굴을 다시 돌리지 않는다.** 전종목 수집·피처 계산은 그대로 두고 결과만
     읽는다. 그 배치는 3,900종목을 도는 무거운 작업이라 엔진 주기로 돌 수 없다.
@@ -26,7 +26,7 @@ class NightlySource:
     name = model.NIGHTLY
 
     def _cfg(self) -> dict:
-        return settings.CONFIG.get("discovery", {})
+        return settings.CONFIG.get("nightly", {})
 
     def enabled(self) -> bool:
         return bool(self._cfg().get("enabled", True))
@@ -35,7 +35,7 @@ class NightlySource:
         return 1_800        # 30분마다 확인 — 배치가 끝났는지 보는 것뿐이라 싸다
 
     async def collect(self) -> list[Signal]:
-        from ...discovery import latest_picks
+        from ..nightly import latest_picks
 
         date, picks = latest_picks()
         out: list[Signal] = []

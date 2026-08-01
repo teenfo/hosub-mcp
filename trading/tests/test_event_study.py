@@ -34,7 +34,7 @@ def _bars(n=140, seed=7):
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 11, 42])
 def test_panel_last_row_matches_compute_features(seed):
-    cfg = settings.CONFIG["discovery"]
+    cfg = settings.CONFIG["nightly"]
     df = _bars(seed=seed)
     p = panel.panel(df, cfg)
     f = compute_features(df, cfg)
@@ -51,7 +51,7 @@ def test_panel_last_row_matches_compute_features(seed):
 @pytest.mark.parametrize("cut", [80, 100, 125])
 def test_panel_matches_at_every_past_date(cut):
     """과거 어느 날을 잘라도 그날 값이 같아야 한다 — 그래야 과거 재현이 성립한다."""
-    cfg = settings.CONFIG["discovery"]
+    cfg = settings.CONFIG["nightly"]
     df = _bars(seed=5)
     p = panel.panel(df, cfg)
     f = compute_features(df.iloc[:cut], cfg)
@@ -69,7 +69,7 @@ def test_panel_needs_60_rows():
 
 def test_panel_does_not_peek_forward():
     """뒤쪽 데이터를 바꿔도 앞쪽 피처는 변하지 않아야 한다."""
-    cfg = settings.CONFIG["discovery"]
+    cfg = settings.CONFIG["nightly"]
     df = _bars(seed=9)
     base = panel.panel(df, cfg)
     tampered = df.copy()
@@ -326,7 +326,7 @@ def test_market_daily_is_cross_sectional_mean():
 
 def test_panel_keeps_high_low():
     """새 목적어의 재료. 종전엔 close/open 만 실어 계산 자체가 불가능했다."""
-    p = panel.panel(_bars(seed=4), settings.CONFIG["discovery"])
+    p = panel.panel(_bars(seed=4), settings.CONFIG["nightly"])
     assert {"high", "low", "open", "close"} <= set(p.columns)
 
 
@@ -345,20 +345,20 @@ def test_forward_targets_share_the_same_entry():
 
 def test_forward_range_is_never_negative():
     """고가−저가는 정의상 음수가 될 수 없다 — 부호가 뒤집히면 계산 오류다."""
-    p = panel.forward(panel.panel(_bars(seed=13), settings.CONFIG["discovery"]))
+    p = panel.forward(panel.panel(_bars(seed=13), settings.CONFIG["nightly"]))
     r = p["fwd_range_1"].dropna()
     assert len(r) and (r >= 0).all()
 
 
 def test_forward_up_never_below_direction():
     """고가는 종가 이상이므로 최대상승 ≥ 방향수익률이어야 한다."""
-    p = panel.forward(panel.panel(_bars(seed=21), settings.CONFIG["discovery"]))
+    p = panel.forward(panel.panel(_bars(seed=21), settings.CONFIG["nightly"]))
     both = p[["fwd_up_1", "fwd_1"]].dropna()
     assert len(both) and (both["fwd_up_1"] >= both["fwd_1"] - 1e-9).all()
 
 
 def test_forward_last_row_has_no_future():
-    p = panel.forward(panel.panel(_bars(seed=6), settings.CONFIG["discovery"]))
+    p = panel.forward(panel.panel(_bars(seed=6), settings.CONFIG["nightly"]))
     assert np.isnan(p["fwd_up_1"].iloc[-1]) and np.isnan(p["fwd_range_1"].iloc[-1])
 
 
@@ -527,7 +527,7 @@ def test_build_panel_end_to_end():
         b["symbol"] = code
         frames.append(b)
     daily = pd.concat(frames)
-    out = eventstudy.build_panel(daily, settings.CONFIG["discovery"])
+    out = eventstudy.build_panel(daily, settings.CONFIG["nightly"])
     assert set(out["symbol"]) == {"000001", "000002"}
     assert {"date", "score", "liquid", "fwd_1", "gap_pct"} <= set(out.columns)
     assert out["fwd_1"].notna().all()      # 미래가 없는 마지막 행은 떨어져 나간다

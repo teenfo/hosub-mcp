@@ -277,14 +277,14 @@ async def test_signals_carry_price_for_tradability_gate(fake_client):
 @pytest.mark.asyncio
 async def test_nightly_consumes_existing_picks(monkeypatch):
     """발굴을 다시 돌리지 않는다 — 3,900종목 배치는 엔진 주기로 못 돈다."""
-    import app.discovery as disc
+    import app.scout.nightly as disc
 
     ran = []
     monkeypatch.setattr(disc, "latest_picks", lambda: ("2026-07-27", [
         {"code": "000001", "name": "가", "score": 3, "close": 5_000,
          "reasons": ["거래량급증"]},
         {"code": "000002", "name": "나", "score": 2, "close": 7_000, "reasons": []}]))
-    monkeypatch.setattr(disc.Discovery, "run_once",
+    monkeypatch.setattr(disc.Nightly, "run_once",
                         lambda self: ran.append(1))     # 불리면 안 된다
     got = await slow.NightlySource().collect()
     assert ran == []
@@ -297,7 +297,7 @@ async def test_nightly_consumes_existing_picks(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_nightly_empty_before_first_batch(monkeypatch):
-    import app.discovery as disc
+    import app.scout.nightly as disc
 
     monkeypatch.setattr(disc, "latest_picks", lambda: (None, []))
     assert await slow.NightlySource().collect() == []

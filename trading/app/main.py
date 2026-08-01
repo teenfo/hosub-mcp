@@ -14,7 +14,7 @@ from itsdangerous import BadSignature, URLSafeSerializer
 
 from . import settings
 from .data import store, watchlist
-from .discovery import Discovery
+from .scout.nightly import Nightly
 from .data.collector import BarAggregator
 from .kiwoom.auth import token_manager
 from .kiwoom.ws import RealtimeFeed
@@ -38,7 +38,7 @@ engine = SignalEngine()
 aggregator = BarAggregator()
 feed = RealtimeFeed(aggregator.on_tick)
 scanner = Scanner()
-discovery = Discovery()
+nightly = Nightly()
 reporter = BacktestReporter()
 
 
@@ -421,9 +421,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(engine.eod_backfill_loop()),  # 마감 후 그날 분봉 확정
         asyncio.create_task(_feed_starter()),
         asyncio.create_task(scanner.loop()),
-        asyncio.create_task(discovery.loop()),
+        asyncio.create_task(nightly.loop()),
         # 발굴 엔진 — 기본 shadow. 신호를 모으고 결정을 기록만 하며 감시목록에는
-        # 손대지 않는다. 기존 scanner/discovery 자동편입 경로는 그대로 돈다.
+        # 손대지 않는다. 편입은 발굴 엔진 단일 통로다.
         asyncio.create_task(scout.loop()),
         # 관측 전용 — 신호를 내지 않고 원장에만 쌓는다(투자자별 매매 · VI).
         # 4주 뒤 잔차 IC 로 물을 재료이지, 지금 판단에 쓰는 값이 아니다.
@@ -432,7 +432,7 @@ async def lifespan(app: FastAPI):
         # 하고 주문은 여전히 KRX 로 나간다(dmst_stex_tp 는 안 건드린다).
         asyncio.create_task(scout_premarket.loop()),
         # 수급 — 마감 후 1회. 감시목록 세부(기관 13주체·공매도·장전비중).
-        # 전종목 수급은 야간 발굴 루프가 함께 가져온다(discovery.py).
+        # 전종목 수급은 야간 배치가 함께 가져온다(scout/nightly.py).
         asyncio.create_task(scout_flows.loop()),
         # 매물대·VPIN — 저장 분봉만 쓰는 마감 관측(API 콜 0)
         asyncio.create_task(scout_bars_obs.loop()),
@@ -1510,22 +1510,22 @@ async def api_scanner(_=Depends(require_auth)):
             "config": settings.CONFIG.get("scanner", {})}
 
 
-@app.get("/api/discovery")
-async def api_discovery(_=Depends(require_auth)):
+@app.get("/api/nightly")
+async def api_nightly(_=Depends(require_auth)):
     from . import export
 
-    return discovery.latest() | {"dataset": export.latest_manifest()}
+    return nightly.latest() | {"dataset": export.latest_manifest()}
 
 
-@app.post("/api/discovery/run")
-async def api_discovery_run(_=Depends(require_auth)):
+@app.post("/api/nightly/run")
+async def api_nightly_run(_=Depends(require_auth)):
     """야간 배치 수동 실행 (조회성 — 주문 없음). 전종목 수집이라 수 분 소요."""
-    if discovery.running:
+    if nightly.running:
         return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
     if not settings.KIWOOM_APP_KEY:
         return JSONResponse({"ok": False, "error": "API 키 미설정"}, 400)
-    asyncio.create_task(discovery.run_once())
-    return {"ok": True, "message": "백그라운드 실행 시작 — 진행 상황은 /api/discovery"}
+    asyncio.create_task(nightly.run_once())
+    return {"ok": True, "message": "백그라운드 실행 시작 — 진행 상황은 /api/nightly"}
 
 
 @app.get("/api/watchlist")
