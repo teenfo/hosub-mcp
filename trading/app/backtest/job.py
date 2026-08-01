@@ -8,7 +8,8 @@ import json
 import logging
 import sys
 
-JOBS = ("report", "sweep", "study", "rank", "news", "trailing", "timeofday")
+JOBS = ("report", "sweep", "study", "rank", "news", "trailing", "timeofday",
+        "flowsignal")
 
 
 def main(argv: list[str]) -> int:
@@ -41,6 +42,10 @@ def main(argv: list[str]) -> int:
         from ..research import timeofday
 
         result = timeofday.run_once()
+    elif job == "flowsignal":
+        from ..research import flowsignal
+
+        result = flowsignal.run_once()
     else:
         from .sweep import run_sweep
 

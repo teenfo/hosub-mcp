@@ -1218,6 +1218,48 @@ async def api_timeofday_run(_=Depends(require_auth)):
         _timeofday_running["on"] = False
 
 
+@app.get("/api/research/flowsignal")
+async def api_flowsignal(_=Depends(require_auth)):
+    """정규화 수급 재현 측정 — 최신 결과 + 백필 진행 상태(조회성)."""
+    from .research import flowsignal
+
+    data = await asyncio.to_thread(flowsignal.latest)
+    return {"backfill": dict(flowsignal.PROGRESS), **data}
+
+
+@app.post("/api/research/flowsignal/backfill")
+async def api_flowsignal_backfill(_=Depends(require_auth)):
+    """수급 소급 수집 시작 — 유동성 유니버스 × (ka10086 1콜 + 시총 배치).
+
+    서비스 프로세스 안에서 돌아 공유 레이트리밋을 그대로 따른다. 시세 조회만
+    한다 — 주문 경로와 무관하다.
+    """
+    from .research import flowsignal
+
+    if flowsignal.PROGRESS["running"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중",
+                             "progress": dict(flowsignal.PROGRESS)}, 409)
+    asyncio.create_task(flowsignal.backfill_task())
+    return {"ok": True, "total": len(flowsignal.universe())}
+
+
+_flowsignal_running = {"on": False}
+
+
+@app.post("/api/research/flowsignal/run")
+async def api_flowsignal_run(_=Depends(require_auth)):
+    """정규화 수급 분석 실행 — DB 만 읽는다(API 콜 0). 무거워서 별도 프로세스."""
+    from .backtest import offload
+
+    if _flowsignal_running["on"]:
+        return JSONResponse({"ok": False, "error": "이미 실행 중"}, 409)
+    _flowsignal_running["on"] = True
+    try:
+        return await offload.run_job("flowsignal")
+    finally:
+        _flowsignal_running["on"] = False
+
+
 _rank_running = {"on": False}
 
 
