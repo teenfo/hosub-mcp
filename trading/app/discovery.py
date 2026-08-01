@@ -99,8 +99,54 @@ def screen_daily(df: pd.DataFrame, cfg: dict) -> tuple[float, list[str]]:
     return f["score"], f["reasons"]
 
 
+def screen_pass(f: dict, cfg: dict) -> bool:
+    """문서 조건식(2026-08-01 공유) 통과 여부. 재료는 이미 계산돼 있다 — 콜 0.
+
+    ## 네 조건
+
+        정배열          `ma_aligned`            5 > 20 > 60
+        20일 이격도     |disparity20 - 100| ≤ 5  이평에 붙어 있다
+        신고가 근접     `near_high60_pct` ≥ 95   60일 고가의 95% 이상
+        거래대금        `trade_value` ≥ 100억
+
+    ## 왜 이 조건식만 세 번째 팔이 되나
+
+    우리가 만든 어떤 랭킹도 무작위를 못 이겼다(1.5단계 실측). 그런데 이 조건식은
+    987,616행 / 3,941종목 / 250거래일 백테스트에서 **모든 손절폭에서 무작위를
+    이겼다** — 손절 2.5% 기준 -0.135R vs 무작위 -0.304R. 문턱이 우리 데이터가
+    아니라 **문서에서 왔다**는 점이 중요하다. 데이터마이닝으로 뽑은 값이 아니다.
+
+    기여도 분해: 신고가 근접이 가장 크고, 이격도가 그다음, 정배열은 0,
+    거래대금 100억은 10억 대비 거의 차이가 없었다(-0.135 vs -0.144). 그래도
+    넷을 다 건다 — 문서의 조건식을 그대로 재는 것이 이 팔의 목적이고, 부분집합을
+    고르는 순간 그것은 문서가 아니라 우리가 고른 조건식이 된다.
+
+    **`trade_value` 는 당일 거래대금이다.** 백테스트는 20일 평균(`tov20`)을 썼다.
+    `features.py` 에 20일 평균이 없어 당일 값으로 근사한 것이고, 위 분해에서
+    이 축의 기여가 거의 없었으므로 감수한다 — 다만 **근사임을 여기 적어 둔다.**
+
+    ## 우리 실거래와는 정반대다
+
+    5거래일 진입 95건에 이 조건식을 대 보니 **네 조건을 모두 통과한 건이 0건**이었다.
+    우리 종목은 신고가 대비 59.9% · 이격도 14.83% · 정배열 16% 다. 그래서 이건
+    "지금 하던 것의 개선" 이 아니라 **한 번도 안 해 본 쪽의 표본**이다. 판정은
+    백테스트가 아니라 4주 뒤 실제 체결로 한다.
+    """
+    s = cfg.get("screen") or {}
+    if s.get("require_ma_aligned", True) and not f.get("ma_aligned"):
+        return False
+    # disparity20 은 `close / ma20 * 100` 이다(100 이 이평 위). ma20 을 못 구하면
+    # 0 이 들어오므로 |0-100| = 100 으로 자연히 탈락한다.
+    if abs(float(f.get("disparity20") or 0) - 100.0) > float(s.get("disparity_max_pct", 5)):
+        return False
+    if float(f.get("near_high60_pct") or 0) < float(s.get("near_high60_min", 95)):
+        return False
+    return float(f.get("trade_value") or 0) >= float(
+        s.get("min_trade_value_krw", 10_000_000_000))
+
+
 def _select(scored: list[dict], pool: list[dict], cfg: dict, day: str) -> list[dict]:
-    """그날 내보낼 발굴 후보 — 점수 표본 + **무작위 표본**.
+    """그날 내보낼 발굴 후보 — 점수 표본 + **조건식 표본** + **무작위 표본**.
 
     ## 왜 무작위를 섞나
 
@@ -121,17 +167,48 @@ def _select(scored: list[dict], pool: list[dict], cfg: dict, day: str) -> list[d
     대조군**이 된다(`pick_kind`). 1.5단계 결론을 일봉 근사가 아니라 실제
     체결로 다시 묻는 셈이다.
 
+    ## 세 번째 팔 — 조건식 표본 (`screen`)
+
+    무작위가 이긴 것은 **우리가 만든 랭킹들**을 상대로였다. 외부 조건식
+    (`screen_pass` 참조)은 같은 하네스에서 무작위를 이겼고, 우리 실거래 95건 중
+    그 조건을 통과한 건은 0건이다. 그래서 세 표본이 같은 게이트 아래 나란히 돈다.
+
+        score   3규칙 상위 N        — 실측상 가장 나빴던 쪽(기준선으로 남긴다)
+        screen  문서 조건식          — 백테스트에서 유일하게 무작위를 이긴 쪽
+        random  유동성 유니버스 무작위 — 대조군
+
+    판정은 4주 뒤 `decisions`·실체결이다. 백테스트가 실거래로 이어지는지를 묻는
+    것이므로 백테스트 결과를 근거로 미리 자리를 더 주지 않는다.
+
     시드는 날짜에서 만든다 — 같은 날 재실행하면 같은 표본이 나와야 배포·재시작이
-    측정을 흔들지 않는다(1.5단계 `random` 재현성 요건과 같은 이유).
+    측정을 흔들지 않는다(1.5단계 `random` 재현성 요건과 같은 이유). 두 팔은
+    **다른 시드**를 쓴다. 같은 시드를 나눠 쓰면 조건식 팔을 켜고 끄는 것만으로
+    무작위 대조군의 구성이 통째로 바뀌어, 되돌렸을 때 원래 표본으로 안 돌아온다.
     """
     n = int(cfg.get("top_n", 20) or 0)
     top = sorted(scored, key=lambda x: (-x["score"], x["code"]))[:n]
     for p in top:
         p["pick_kind"] = "score"
+    taken = {p["code"] for p in top}
+
+    # 조건식 팔을 먼저 채운다. 뒤로 미루면 무작위 팔이 먼저 집어간 종목이
+    # `random` 으로 이름 붙어, 조건식 통과 여부가 사후에 안 보인다. 한 종목은
+    # 한 팔에만 속해야 4주 뒤 팔별 성적이 성립한다.
+    sfill = int(cfg.get("screen_fill", 0) or 0)
+    if sfill > 0:
+        hit = sorted((p for p in pool if p.get("screen") and p["code"] not in taken),
+                     key=lambda x: x["code"])
+        # 통과분이 상한을 넘으면 그중에서 무작위로 자른다 — 조건식 안에서 다시
+        # 줄을 세울 근거가 없다(정렬 기준을 고르는 순간 그게 새 랭킹이 된다).
+        if len(hit) > sfill:
+            hit = random.Random(f"{day}:screen").sample(hit, sfill)
+        for p in hit:
+            top.append({**p, "pick_kind": "screen"})
+            taken.add(p["code"])
+
     fill = int(cfg.get("random_fill", 0) or 0)
     if fill <= 0:
         return top
-    taken = {p["code"] for p in top}
     rest = sorted((p for p in pool if p["code"] not in taken), key=lambda x: x["code"])
     if not rest:
         return top
@@ -325,7 +402,10 @@ class Discovery:
                     continue
                 cand = {"code": s["code"], "name": s["name"],
                         "close": f["close"], "score": f["score"],
-                        "reasons": f["reasons"]}
+                        "reasons": f["reasons"],
+                        # 조건식 통과 여부는 여기서만 계산한다 — 피처가 손에
+                        # 있는 유일한 지점이고, `_select` 는 pool 만 본다.
+                        "screen": int(screen_pass(f, cfg))}
                 pool.append(cand)
                 # 수급 — `ka10086` 은 OHLCV 에 개인·기관·외국인 순매수 +
                 # 프로그램매매 + 외국인 지분율 + 신용비율을 얹어 준다. 일봉
@@ -374,8 +454,10 @@ class Discovery:
             await self.apply_auto_watch(top, cfg)
             kinds = Counter(p.get("pick_kind", "score") for p in top)
             self.progress = (f"완료: {len(symbols)}종목 분석 → 유동성 {len(pool)} → "
-                             f"후보 {len(top)} (점수 {kinds['score']} · 무작위 "
-                             f"{kinds['random']}) · 지표 원장 {len(obs)}행"
+                             f"후보 {len(top)} (점수 {kinds['score']} · 조건식 "
+                             f"{kinds['screen']} · 무작위 {kinds['random']}) · "
+                             f"조건식 통과 {sum(p.get('screen', 0) for p in pool)} · "
+                             f"지표 원장 {len(obs)}행"
                              + (f" · 수급 실패 {flow_fail}" if flow_fail else ""))
             self.last_run = datetime.now(KST).isoformat(timespec="seconds")
             log.info("야간 발굴 %s", self.progress)
