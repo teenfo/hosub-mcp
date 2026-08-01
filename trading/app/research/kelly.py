@@ -71,6 +71,12 @@ def from_trades(rows: list[dict], key: str = "pnl_pct") -> dict:
     out["n"] = len(pnls)
     out["avg_win"] = round(sum(wins) / len(wins), 4)
     out["avg_loss"] = round(sum(loss) / len(loss), 4)
+    # 표본이 몇 **거래일**에 걸쳐 있나 — line() 의 유보 문구가 이 값으로 갈린다.
+    # 켈리는 승률·손익비가 안정적일 때 성립하고, 안정성의 단위는 건수가 아니라
+    # 날이다(같은 날 20건은 같은 국면의 20표본이다).
+    d = {str(r.get("closed") or r.get("d") or "")[:10] for r in rows
+         if r.get(key) is not None and (r.get("closed") or r.get("d"))}
+    out["days"] = len(d) or None
     return out
 
 
@@ -88,5 +94,13 @@ def line(k: dict, target_r: float | None = None) -> str:
           f" 손익비 {k['need_payoff']:.2f} 가 필요하다")
     if target_r and k["need_payoff"] > target_r:
         s += f" — 설계 목표 {target_r:g}R 로는 도달할 수 없는 값이다"
-    s += ". 표본이 20거래일에 못 미치면 판단을 보류한다."
+    # 유보 문구는 **조건부**다. 항상 붙이면 표본이 충분해져도 같은 유보가 붙어
+    # 문구의 신호값이 죽는다(감사 2026-08-01 — 종전에는 무조건 붙였다).
+    days = k.get("days")
+    if days is None:
+        s += ". 표본이 20거래일에 못 미치면 판단을 보류한다."
+    elif days < 20:
+        s += f". 표본이 {days}거래일뿐이다 — 판단을 보류한다."
+    else:
+        s += f". (표본 {days}거래일)"
     return s

@@ -44,8 +44,22 @@ def _t_stat(mean: float, std: float, n: int) -> float:
     return round(mean / (std / math.sqrt(n)), 2)
 
 
-def load_daily() -> pd.DataFrame:
-    """일봉 전체를 한 번에 읽는다(종목별 3,941회 질의 대신 1회)."""
+def load_daily(exclude_etf: bool = True) -> pd.DataFrame:
+    """일봉 전체를 한 번에 읽는다(종목별 3,941회 질의 대신 1회).
+
+    ## ETF/ETN/리츠는 기본 제외한다 — 발굴과 같은 잣대(data/exclude.py)
+
+    이 필터가 없던 대가를 하루에 두 번 치렀다(2026-08-01).
+
+    1. 조건식 백테스트의 "무작위 대비 -0.135R vs -0.304R 우위" — 통과 표본의
+       **87.4%가 금리형·머니마켓 ETF** 였다. 매일 0.01%씩 오르는 현금성 상품이라
+       항상 신고가·항상 이평 위·항상 정배열이다. 우위의 실체는 시장 불참이었다.
+    2. 발굴 점수 재측정 — 반대 방향으로 왜곡했다. ETF 포함이면 점수 2점 이상이
+       무작위 대비 +0.007(t=+0.67)로 무해해 보이고, 빼면 -0.135(t=-8.33)다.
+
+    발굴은 이름 기반으로 ETF 를 제외하는데(`data/exclude.py`) 하네스는
+    전종목을 썼다 — **유니버스가 발굴과 다르면 측정이 발굴에 이식되지 않는다.**
+    """
     with sqlite3.connect(store.DB_PATH) as conn:
         df = pd.read_sql_query(
             "SELECT symbol, ts, open, high, low, close, volume FROM bars "
@@ -53,6 +67,22 @@ def load_daily() -> pd.DataFrame:
     if df.empty:
         return df
     df["ts"] = pd.to_datetime(df["ts"])
+    if exclude_etf:
+        from ..data.exclude import is_excluded
+        from ..data.symbols import DB_PATH as SYM_DB
+
+        cfg = settings.CONFIG.get("discovery", {})
+        try:
+            with sqlite3.connect(SYM_DB) as conn:
+                names = dict(conn.execute("SELECT code, name FROM symbol_master"))
+        except sqlite3.Error:
+            names = {}
+        if names:
+            bad = {c for c, n in names.items() if is_excluded(n or "", cfg)}
+            df = df[~df["symbol"].isin(bad)]
+        else:
+            log.warning("종목 마스터가 비어 ETF 를 못 가른다 — 전종목으로 진행 "
+                        "(결과 해석 시 ETF 오염 주의)")
     return df
 
 
@@ -279,6 +309,8 @@ def analyze(df: pd.DataFrame, cost_pct: float) -> dict:
 
 
 CAVEATS = [
+    "유니버스는 ETF/ETN/리츠 제외(발굴과 같은 이름 기반 잣대)다. 포함하면 측정이 두 방향으로 왜곡된다 — "
+    "실측 2026-08-01: 조건식 우위의 87%가 금리형 ETF 였고, 점수의 해로움은 ETF 가 가려 무해해 보였다.",
     "생존 편향 — 종목 리스트가 현재 상장분이라 상장폐지 종목이 빠져 있다. 실제 성적은 이 수치보다 나쁠 수 있다.",
     "표본 기간이 일봉 보관분(약 1년)이라 시장 국면이 한두 개밖에 들어가지 않는다.",
     "수익률은 t+1 시가 진입 기준이다. t 종가→t+1 시가 갭(gap_pct)은 배치가 끝난 뒤 열리므로 잡을 수 없다.",

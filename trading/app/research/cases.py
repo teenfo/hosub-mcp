@@ -282,10 +282,14 @@ def stats(days: int = 30) -> dict:
     못 잰 것을 0 으로 세면 안 된다고 이 파일 곳곳에 적어 놓고 집계에서 스스로
     어겼다.
     """
+    # 날짜로 자른다 — 종전 `LIMIT days*60` 은 행수 컷이라 하루 60건이 넘으면
+    # 최근이 잘리고 표본이 적으면 옛날 케이스가 섞였다. 일지가 이 값을
+    # "[누적 n건]" 사실로 매일 싣는데 시간 경계가 거짓이었다(감사 2026-08-01).
+    cutoff = (datetime.now(KST).date() - timedelta(days=days)).isoformat()
     with _conn() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM cases WHERE mfe_pct IS NOT NULL ORDER BY d DESC LIMIT ?",
-            (days * 60,))]
+            "SELECT * FROM cases WHERE mfe_pct IS NOT NULL AND d >= ? "
+            "ORDER BY d DESC", (cutoff,))]
     if not rows:
         return {"n": 0}
 
@@ -305,6 +309,7 @@ def stats(days: int = 30) -> dict:
     breached, breached_of = count("mae_over_stop", lambda v: v > 1.0)
     return {
         "n": len(rows),
+        "window_days": days,       # 이 통계가 어느 창의 것인지 — 일지 문구가 쓴다
         "mfe_pct": avg("mfe_pct"), "mae_pct": avg("mae_pct"),
         "mfe_3min": avg("mfe_3min"), "entry_pos": avg("entry_pos"),
         "never_up": sum(1 for r in rows if r["mfe_pct"] <= 0),
@@ -323,7 +328,10 @@ def similar(rule: str | None, hour: int | None, limit: int = 5,
     같은 날은 제외한다. 오늘 일지를 쓰면서 오늘 거래를 '선례' 로 인용하면
     같은 사실을 두 번 세는 것이고, 요약이 그걸 근거처럼 읽는다.
     """
-    sql = "SELECT * FROM cases WHERE bars > 0"
+    # `mfe_pct IS NOT NULL` — stats() 와 같은 필터다. `bars > 0` 으로 두면
+    # bars=1 인 미측정 케이스(측정치 전부 NULL)가 선례로 인용된다(#232 가
+    # stats 에서 고친 것과 같은 결함이 여기 남아 있었다, 감사 2026-08-01).
+    sql = "SELECT * FROM cases WHERE mfe_pct IS NOT NULL"
     args: list = []
     if rule:
         sql += " AND rule = ?"

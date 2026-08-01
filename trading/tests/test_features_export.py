@@ -44,16 +44,6 @@ def test_illiquid_still_has_features_but_not_liquid():
     assert f["liquid"] == 0
 
 
-def test_screen_daily_matches_features(tmp_path):
-    from app import discovery
-    closes = list(np.linspace(9000, 10000, 69)) + [10500]
-    volumes = [200_000] * 69 + [1_000_000]
-    df = _daily(closes, volumes)
-    score, reasons = discovery.screen_daily(df, CFG)
-    f = compute_features(df, CFG)
-    assert score == f["score"] and reasons == f["reasons"]
-
-
 def test_write_dataset_creates_csv_and_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(export, "DATASET_DIR", tmp_path / "datasets")
     monkeypatch.setattr(settings, "CONFIG", {"export": {"keep_days": 30}})

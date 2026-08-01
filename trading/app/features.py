@@ -1,7 +1,9 @@
 """종목별 피처 계산 — 스케줄러(분석기)가 소비할 수치 테이블의 단일 소스.
 
 일봉 DataFrame(오름차순, 최소 60행) → 종목 1행짜리 피처 dict.
-발굴 스크리닝(screen_daily)과 데이터셋 내보내기(export)가 같은 계산을 공유한다.
+발굴 배치(discovery.run_once)와 데이터셋 내보내기(export)가 같은 계산을 공유한다.
+연구 패널(research/panel.py)은 같은 정의를 rolling 으로 재계산하며, 마지막 행
+일치를 테스트가 못박는다 — 두 경로가 갈라지면 연구가 발굴과 달라진다.
 """
 import numpy as np
 import pandas as pd

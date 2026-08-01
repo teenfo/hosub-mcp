@@ -351,11 +351,22 @@ class Engine:
         return {"signals": got, "decisions": len(rows), "applied": applied}
 
     async def loop(self, interval_sec: int = 30) -> None:
+        purged_for = ""
         while True:
             try:
                 if settings.CONFIG.get("scout", {}).get("enabled", True):
                     await self.run_once()
                     self.last_error = ""
+                    # 원장 정리 — 하루 1회. `purge()` 는 정의만 있고 호출부가
+                    # 없어 scout.db 가 무한 성장하고 있었다(감사 2026-08-01).
+                    # 멱등·저비용이라 재시작 후 재실행돼도 무해하다.
+                    today = datetime.now(KST).date().isoformat()
+                    if purged_for != today:
+                        n = await asyncio.to_thread(store.purge)
+                        purged_for = today
+                        if n:
+                            log.info("신호 원장 정리 — %d행 (보존 %d일)",
+                                     n, store.RETAIN_DAYS)
             except Exception as e:  # noqa: BLE001
                 self.last_error = str(e)
                 log.exception("발굴 엔진 오류")

@@ -122,6 +122,7 @@ async def loop(interval_sec: int = 300) -> None:
     """
     from ..data import store as bars_store
 
+    fails: dict[str, int] = {}
     while True:
         try:
             now = datetime.now(store.KST)
@@ -130,8 +131,21 @@ async def loop(interval_sec: int = 300) -> None:
                     and now.strftime("%H:%M") >= str(_cfg().get("after", "15:50"))
                     and not await asyncio.to_thread(
                         bars_store.job_done, "flows", today)):
-                await collect_once(now)
-                await asyncio.to_thread(bars_store.mark_job_done, "flows", today)
+                got = await collect_once(now)
+                # **전 소스가 실패한 날을 완료로 마크하지 않는다.** 종전에는
+                # 무조건 마크해서 토큰 만료 같은 전면 장애일의 수급 관측이
+                # 통째로 비고 조용히 넘어갔다(감사 2026-08-01). 재시도는
+                # 3회로 제한한다 — 120종목 × 3콜을 5분마다 무한 반복하면
+                # 장애일에 레이트리밋만 태운다.
+                ok = got["detail"] + got["short"] + got["session"] > 0
+                if ok or got["symbols"] == 0 or fails.get(today, 0) >= 2:
+                    if not ok and got["symbols"]:
+                        log.error("수급 관측 %d회 전면 실패 — 오늘은 포기 "
+                                  "(내일 lookback 이 메운다)", fails.get(today, 0) + 1)
+                    await asyncio.to_thread(bars_store.mark_job_done, "flows", today)
+                else:
+                    fails[today] = fails.get(today, 0) + 1
+                    fails = {today: fails[today]}       # 지난 날짜는 버린다
         except Exception:  # noqa: BLE001
             log.exception("수급 관측 루프 오류")
         await asyncio.sleep(interval_sec)

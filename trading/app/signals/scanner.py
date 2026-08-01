@@ -197,8 +197,14 @@ class Scanner:
             watchlist.replace_active(self.results)
             await watchlist.notify()
         try:
-            surge_raw = await client.volume_surge_rank(cfg.get("market", "000"))
-            self.presurge = filter_presurge(parse_surge(surge_raw), cfg)
+            # 개장 워밍업 — 급증률의 분모(직전 누적 거래량)가 개장 직후에는
+            # 사실상 비어 있어 대형주가 수백만 % 를 받는다(실측 2026-07-28
+            # 09:00:25 NAVER 718,757%). scout 쪽 PresurgeSource 에는 이 가드가
+            # 있었는데 화면 표시용인 이 경로에만 없었다(감사 2026-08-01).
+            warm = int(cfg.get("presurge_warmup_min", 10))
+            if datetime.now(KST).strftime("%H:%M") >= f"09:{warm:02d}":
+                surge_raw = await client.volume_surge_rank(cfg.get("market", "000"))
+                self.presurge = filter_presurge(parse_surge(surge_raw), cfg)
         except Exception as e:  # noqa: BLE001 - 조짐 스캔 실패는 비치명적
             log.warning("거래량급증 스캔 실패: %s", e)
         try:

@@ -4,7 +4,7 @@ import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -301,14 +301,25 @@ async def _desk_rest_price(symbol: str) -> float | None:
     from .kiwoom.client import client
     from .kiwoom.quote import parse_quote
 
+    def _db_fallback() -> float | None:
+        from .trade import ledger
+
+        # DB 최근 분봉 종가 — 30초 원장 루프가 갖고 있던 마지막 안전망이다.
+        # 데스크가 소유권을 가지면 30초 루프는 stop/target 을 안 보므로(skip),
+        # 여기서 None 을 돌려주면 그 사이클은 **아무도 감시하지 않는다**
+        # (감사 2026-08-01). 낡은 값(최대 백필 주기)이라도 감시 공백보다 낫다 —
+        # 30초 루프가 종전에 정확히 이 값으로 판정해 왔다.
+        px = ledger.latest_price(symbol)
+        return float(px) if px else None
+
     try:
         # 우선 레인 — 데스크 호출은 분봉 백필·순위 조회를 앞지른다
         q = parse_quote(await client.quote(symbol, priority=True))
     except Exception:  # noqa: BLE001
-        log.warning("데스크 REST 시세 실패 %s", symbol)
-        return None
+        log.warning("데스크 REST 시세 실패 %s — DB 분봉 폴백", symbol)
+        return _db_fallback()
     if not q:
-        return None
+        return _db_fallback()
     px = float(q["price"])
     # **받은 값을 aggregator 에 넣는다.** 종전에는 데스크만 쓰고 버렸다. 그러면
     # `_price_of` 의 스냅샷이 계속 비어 DB 분봉 종가로 폴백하고, WS 틱이 오지
@@ -842,11 +853,17 @@ async def api_kelly(days: int = 60, _=Depends(require_auth)):
 
     자동 사이징에 쓰지 않는다. 켈리는 승률·손익비가 안정적일 때 성립하는데
     표본이 아직 얇고, 그 위에 자동 조절을 얹으면 노이즈를 레버리지로 증폭한다.
+
+    `days` 는 청산일 기준 컷이다 — 선언만 있고 본문이 무시하던 죽은 인자였다
+    (감사 2026-08-01). 0 이면 전체 누적.
     """
     from .research import kelly
     from .trade import ledger
 
     rows = await asyncio.to_thread(ledger.positions, "closed", 500)
+    if days > 0:
+        cut = (datetime.now(KST) - timedelta(days=days)).isoformat()
+        rows = [r for r in rows if (r.get("closed") or "") >= cut]
     return kelly.from_trades(rows)
 
 

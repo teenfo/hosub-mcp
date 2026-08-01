@@ -181,7 +181,8 @@ def prepare(df: pd.DataFrame, min_score: float | None = None) -> dict:
         "dates": dates,
         "groups": groups,
         "liquid": liquid,
-        # 실제 야간 발굴이 후보로 삼는 풀과 같은 조건(discovery.py:199)
+        # 실제 야간 발굴이 후보로 삼는 풀과 같은 조건(discovery.run_once 의
+        # min_score 게이트 — 줄 번호로 가리키지 않는다, 주석 부패의 원인이었다)
         "gated": {d: g[g["score"] >= min_score] for d, g in liquid.items()},
         "min_score": min_score,
         "is_w": _mean_weights(ic) if len(ic) else {},
@@ -235,6 +236,8 @@ def evaluate(df: pd.DataFrame, method: str, stop_pct: float, target_r: float,
 
 
 CAVEATS = [
+    "유니버스는 ETF/ETN/리츠 제외(load_daily 기본값) — 포함하면 저변동성 현금성 상품이 "
+    "'항상 신고가·항상 정배열' 로 통과해 비교가 왜곡된다(실측 2026-08-01, 조건식 표본의 87%가 ETF).",
     "일봉 브래킷 근사다. 장중 순서를 모르므로 손절·목표가 같은 날 둘 다 닿으면 손절 우선으로 가정한다(보수적).",
     "ORB 의 진입 타이밍(09:15 범위 돌파)은 재현할 수 없다 — 전부 익일 시가 진입 근사.",
     "위 두 편향은 모든 방식에 공통이므로 **방식 간 비교에는 유효**하다. 절대 R 값은 신뢰하지 않는다.",

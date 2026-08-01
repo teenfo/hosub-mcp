@@ -113,6 +113,21 @@ _EXIT_LABEL = {
 }
 
 
+def _exit_reason_of(order: dict) -> str:
+    """승인 대기 주문의 표시 문구 → 원래 청산 사유. 못 찾으면 'manual'.
+
+    제안 시점의 사유는 `reason` 컬럼에 사람용 문구(`_EXIT_LABEL`)로만 남는다 —
+    스키마를 늘리는 대신 그 문구를 역으로 푼다. 문구와 사유의 대응은 이 파일
+    안에서 닫혀 있으므로 안전하다.
+    """
+    label = str(order.get("reason") or "")
+    for key, text in _EXIT_LABEL.items():
+        if label == text:
+            return key
+    m = re.match(r"청산\((\w+)\) 승인", label)
+    return m.group(1) if m else "manual"
+
+
 def propose_exit(pos: dict, reason: str, exit_px: float) -> str:
     """포지션 청산을 '승인 대기 주문'으로 등록(매도).
 
@@ -346,9 +361,13 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
         from . import ledger
 
         if order.get("kind") == "exit":
-            # 청산(매도) 승인 발주 → 연결 포지션을 청산 처리
+            # 청산(매도) 승인 발주 → 연결 포지션을 청산 처리.
+            # 사유는 제안 시점의 것을 되찾는다 — 종전에는 'target' 하드코딩이라
+            # 데스크가 꺼져 stop 이 승인 경로로 오면 손절이 익절로 기록됐다
+            # (감사 2026-08-01). 원장의 exit_reason 은 진단 입력이다.
             try:
-                ledger.close_position(order["link_pos"], float(order["exit_px"]), "target")
+                ledger.close_position(order["link_pos"], float(order["exit_px"]),
+                                      _exit_reason_of(order))
             except Exception:  # noqa: BLE001
                 pass
         else:
