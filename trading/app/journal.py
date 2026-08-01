@@ -296,6 +296,14 @@ def facts(entry: dict) -> list[str]:
                  f"목표청산은 {cs['target_exited']}건, 손절선을 관통한 건 "
                  f"{cs['stop_breached']}/{cs['stop_breached_of']}건.")
         out.append(line)
+    # 켈리 — "지금 베팅해도 되는 상태인가" 를 한 줄로. 자동 사이징에는 쓰지
+    # 않는다(공식이 전제하는 안정성을 5거래일 표본이 갖추지 못한다).
+    if entry.get("kelly"):
+        from .research import kelly as _kelly
+        k = _kelly.line(entry["kelly"],
+                        target_r=settings.RULES.get("orb", {}).get("target_r"))
+        if k:
+            out.append(k)
     if entry.get("carried"):
         out.append(
             f"다음 날로 넘어간 미청산 포지션 {len(entry['carried'])}건 — "
@@ -445,6 +453,16 @@ def build(day: str | None = None) -> dict:
     except Exception:  # noqa: BLE001
         log.warning("케이스 적재 실패 — 일지는 그대로 만든다", exc_info=True)
         entry["cases"] = {}
+    # 켈리 — **누적** 표본으로 낸다. 하루치로 내면 승률 0% 또는 100% 인 날이
+    # 흔해 손익비가 성립하지 않고, 성립하는 날만 값이 찍혀 그 자체가 편향이 된다.
+    try:
+        from .research import kelly as _kelly
+
+        entry["kelly"] = _kelly.from_trades(
+            ledger.positions(status="closed", limit=500))
+    except Exception:  # noqa: BLE001
+        log.warning("켈리 계산 실패", exc_info=True)
+        entry["kelly"] = {}
     entry["facts"] = facts(entry)
     return entry
 

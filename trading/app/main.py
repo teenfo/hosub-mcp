@@ -836,6 +836,20 @@ async def api_journal_run(payload: dict | None = Body(None),
     return entry
 
 
+@app.get("/api/kelly")
+async def api_kelly(days: int = 60, _=Depends(require_auth)):
+    """켈리 지표 — 지금 이 전략에 자본을 넣어도 되는가(조회 전용).
+
+    자동 사이징에 쓰지 않는다. 켈리는 승률·손익비가 안정적일 때 성립하는데
+    표본이 아직 얇고, 그 위에 자동 조절을 얹으면 노이즈를 레버리지로 증폭한다.
+    """
+    from .research import kelly
+    from .trade import ledger
+
+    rows = await asyncio.to_thread(ledger.positions, "closed", 500)
+    return kelly.from_trades(rows)
+
+
 @app.get("/api/flows")
 async def api_flows(days: int = 30, _=Depends(require_auth)):
     """수급 관측 적재 현황 — 일자별로 어느 칸이 찼는지(조회 전용)."""
