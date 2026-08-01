@@ -139,6 +139,25 @@ def test_screen_fill_0_이면_팔이_사라진다():
     assert all(p["pick_kind"] == "random" for p in top)
 
 
+def test_배포_기본값은_꺼짐이다():
+    """근거가 무너진 팔이 조용히 돌지 않게 못박는다.
+
+    조건식이 무작위를 이긴 것은 **변동성을 통제하지 않았기 때문**이었다 —
+    같은 날 비슷한 atr_pct 종목과 비교하면 격차가 +0.030R(t=+0.70)로 0 과
+    구분되지 않는다. 되살리려면 그 대조군을 먼저 통과시켜야 하고, 그때
+    이 테스트를 함께 고치면 된다.
+    """
+    from pathlib import Path
+
+    import yaml
+
+    cfg = yaml.safe_load(
+        Path(__file__).resolve().parents[1].joinpath("config.yaml")
+        .read_text(encoding="utf-8"))["discovery"]
+    assert cfg["screen_fill"] == 0
+    assert cfg["random_fill"] > 0          # 대조군 팔은 계속 돈다
+
+
 def test_한_종목은_한_팔에만_속한다():
     """같은 종목이 두 팔에 실리면 4주 뒤 팔별 성적이 성립하지 않는다."""
     pool = _pool(60, score=lambda i: 3.0 if i < 2 else 0.0,
