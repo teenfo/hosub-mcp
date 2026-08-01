@@ -114,7 +114,7 @@ async def _resubscribe() -> None:
     if new != _ws_prev:
         added, removed = sorted(new - _ws_prev), sorted(_ws_prev - new)
         if _ws_prev:      # 첫 구독은 전량이라 나열해도 읽히지 않는다
-            log.info("WS 구독 변경 %d → %d종목 (추가 %s · 제거 %s) — 재접속하며 틱 유실",
+            log.info("WS 구독 변경 %d → %d종목 (추가 %s · 제거 %s) — 증분 등록(연결 유지)",
                      len(_ws_prev), len(new), added or "없음", removed or "없음")
         _ws_prev = new
     await feed.update(syms)
@@ -516,6 +516,8 @@ async def api_status(_=Depends(require_auth)):
         "api_usage": _api_usage(),
         # 매매 데스크 계측. WS 대비 REST 비율이 이 설계의 성적표다
         "desk": desk.status(),
+        # WS 수신 상태 — 증분 등록·좀비 감시·틱 수신 지연(2026-08-01 개선의 성적표)
+        "ws": {**feed.info(), "tick_lag": aggregator.lag_last},
     }
 
 
