@@ -33,3 +33,6 @@ venv/
 llm-gateway/.env
 llm-gateway/data/
 llm-gateway/.deployed-tree
+
+# Claude Code 가 에이전트 격리용으로 만드는 임시 워크트리 (전이적)
+.claude/worktrees/
