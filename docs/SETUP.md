@@ -294,16 +294,34 @@ OTP/SSO) 병행을 권장**한다.
 감지하면 로그로 알린다:
 
 ```
-[hosub-mcp-update] 주의: llm-gateway/ 가 변경됨 — 컨테이너는 자동 재빌드되지 않습니다.
-[hosub-mcp-update]       반영: sudo systemctl reload llm-gateway
+[hosub-mcp-update] 주의: llm-gateway 컨테이너가 현재 코드와 다릅니다(자동 재빌드 안 함).
+[hosub-mcp-update]       디스크=abc123def456 배포됨=0f1e2d3c4b5a
 ```
 
-게이트웨이 코드를 반영하려면 **명시적으로** 하나를 실행한다:
+게이트웨이 코드를 반영할 때는 **`deploy_service` 를 쓴다:**
+
+```
+deploy_service(service_name="llm-gateway", confirm=true)
+  → git pull --ff-only
+  → docker compose up -d --build
+  → deploy/gateway-mark-deployed.sh      # 드리프트 마커 갱신
+```
+
+> ⚠️ **`systemctl reload llm-gateway` 로 배포하지 말 것.** `ExecReload` 는
+> `docker compose up -d --build` 라 재빌드는 하지만 `git pull` 도 **마커 갱신도
+> 하지 않는다.** 컨테이너는 새 코드로 도는데 위 경고가 5분마다 영원히 반복된다
+> (실측: 이 문서가 reload 를 권했던 탓에 실제로 그 상태에 빠진 적이 있다).
+>
+> 이미 reload 로 재빌드한 뒤라면 마커만 채우면 된다:
+> `sudo /opt/hosub-mcp/deploy/gateway-mark-deployed.sh`
+
+드리프트가 풀렸는지는 두 값이 같은지로 본다 — 트리 해시라 `llm-gateway/` 아래
+어떤 파일이든(문서 한 줄도) 바뀌면 달라진다:
 
 ```bash
-sudo systemctl reload llm-gateway        # git pull 없이 현재 코드로 재빌드
-# 또는 MCP 로: deploy_service(service_name="llm-gateway", confirm=true)
-#   → git pull --ff-only + docker compose up -d --build
+cd /opt/hosub-mcp
+git rev-parse HEAD:llm-gateway   # 디스크
+cat llm-gateway/.deployed-tree   # 배포됨
 ```
 
 ### 8-2. LLM 게이트웨이 서비스 등록

@@ -42,8 +42,12 @@ gateway_drift_check() {
   [ "$want" != "$have" ] || return 0
   log "주의: llm-gateway 컨테이너가 현재 코드와 다릅니다(자동 재빌드 안 함)."
   log "      디스크=${want:0:12} 배포됨=${have:0:12}"
-  log "      반영: sudo systemctl reload llm-gateway"
-  log "      또는: MCP deploy_service(service_name='llm-gateway', confirm=true)"
+  # systemctl reload 를 권하지 않는다: ExecReload 는 재빌드만 하고 이 마커를
+  # 갱신하지 않아, 컨테이너가 새 코드로 돌아도 이 경고가 5분마다 영원히 반복된다.
+  # git pull + 재빌드 + 마커를 다 하는 경로는 deploy_service 하나뿐이다.
+  log "      반영: MCP deploy_service(service_name='llm-gateway', confirm=true)"
+  log "      (systemctl reload 는 재빌드만 하고 이 마커를 갱신하지 않아 경고가 남는다.)"
+  log "      이미 reload 로 재빌드했다면: sudo $APP_DIR/deploy/gateway-mark-deployed.sh"
 }
 gateway_drift_check
 
