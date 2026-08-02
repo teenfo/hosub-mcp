@@ -132,6 +132,11 @@ def rank_series(g: pd.DataFrame, method: str, weights: dict | None,
         return g["score"].astype(float)
     if method == "atr":
         return g["atr_pct"].astype(float)
+    if method == "frgn_stv":
+        # 외국인 순매수/거래대금 — IC 재현 통과(2026-08-02, 잔차 t=4.9) 후
+        # 마지막 관문으로 여기 들어왔다. IC 가 R 로 환산된다는 보장이 없다는 것이
+        # 이 하네스의 존재 이유다(atr_pct: 잔차 IC +0.39 → 브래킷 −0.49).
+        return g["frgn_stv"].astype(float)
     if method in ("composite_is", "composite_wf"):
         return _composite(g, weights or {})
     if method in _RANDOM_PICK:
@@ -214,7 +219,13 @@ def evaluate(df: pd.DataFrame, method: str, stop_pct: float, target_r: float,
                 continue                     # 학습창 미달 또는 가중치 미성립
         else:
             w = ctx["is_w"]
-        picks = g.loc[rank_series(g, method, w, rng).nlargest(top_n).index]
+        # 값 없는 행(NaN)은 후보가 아니다 — 유효 후보가 top_n 미만인 날은
+        # 건너뛴다. frgn_stv 처럼 커버리지가 부분인 신호에서, NaN 을 버린 뒤
+        # 남은 두세 종목만으로 '상위 N' 을 뽑으면 그 날 표본이 왜곡된다.
+        rank = rank_series(g, method, w, rng).dropna()
+        if len(rank) < top_n:
+            continue
+        picks = g.loc[rank.nlargest(top_n).index]
         used_days += 1
         for r in picks.itertuples():
             v = bracket_r(r.fwd_up_1, r.fwd_dn_1, r.fwd_1, stop_pct, target_r, cost_pct)
@@ -248,26 +259,80 @@ CAVEATS = [
 
 
 def analyze(df: pd.DataFrame, stops: list[float], target_r: float,
-            cost_pct: float, top_n: int = TOP_N) -> dict:
+            cost_pct: float, top_n: int = TOP_N,
+            methods: tuple[str, ...] = METHODS) -> dict:
     ctx = prepare(df)                        # 전 조합이 공유 — 한 번만 계산한다
     rows = [evaluate(df, m, s, target_r, cost_pct, top_n, ctx)
-            for m in METHODS for s in stops]
+            for m in methods for s in stops]
     ok = [r for r in rows if r.get("reliable")]
     best = max(ok, key=lambda r: r["avg_r"], default=None)
-    # 판정은 대조군 대비로 한다 — random 을 못 이기면 랭킹의 존재 이유가 없다
-    ctrl = {s: next((r["avg_r"] for r in ok
-                     if r["method"] == "random" and r["stop_pct"] == s), None)
-            for s in stops}
-    for r in ok:
-        c = ctrl.get(r["stop_pct"])
-        r["vs_random"] = None if c is None else round(r["avg_r"] - c, 4)
+    # 판정은 대조군 대비로 한다 — random 을 못 이기면 랭킹의 존재 이유가 없고,
+    # liquid_only(매수가능 무작위)를 못 이기면 실행 가능한 개선이 아니다
+    for ctrl_m, key in (("random", "vs_random"), ("liquid_only", "vs_liquid")):
+        ctrl = {s: next((r["avg_r"] for r in ok
+                         if r["method"] == ctrl_m and r["stop_pct"] == s), None)
+                for s in stops}
+        for r in ok:
+            c = ctrl.get(r["stop_pct"])
+            r[key] = None if c is None else round(r["avg_r"] - c, 4)
     return {
-        "rows": rows, "best": best, "methods": list(METHODS), "stops": stops,
+        "rows": rows, "best": best, "methods": list(methods), "stops": stops,
         "top_n": top_n, "target_r": target_r, "cost_pct": cost_pct,
         "train_days": TRAIN_DAYS, "learn_target": TARGET,
         "min_score": ctx["min_score"],
         "caveats": CAVEATS,
     }
+
+
+# 수급 커버 표본에서 같이 재는 방식들 — composite 계열은 뺀다(학습창 60일이
+# 커버 86일을 거의 다 먹어 평가 일수가 남지 않는다).
+FLOW_METHODS = ("frgn_stv", "score", "atr", "liquid_only", "random")
+
+
+def attach_flow(df: pd.DataFrame) -> int:
+    """flow_obs 의 외국인 순매수를 패널에 `frgn_stv` 로 붙인다. 반환: 값 있는 행 수.
+
+    frgn_stv = 외국인 순매수 수량 / 당일 거래량. 원 정의(순매수금액/거래대금)의
+    금액을 수량×종가로 근사하면 종가가 소거돼 이 비가 된다 — flowsignal.py 의
+    IC 측정과 **같은 신호 정의**라, IC 를 통과한 그 신호가 브래킷을 통과하는지를
+    잰다(정의가 다르면 관문 통과가 무의미해진다).
+
+    ## 판정 기준 (미리 못박는다 — 2026-08-02)
+
+    편입 논의 조건: 수급 커버 표본(같은 날·같은 유니버스)에서 frgn_stv 의
+    avg_r 이 **전 손절폭에서 liquid_only(매수가능 무작위)보다 높을 것**
+    (vs_liquid > 0). random 은 참고(실행 불가능한 상한). 절반 이하 손절폭에서만
+    이기면 '손절폭 의존 신호' 로 기각한다 — min_score 게이트가 그렇게 죽었다.
+    통과해도 편입은 관측 소스(max_tier=collect)부터 — 결정은 사용자.
+    """
+    from ..data import store as bars_store
+    from ..scout import store as scout_store
+
+    import sqlite3
+
+    if not Path(scout_store.DB_PATH).exists():
+        return 0
+    try:
+        with sqlite3.connect(scout_store.DB_PATH) as conn:
+            flow = pd.read_sql_query(
+                "SELECT d, code, foreign_ FROM flow_obs WHERE foreign_ IS NOT NULL",
+                conn)
+        with sqlite3.connect(bars_store.DB_PATH) as conn:
+            vol = pd.read_sql_query(
+                "SELECT symbol code, substr(ts,1,10) d, volume FROM bars"
+                " WHERE tf='1d'", conn)
+    except Exception:  # noqa: BLE001 - 수급이 없으면 flow 섹션만 빠진다
+        log.warning("수급 로드 실패 — flow 섹션 생략", exc_info=True)
+        return 0
+    if flow.empty or vol.empty:
+        return 0
+    m = flow.merge(vol, on=["code", "d"])
+    m = m[m["volume"] > 0]
+    m["frgn_stv"] = m["foreign_"] / m["volume"]
+    lut = {(r.d, r.code): r.frgn_stv for r in m.itertuples()}
+    keys = zip(df["date"].astype(str).str[:10], df["symbol"], strict=False)
+    df["frgn_stv"] = [lut.get(k, np.nan) for k in keys]
+    return int(df["frgn_stv"].notna().sum())
 
 
 def run_once() -> dict:
@@ -292,7 +357,18 @@ def run_once() -> dict:
         "rows_used": len(df), "days": int(df["date"].nunique()),
         "symbols": int(df["symbol"].nunique()),
     }
-    save(result)
+    # 외국인/STV 최종 관문 — 수급 커버 표본으로 **전 방식을 재평가**해 공정 비교
+    # (같은 날·같은 유니버스가 아니면 기간 차이가 방식 차이로 둔갑한다)
+    flow_n = attach_flow(df)
+    if flow_n:
+        sub = df[df["frgn_stv"].notna()]
+        result["flow"] = analyze(sub, stops, target_r, cost,
+                                 methods=FLOW_METHODS) | {
+            "rows_used": len(sub), "days": int(sub["date"].nunique()),
+            "symbols": int(sub["symbol"].nunique()),
+            "note": "수급 커버 표본 한정 재평가 — 판정 기준은 attach_flow docstring",
+        }
+        log.info("flow 섹션: %d행 / %d일", len(sub), int(sub["date"].nunique()))
     log.info("랭킹 비교 완료: best=%s", (result.get("best") or {}).get("method"))
     return result
 
