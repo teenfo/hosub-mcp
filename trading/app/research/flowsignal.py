@@ -134,10 +134,19 @@ async def backfill(days: int = 100) -> dict:
                 PROGRESS["caps"] += record_caps(raw.get("atn_stk_infr") or [])
             except Exception:  # noqa: BLE001 - 한 배치 실패가 전체를 막지 않는다
                 log.warning("시총 배치 실패 %d~", i, exc_info=True)
-        # ② 수급 — 종목당 1콜, 100일치
+        # ② 수급 — ka10086 은 **페이지당 약 20일치**라(실측 2026-08-02) 목표
+        #    일수를 채울 때까지 연속조회한다. 100일 = 종목당 5~6콜.
+        max_pages = int(_cfg().get("max_pages", 6))
         for code, name in syms:
             try:
-                rows = kflows.parse_daily_price(await client.daily_price(code))
+                rows: list[dict] = []
+                next_key = ""
+                for _page in range(max_pages):
+                    raw, next_key = await client.daily_price_page(
+                        code, next_key=next_key)
+                    rows += kflows.parse_daily_price(raw)
+                    if len(rows) >= days or not next_key:
+                        break
                 scout_store.record_flows(code, rows[:days], name)
             except Exception:  # noqa: BLE001
                 PROGRESS["fails"] += 1

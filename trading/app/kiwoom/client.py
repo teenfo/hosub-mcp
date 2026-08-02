@@ -425,6 +425,21 @@ class KiwoomClient:
             {"stk_cd": code, "indc_tp": "0",
              "qry_dt": qry_dt or datetime.now(KST).strftime("%Y%m%d")})
 
+    async def daily_price_page(self, code: str, qry_dt: str = "",
+                               next_key: str = "") -> tuple[dict, str]:
+        """일별주가(ka10086) 연속조회 1페이지 → (응답, 다음 페이지 키).
+
+        **한 페이지는 약 20일치다**(실측 2026-08-02: 단건 호출로 100일을
+        기대했다가 표본이 6 횡단면으로 잘렸다). 수급 소급(research/flowsignal)이
+        100일을 모으려면 5~6페이지가 필요하다. cont 규약은 minute_chart_page 와
+        같다 — next_key 가 빈 문자열이면 더 없다.
+        """
+        return await self._request(
+            PATH_MARKET, TR_DAILY_PRICE,
+            {"stk_cd": code, "indc_tp": "0",
+             "qry_dt": qry_dt or datetime.now(KST).strftime("%Y%m%d")},
+            cont="Y" if next_key else "N", next_key=next_key)
+
     async def investor_daily(self, code: str, dt: str) -> dict:
         """종목별 투자자·기관별 (ka10059) — 13개 주체 세부, 100일치.
 

@@ -110,3 +110,48 @@ def test_표본이_없으면_실패를_말한다(tmp_path, monkeypatch):
     monkeypatch.setattr(bars_store, "DB_PATH", tmp_path / "빈2.db")
     out = flowsignal.analyze()
     assert out["ok"] is False
+
+
+def test_백필은_페이지를_이어붙여_목표_일수를_채운다(tmp_path, monkeypatch):
+    """ka10086 은 페이지당 ~20일 — 연속조회로 모아야 한다(실측 2026-08-02)."""
+    import asyncio
+
+    from app.kiwoom import client as client_mod
+    from app.research import flowsignal as fs
+
+    monkeypatch.setattr(scout_store, "DB_PATH", tmp_path / "scout.db")
+
+    def _rows(start, n):
+        return {"daly_stkpc": [
+            {"date": f"202607{d:02d}", "close_pric": "1000", "ind": "1",
+             "orgn": str(d), "for_qty": str(-d), "prm": "0"}
+            for d in range(start, start - n, -1)]}
+
+    class FakeClient:
+        def __init__(self):
+            self.pages = 0
+
+        async def watch_info(self, codes):
+            return {"atn_stk_infr": [
+                {"stk_cd": c, "stk_nm": f"종{c}", "mac": "1000", "cur_prc": "100"}
+                for c in codes]}
+
+        async def daily_price_page(self, code, qry_dt="", next_key=""):
+            self.pages += 1
+            if not next_key:
+                return _rows(30, 3), "K2"          # 1페이지: 3일
+            return _rows(27, 3), ""                # 2페이지: 3일, 더 없음
+
+    fake = FakeClient()
+    monkeypatch.setattr(client_mod, "client", fake)
+    monkeypatch.setattr(fs, "universe", lambda: [("005930", "삼성전자")])
+    monkeypatch.setitem(
+        __import__("app.settings", fromlist=["CONFIG"]).CONFIG, "research",
+        {"flowsignal": {"max_pages": 6}})
+    got = asyncio.run(fs.backfill(days=5))
+    assert got["ok"] and got["done"] == 1 and got["fails"] == 0
+    with sqlite3.connect(scout_store.DB_PATH) as conn:
+        n = conn.execute("SELECT COUNT(*) FROM flow_obs WHERE orgn IS NOT NULL"
+                         ).fetchone()[0]
+    assert n == 5           # 3 + 3 페이지에서 days=5 로 잘라 저장
+    assert fake.pages == 2  # next_key 가 빈 뒤에는 더 부르지 않는다
