@@ -369,6 +369,9 @@ def run_once() -> dict:
             "note": "수급 커버 표본 한정 재평가 — 판정 기준은 attach_flow docstring",
         }
         log.info("flow 섹션: %d행 / %d일", len(sub), int(sub["date"].nunique()))
+    # flow 섹션까지 붙인 **뒤에** 저장한다 — 2026-08-03 첫 실행에서 이 호출이
+    # 빠져 결과가 stdout 에만 남고 파일·화면에는 옛 결과가 남았다.
+    save(result)
     log.info("랭킹 비교 완료: best=%s", (result.get("best") or {}).get("method"))
     return result
 
