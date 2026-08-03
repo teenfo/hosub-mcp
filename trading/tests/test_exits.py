@@ -60,7 +60,7 @@ async def test_execute_exit_closes_position(tmp_path, monkeypatch):
     ledger.open_position(_order("p3"), fill=10_000)
     ex = ledger.due_exits(lambda s: 9_700)[0]
 
-    async def fake_order(side, symbol, qty, price=0):
+    async def fake_order(side, symbol, qty, price=0, trde_tp=None):
         assert side == "sell" and symbol == "005930" and qty == 10
         return {"ord_no": "X1", "return_code": 0}
 
@@ -78,7 +78,7 @@ async def test_approve_exit_order_closes_position(tmp_path, monkeypatch):
     ex = ledger.due_exits(lambda s: 10_500)[0]
     oid = orders.propose_exit(ex, "target", ex["exit_px"])
 
-    async def fake_order(side, symbol, qty, price=0):
+    async def fake_order(side, symbol, qty, price=0, trde_tp=None):
         return {"ord_no": "X2"}
 
     monkeypatch.setattr("app.kiwoom.client.client.order", fake_order)

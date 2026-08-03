@@ -4,6 +4,7 @@
 TTL 이 지난 pending 은 자동 만료. 모든 상태 전이는 audit 테이블에 남긴다.
 숏 신호는 현물 계좌 제약상 인버스 ETF '매수' 로 매핑한다(동일 명목금액 근사).
 """
+import asyncio
 import json
 import logging
 import math
@@ -163,9 +164,78 @@ def accepted(result) -> bool:
     return rc in (0, "0", None)
 
 
+# 수동 청산 발주 유형(사용자 승인 2026-08-03). 실측: 수동 청산 9건 평균
+# 괴리 −0.32%·최악 −1.26%(시장가가 얇은 호가를 잠식). 최유리지정가(best)는
+# 매수최우선호가를 지정가로 걸어 아래 호가로 밀리지 않는다 — 잔량은
+# fallback_sec 뒤 취소 후 시장가 전환. **자동 손절·eod 는 시장가 유지** —
+# 그쪽의 제1 목적은 확실한 탈출이다.
+MANUAL_EXIT_DEFAULTS = {"type": "best", "fallback_sec": 10}
+
+
+def _manual_exit_cfg() -> dict:
+    cfg = settings.CONFIG.get("execution", {}).get("manual_exit", {}) or {}
+    return MANUAL_EXIT_DEFAULTS | cfg
+
+
+async def _best_exit_fallback(pos: dict, exec_symbol: str, ord_no: str,
+                              qty: int, wait_sec: float) -> None:
+    """최유리지정가 청산의 미체결 잔량 폴백 — 취소 후 시장가로 던진다.
+
+    잔량 계산은 WS 체결 수신(exec_fills)이 근거라 지연이 있을 수 있다.
+    취소가 이미 전량 체결로 거부되면 정상이고, 지연 탓에 과매도 재발주가
+    나가도 브로커가 '매도가능수량 부족' 으로 거부한다 — 자가 제한이다.
+    """
+    from ..kiwoom.client import client
+    from . import ledger
+
+    try:
+        await asyncio.sleep(wait_sec)
+        rem = qty - ledger.filled_qty(ord_no)
+        if rem <= 0:
+            return
+        try:
+            await client.cancel_order(ord_no, exec_symbol)
+        except Exception:  # noqa: BLE001 - 취소 실패(이미 체결 등)는 재계산으로 판단
+            log.warning("청산 잔량 취소 실패 %s ord=%s", exec_symbol, ord_no,
+                        exc_info=True)
+        await asyncio.sleep(1.0)           # 취소 반영·직전 체결 수신 유예
+        rem = qty - ledger.filled_qty(ord_no)
+        if rem <= 0:
+            return
+        result = await client.order("sell", exec_symbol, rem, price=0)
+        ok = accepted(result)
+        log.warning("최유리 청산 잔량 %d주 → 시장가 폴백(%s): %s", rem,
+                    "접수" if ok else "거부",
+                    result.get("return_msg") if isinstance(result, dict) else result)
+        if ok:
+            # 폴백 주문도 원장에 남긴다 — reconcile 이 이 ord_no 의 체결·비용을
+            # 같은 포지션으로 정정할 수 있어야 한다.
+            fb_ord = str(result.get("ord_no") or "")
+            now = datetime.now(UTC)
+            with _conn() as conn:
+                conn.execute(
+                    f"INSERT INTO orders ({_ENTRY_COLS}) VALUES "
+                    "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (uuid.uuid4().hex[:12], now.isoformat(), now.isoformat(),
+                     pos["symbol"], pos["side"], pos["rule"],
+                     f"최유리 잔량 시장가 폴백(ord={fb_ord})",
+                     pos["entry"], pos["stop"], pos["target"], rem,
+                     exec_symbol, "sell", rem, "sent",
+                     json.dumps(result, ensure_ascii=False)[:2000],
+                     "exit", pos["id"], 0.0))
+    except Exception:  # noqa: BLE001 - 폴백 실패는 로그만 — 대사가 잔량을 드러낸다
+        log.exception("최유리 청산 폴백 오류 %s", exec_symbol)
+
+
 async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
-    """즉시 시장가 매도로 청산(승인 없이). 손절 자동/장 마감 정리에 사용.
+    """즉시 매도 청산(승인 없이). 손절 자동/장 마감 정리·수동 버튼에 사용.
     키움은 네이티브 스톱주문이 없어 서버가 감시 후 직접 발주한다.
+
+    발주 유형: 자동(손절·목표·eod)은 **시장가** — 확실한 탈출이 목적이다.
+    수동(reason='manual')은 기본 **최유리지정가**(사용자 승인 2026-08-03) —
+    화면가와의 괴리(실측 평균 −0.32%, 최악 −1.26%)의 주범인 호가 잠식을
+    막는다. 유형 거부 시 시장가 재발주(안전망 — trde_tp 6 은 실호출 미검증),
+    미체결 잔량은 fallback_sec 뒤 취소 후 시장가.
 
     **거부되면 원장을 닫지 않는다.** 2026-07-29 실측: 단일가 대기 중 사용자가
     계좌에서 주문을 취소한 종목에 청산을 눌렀더니 `매도가능수량이 부족합니다`
@@ -179,8 +249,20 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
     exec_symbol = pos.get("exec_symbol") or pos["symbol"]
     order_id = uuid.uuid4().hex[:12]
     now = datetime.now(UTC)
+    mcfg = _manual_exit_cfg()
+    use_best = reason == "manual" and str(mcfg.get("type", "best")) == "best"
     try:
-        result = await client.order("sell", exec_symbol, int(pos["qty"]), price=0)
+        result = await client.order("sell", exec_symbol, int(pos["qty"]), price=0,
+                                    trde_tp="6" if use_best else None)
+        if use_best and not accepted(result):
+            # 안전망: 최유리 유형이 거부되면(미지원 코드 등) 시장가로 즉시
+            # 재발주 — 기능이 꺼질지언정 청산이 멎으면 안 된다
+            log.warning("최유리지정가 거부 — 시장가 재발주: %s",
+                        result.get("return_msg") if isinstance(result, dict)
+                        else result)
+            use_best = False
+            result = await client.order("sell", exec_symbol, int(pos["qty"]),
+                                        price=0)
         status = "sent" if accepted(result) else "rejected"
         detail = json.dumps(result, ensure_ascii=False)[:2000]
     except Exception as e:  # noqa: BLE001
@@ -200,6 +282,10 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
         _audit(conn, order_id, f"exit_{reason}", detail)
     if status == "sent":
         ledger.close_position(pos["id"], float(exit_px), reason, ord_no=exit_ord_no)
+        fb = float(mcfg.get("fallback_sec", 10) or 0)
+        if use_best and exit_ord_no and fb > 0:
+            asyncio.create_task(_best_exit_fallback(
+                pos, exec_symbol, exit_ord_no, int(pos["qty"]), fb))
     else:
         log.warning("청산 발주 거부 %s(%s): %s — 원장을 닫지 않는다",
                     pos.get("name"), pos.get("symbol"), detail[:200])

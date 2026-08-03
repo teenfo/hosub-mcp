@@ -49,17 +49,23 @@ async def test_수동_청산이_실제_매도를_발주한다(env, monkeypatch):
     """이번 버그의 회귀 테스트 — 주문 없이 원장만 닫으면 안 된다."""
     sent = []
 
-    async def _order(side, symbol, qty, price=0):
+    async def _order(side, symbol, qty, price=0, trde_tp=None):
         sent.append((side, symbol, qty, price))
         return {"ord_no": "0999001", "return_code": 0}
 
     from app.kiwoom import client as client_mod
     monkeypatch.setattr(client_mod.client, "order", _order)
+    # 폴백 태스크가 테스트 루프 밖에서 살아남지 않게 즉시형으로
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        dict(settings.CONFIG.get("execution", {}),
+                             manual_exit={"type": "best", "fallback_sec": 0}))
 
     _open()
     r = await orders.execute_exit(ledger.positions("open")[0], "manual", 10_100)
     assert r["ok"] is True
-    assert sent == [("sell", "005930", 10, 0)], "시장가 매도가 나가야 한다"
+    # 발주 유형(최유리/시장가)은 별도 테스트가 검증한다 — 여기서는 **매도가
+    # 실제로 나갔는가**만 본다(2026-07-29 버그의 회귀 지점).
+    assert sent == [("sell", "005930", 10, 0)], "매도 주문이 나가야 한다"
     st, ord_no = _status()
     assert st == "closed"
     assert ord_no == "0999001", "청산 주문번호가 원장에 남아야 실측 정정이 가능하다"
@@ -227,3 +233,101 @@ def test_accepted_는_return_code_로_판정한다():
     assert orders.accepted({"return_code": "0"}) is True
     assert orders.accepted({}) is True             # 코드가 없으면 성공 취급(구버전)
     assert orders.accepted({"return_code": 20}) is False
+
+
+# --------------------------------------------------------------------------
+# 최유리지정가 수동 청산 (사용자 승인 2026-08-03)
+# --------------------------------------------------------------------------
+class _OrderSpy:
+    def __init__(self, reject_best=False):
+        self.calls, self.cancels, self.reject_best = [], [], reject_best
+
+    async def order(self, side, symbol, qty, price=0, trde_tp=None):
+        self.calls.append({"qty": qty, "trde_tp": trde_tp})
+        if self.reject_best and trde_tp == "6":
+            return {"return_code": 40, "return_msg": "지원하지 않는 주문 유형"}
+        return {"return_code": 0, "ord_no": f"O{len(self.calls)}"}
+
+    async def cancel_order(self, orig_ord_no, symbol):
+        self.cancels.append(orig_ord_no)
+        return {"return_code": 0}
+
+
+def _install(monkeypatch, spy):
+    import app.kiwoom.client as mod
+    monkeypatch.setattr(mod, "client", spy)
+
+
+async def test_수동_청산은_최유리지정가로_나간다(env, monkeypatch):
+    _open()
+    spy = _OrderSpy()
+    _install(monkeypatch, spy)
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        dict(settings.CONFIG.get("execution", {}),
+                             manual_exit={"type": "best", "fallback_sec": 0}))
+    pos = ledger.positions(status="open")[0]
+    res = await orders.execute_exit(pos, "manual", 10_100)
+    assert res["ok"] is True
+    assert spy.calls[0]["trde_tp"] == "6"
+
+
+async def test_자동_손절은_시장가_그대로다(env, monkeypatch):
+    _open()
+    spy = _OrderSpy()
+    _install(monkeypatch, spy)
+    pos = ledger.positions(status="open")[0]
+    await orders.execute_exit(pos, "stop", 9_800)
+    assert spy.calls[0]["trde_tp"] is None        # 시장가(가격 0 → '3')
+
+
+async def test_최유리_거부면_시장가로_즉시_재발주한다(env, monkeypatch):
+    """trde_tp 6 은 실호출 미검증 — 코드가 틀려도 청산이 멎으면 안 된다."""
+    _open()
+    spy = _OrderSpy(reject_best=True)
+    _install(monkeypatch, spy)
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        dict(settings.CONFIG.get("execution", {}),
+                             manual_exit={"type": "best", "fallback_sec": 0}))
+    pos = ledger.positions(status="open")[0]
+    res = await orders.execute_exit(pos, "manual", 10_100)
+    assert res["ok"] is True
+    assert [c["trde_tp"] for c in spy.calls] == ["6", None]   # 거부 → 시장가
+    assert _status()[0] == "closed"
+
+
+async def test_잔량_폴백은_취소_후_시장가로_던진다(env, monkeypatch):
+    """10주 중 3주만 체결 → 취소 → 7주 시장가."""
+    _open(qty=10)
+    spy = _OrderSpy()
+    _install(monkeypatch, spy)
+    with ledger._conn() as conn:                  # 부분 체결 3주 수신 시늉
+        conn.execute("INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
+                     ("t", "O1", "005930", 10_050.0, 3, "체결", 0))
+    pos = ledger.positions(status="open")[0]
+    await orders._best_exit_fallback(pos, "005930", "O1", 10, wait_sec=0)
+    assert spy.cancels == ["O1"]
+    assert spy.calls[-1]["qty"] == 7 and spy.calls[-1]["trde_tp"] is None
+
+
+async def test_전량_체결이면_폴백은_아무것도_안_한다(env, monkeypatch):
+    _open(qty=5)
+    spy = _OrderSpy()
+    _install(monkeypatch, spy)
+    with ledger._conn() as conn:
+        conn.execute("INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
+                     ("t", "O1", "005930", 10_050.0, 5, "체결", 0))
+    pos = ledger.positions(status="open")[0]
+    await orders._best_exit_fallback(pos, "005930", "O1", 5, wait_sec=0)
+    assert spy.cancels == [] and spy.calls == []
+
+
+async def test_market_설정이면_종전_동작이다(env, monkeypatch):
+    _open()
+    spy = _OrderSpy()
+    _install(monkeypatch, spy)
+    monkeypatch.setitem(settings.CONFIG, "execution",
+                        dict(settings.CONFIG.get("execution", {}),
+                             manual_exit={"type": "market"}))
+    pos = ledger.positions(status="open")[0]
+    await orders.execute_exit(pos, "manual", 10_100)
+    assert spy.calls[0]["trde_tp"] is None
