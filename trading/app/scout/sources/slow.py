@@ -138,6 +138,88 @@ class NewsSource:
         return out
 
 
+class FlowSource:
+    """외국인/STV 수급 — **이 시스템에서 두 관문을 모두 통과한 최초의 선별 신호.**
+
+    frgn_stv = 외국인 순매수 수량 / 거래량 (`flow_obs`, ka10086). 검증 이력
+    (2026-08-03, docs/trading/measurement.md):
+      ① IC 재현 — atr_pct 잔차화 후 t=4.9, 본페로니 통과. 정합 분모(수량/거래량)
+        가 금액/거래대금을 이겼다(종가 근사 소거).
+      ② 랭킹 하네스 — 수급 커버 표본(786종목×99일) 전 방식 재평가에서
+        vs_liquid 가 **전 손절폭 양수**(+0.040~+0.056R), 승률 +1.0~2.2%p.
+
+    ## 그래도 관측 전용이다 (max_tier=collect, model.OBSERVE_ONLY)
+
+    효과 크기가 작고(+0.05R/건) 표본이 99일 하락 편중·일 군집 미보정·브래킷
+    근사다. 이 소스만 지목한 종목은 수집전용까지만 올라간다 — promote 가 강제.
+
+    ## 판정 — 사전 확정 (편입 2026-08-03, 결과를 본 뒤 바꾸지 않는다)
+
+      시점   4주 뒤(2026-08-31경). 거래일 15일 미만이면 **판정하지 말고 연기 보고.**
+      지표   `signals`(source='flow') 지목 종목의 익일 실현 — 같은 날 변동성
+             정합(atr_pct 최근접) 무작위 대조군 대비 브래킷 R(하네스 방식,
+             손절 1.0~2.5% 스윕).
+      기준   하네스와 같다 — 대조군 대비 **전 손절폭 양수면 유지·승격(max_tier
+             해제) 논의**, 절반 이하 손절폭에서만 이기면 소스 제거.
+      표본 제외  ETF(이름 기준), 수급 관측이 없는 날. 그 외 제외 없음.
+
+    ## 신호 생성
+
+    `flow_obs` 최신일의 frgn_stv **양수** 상위 top_n(기본 5, 하네스와 동일).
+    ETF 는 이름으로 제외(유니버스 오염이 측정 둘을 왜곡한 전례). API 콜 0 —
+    야간 배치(nightly, 평일 17:30)가 채운 원장을 읽기만 한다.
+    """
+
+    name = model.FLOW
+
+    def _cfg(self) -> dict:
+        return settings.CONFIG.get("scout", {}).get("flow", {})
+
+    def enabled(self) -> bool:
+        return bool(self._cfg().get("enabled", True))
+
+    def interval_sec(self) -> int:
+        return 1_800        # 원장이 하루 1회 갱신되므로 30분 확인이면 충분하다
+
+    async def collect(self) -> list[Signal]:
+        from ...data.exclude import is_excluded
+        from .. import store
+
+        day, rows = store.latest_flows()
+        if not day:
+            return []
+        # **observed_at 은 그 수급이 확정된 날의 배치 시각이다 — 지금이 아니다.**
+        # 재수집 시각으로 재도장하면 감쇠·TTL 이 무력해진다(NightlySource 의
+        # M3 사고와 같은 지점). 배치가 며칠 멎으면 신호도 다음 날 저녁 자연
+        # 만료된다 — 묵은 수급으로 계속 지목하지 않는다.
+        try:
+            batch_at = datetime.fromisoformat(f"{day}T17:30:00+09:00")
+        except ValueError:
+            return []
+        top_n = int(self._cfg().get("top_n", 5))
+        picks = []
+        for r in rows:
+            if r["foreign_"] <= 0:
+                continue               # 순매도는 매수 후보의 근거가 아니다
+            if is_excluded(r.get("name") or ""):
+                continue
+            picks.append((float(r["foreign_"]) / float(r["volume"]), r))
+        picks.sort(key=lambda p: (-p[0], p[1]["code"]))
+        return [
+            Signal(
+                code=r["code"], name=r.get("name") or r["code"], source=self.name,
+                kind=self.name,
+                strength=model.FLOW_STRENGTH,
+                raw=round(stv, 6),
+                price=float(r.get("close") or 0),
+                evidence={"date": day, "frgn_stv": round(stv, 6),
+                          "foreign": r["foreign_"], "volume": r["volume"]},
+                observed_at=batch_at,
+            )
+            for stv, r in picks[:top_n]
+        ]
+
+
 class ManualSource:
     """사용자가 직접 지정한 종목 — 감시목록의 seed/manual 항목.
 

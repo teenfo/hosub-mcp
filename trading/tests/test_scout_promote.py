@@ -104,6 +104,43 @@ def test_unknown_price_is_treated_as_untradable():
     assert _by(_plan([_c(price=0.0)], cur), "promote_trade") == []
 
 
+def test_관측_전용_소스_단독이면_매매_tier_에_못_올라간다():
+    """max_tier=collect 하드 룰 (flow, 2026-08-03 편입).
+
+    하네스 통과는 편입 근거이지 실거래 근거가 아니다 — 효과 크기가 작고
+    (+0.05R/건) 표본이 99일 하락 편중이라, 4주 실측 + 사용자 결정 전에는
+    이 소스 단독 지목으로 매매 tier 에 올라가면 안 된다. 실측 시세가 있어
+    다른 게이트를 전부 통과해도 마찬가지다.
+    """
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    c = _c(price=12_000, sources=["flow"], by_group={"flow": 0.9})
+    c.quote = {"price": 12_000}          # 게이트 부족이 아니라 하드 룰임을 못박는다
+    assert _by(_plan([c], cur), "promote_trade") == []
+
+
+def test_presurge_단독도_매매_tier_에_못_올라간다():
+    """설계·문서는 처음부터 presurge 를 max_tier=collect 로 명시했는데
+    강제하는 코드가 없었다 — flow 편입에서 메커니즘을 만들며 성문화했다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    c = _c(price=12_000, sources=["presurge"])
+    assert _by(_plan([c], cur), "promote_trade") == []
+
+
+def test_관측_전용_소스도_수집전용_편입은_된다():
+    """max_tier=collect 의 'collect' 쪽 — 편입 자체를 막으면 관측이 안 쌓인다."""
+    rows = _plan([_c(score=0.5, sources=["flow"], by_group={"flow": 0.5})], _cur())
+    assert [r["to_tier"] for r in rows] == [COLLECT]
+
+
+def test_다른_소스가_함께_가리키면_매매_승격을_막지_않는다():
+    """차단 조건은 '관측 전용 소스 **단독**' 이다 — 검증된 경로가 함께 가리키면
+    그쪽이 근거가 되므로 종전과 같이 게이트로 판정한다."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    c = _c(price=12_000, sources=["flow", "volume"])
+    assert [r["action"] for r in _by(_plan([c], cur), "promote_trade")] \
+        == ["promote_trade"]
+
+
 def test_probation_blocks_immediate_trade_promotion():
     """검증 안 된 소스가 60초 만에 실거래로 이어지는 것을 막는다.
 

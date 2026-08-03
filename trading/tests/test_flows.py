@@ -163,6 +163,33 @@ def test_빈_목록은_아무것도_안_쓴다(db):
     assert store.flow_coverage() == []
 
 
+# --- latest_flows — FlowSource 의 입력 -----------------------------------------
+
+def test_latest_flows_는_수급이_실린_최신일을_준다(db):
+    """감시목록 소스(ka10014 등)가 더 최신 날짜에 자기 칸만 채워 둔 행은
+    '최신일' 이 아니다 — 그 날짜를 잡으면 수급 없는 단면이 나온다."""
+    store.record_flows("005930", [{"d": "2026-07-30", "foreign": 500,
+                                   "volume": 10_000, "close": 100}], "삼성전자")
+    store.record_flows("005930", [{"d": "2026-07-31", "foreign": 700,
+                                   "volume": 20_000, "close": 110}])
+    store.record_flows("005930", [{"d": "2026-08-01", "short_qty": 1.0}])
+    day, rows = store.latest_flows()
+    assert day == "2026-07-31"
+    assert [(r["code"], r["foreign_"], r["volume"]) for r in rows] \
+        == [("005930", 700, 20_000)]
+
+
+def test_latest_flows_는_분모_없는_행을_뺀다(db):
+    store.record_flows("005930", [{"d": "2026-07-31", "foreign": 700, "volume": 0}])
+    store.record_flows("000660", [{"d": "2026-07-31", "foreign": 700, "volume": 100}])
+    _, rows = store.latest_flows()
+    assert [r["code"] for r in rows] == ["000660"]
+
+
+def test_latest_flows_빈_원장은_None(db):
+    assert store.latest_flows() == (None, [])
+
+
 # --- 수집 ---------------------------------------------------------------------
 
 def test_한_축이_죽어도_나머지는_넣는다(db, monkeypatch):

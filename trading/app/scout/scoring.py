@@ -28,7 +28,7 @@ total(code) = Σ_groups  max_{s ∈ group} effective(s)
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from .model import GROUP, GROUPS, MANUAL, NEWS, NIGHTLY, Signal
+from .model import FLOW, GROUP, GROUPS, MANUAL, NEWS, NIGHTLY, Signal
 
 # 소스 가중치 — **전부 1.0 고정**. 위 주석 참조.
 # dict 로 둔 이유는 나중에 근거가 생겼을 때 바꿀 자리를 남겨 둔 것이고,
@@ -58,7 +58,8 @@ UNSCORED = frozenset({"human"})
 # 이 둘은 각각 발굴 배치일 종가와 뉴스 수집 시점 가격이다. 실측 2026-07-28:
 # 펌텍코리아 승격 결정의 '체결가능 48,600원' 이 7/27 종가였고 당시 현재가는
 # 47,050원(−3.19%)이었다. 체결가능성 게이트가 어제 값으로 판정한 것이다.
-STALE_PRICE_SOURCES = frozenset({NIGHTLY, NEWS, MANUAL})
+# flow 도 같다 — 싣는 가격이 수급 확정일(전일) 종가다.
+STALE_PRICE_SOURCES = frozenset({NIGHTLY, NEWS, MANUAL, FLOW})
 
 
 @dataclass

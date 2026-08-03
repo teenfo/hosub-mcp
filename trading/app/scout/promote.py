@@ -37,7 +37,7 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .. import settings
-from .model import DECISION_QUOTE_FIELDS
+from .model import DECISION_QUOTE_FIELDS, OBSERVE_ONLY
 from .scoring import Candidate
 
 log = logging.getLogger(__name__)
@@ -258,6 +258,12 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
             continue
         if tier == COLLECT:
             # 매매 승격은 **게이트로만** 판정한다 — 점수는 보지 않는다
+            if c.sources and set(c.sources) <= OBSERVE_ONLY:
+                # 관측 전용 소스만 지목 — max_tier=collect 하드 룰.
+                # 하네스 통과(flow)는 편입 근거이지 실거래 근거가 아니다.
+                # 4주 실측 통과 + 사용자 결정 전에는 수집전용에 묶는다.
+                # 다른 소스가 **함께** 가리키면 그 소스들이 근거가 되므로 통과.
+                continue
             if not held_long_enough(c.code):
                 continue                       # 최소 체류(분) — 진동 방지
             if not probation_done(c.code):

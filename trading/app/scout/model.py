@@ -36,7 +36,21 @@ PRESURGE = "presurge"    # 거래량 급증 (지금은 편입 경로가 없어 �
 NIGHTLY = "nightly"      # 야간 전종목 발굴
 NEWS = "news"            # 뉴스·공시 (TNM)
 MANUAL = "manual"        # 사용자 수동 지정
-SOURCES = (VOLUME, GAINERS, PRESURGE, NIGHTLY, NEWS, MANUAL)
+FLOW = "flow"            # 외국인/STV 수급 — 두 관문(IC 재현·랭킹 하네스) 통과(2026-08-03)
+SOURCES = (VOLUME, GAINERS, PRESURGE, NIGHTLY, NEWS, MANUAL, FLOW)
+
+# **관측 전용 소스 — max_tier=collect 하드 룰.** 이 소스**만** 지목한 종목은
+# 매매 tier 로 올라가지 못한다(promote 가 강제). 검증된 소스가 함께 가리키면
+# 그쪽이 근거가 되므로 통과.
+#
+#   flow      하네스 통과는 편입 근거이지 실거래 근거가 아니다 — 효과 크기가
+#             작고(+0.05R/건) 표본이 99일 하락 편중이라, 4주 실측(decisions
+#             원장) 전에는 수집전용에 묶는다. 해제는 사용자 결정으로만.
+#   presurge  편입 경로가 없어 측정 이력이 0건인 소스다. 설계(검토 8번)와
+#             문서(scout-engine.md)는 처음부터 이 하드 룰을 명시했는데
+#             **강제하는 코드가 없었다** — flow 편입(2026-08-03)에서 이
+#             메커니즘을 만들며 함께 성문화한다.
+OBSERVE_ONLY = frozenset({FLOW, PRESURGE})
 
 # 소스 그룹 — **같은 정보를 세 번 세지 않기 위한** 구분이다.
 # active·gainer·presurge 는 같은 팩터(오늘의 가격·거래량 모멘텀)의 세 가지 뷰다.
@@ -46,8 +60,14 @@ SOURCES = (VOLUME, GAINERS, PRESURGE, NIGHTLY, NEWS, MANUAL)
 GROUP = {
     VOLUME: "intraday", GAINERS: "intraday", PRESURGE: "intraday",
     NIGHTLY: "daily", NEWS: "news", MANUAL: "human",
+    # 수급은 별개 그룹이다 — 외국인 순매수/거래량은 가격·모멘텀(intraday)과도
+    # 3규칙 점수(daily)와도 다른 정보원이고, 잔차 IC(t=4.9)가 atr_pct 통제
+    # 후에도 살아남았다(2026-08-03). daily 에 넣으면 nightly 의 max 에 눌려
+    # 취합에서 사라진다 — "서로 다른 정보원이 같은 종목을 가리켰는가" 를 세는
+    # 이 파일의 목적에 정확히 어긋난다.
+    FLOW: "flow",
 }
-GROUPS = ("intraday", "daily", "news", "human")
+GROUPS = ("intraday", "daily", "news", "human", "flow")
 
 # 소스별 유효기간(초)과 반감기(초).
 # TTL 은 스캔 주기의 2~3배 — 한 번의 조회 실패가 목록을 지우지 못하게.
@@ -55,6 +75,7 @@ GROUPS = ("intraday", "daily", "news", "human")
 TTL_SEC = {
     VOLUME: 180, GAINERS: 180, PRESURGE: 180,
     NIGHTLY: 86_400, NEWS: 43_200, MANUAL: 0,          # 0 = 만료 없음
+    FLOW: 86_400,        # 하루 1회 갱신(야간 배치) — nightly 와 같은 수명
 }
 # 반감기는 **TTL 이하**여야 한다. 반감기가 TTL 보다 길면 신호가 만료되기 전까지
 # 감쇠가 거의 일어나지 않아 있으나 마나 한 값이 된다(장중 소스 600초 반감기 +
@@ -64,6 +85,7 @@ TTL_SEC = {
 HALF_LIFE_SEC = {
     VOLUME: 180, GAINERS: 180, PRESURGE: 180,
     NIGHTLY: 86_400, NEWS: 21_600, MANUAL: 0,          # 0 = 감쇠 없음
+    FLOW: 86_400,
 }
 
 
@@ -173,6 +195,17 @@ DECISION_QUOTE_FIELDS = (
 # 2026-07-31 실측 기준 감시목록은 상한(max_total 120)에 정확히 차 있다 —
 # 이 순서는 화면 표시가 아니라 **누가 실제로 매매 대상이 되는가**를 정한다.
 NIGHTLY_STRENGTH = 0.667
+
+# 수급(외국인/STV) 신호의 강도 — nightly 와 같은 균일값이다.
+#
+# 하네스가 검증한 것은 **top_n 선별**(frgn_stv 상위 5, vs_liquid 전 손절폭
+# +0.040~+0.056R)이지 상위 5 **안에서의** 미세 순서가 아니다. 순서까지 세기에
+# 싣는 것은 재지 않은 주장을 하나 더 얹는 일이다 — 원시 비율은 `raw` 에 남는다.
+#
+# 0.667 인 이유도 nightly 와 같다: observed_at(배치일 17:30) 기준 다음 날
+# 아침 0.667×0.64≈0.43 으로 승격선(0.35)을 유지하고, 새 배치가 없으면 그날
+# 저녁 자연 만료된다.
+FLOW_STRENGTH = 0.667
 
 def news_strength(score: float) -> float:
     """TNM 뉴스 점수 0~100 → 0~1."""
