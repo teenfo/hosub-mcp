@@ -25,6 +25,25 @@ regime_gate:
   use_open_gap: true             # 당일 시가 갭 방향으로 ±1 보정
   open_gap_th: 0.5               # 감시목록 시가갭 중앙값 임계(%)
   use_night_bias: true           # 야간 리포트가 남긴 익일 편향(night_bias.json) 반영
+  # 인버스 발주 우선권 (사용자 결정 2026-08-03 — 하락장 수익 최우선 전제).
+  # 약세 유효국면에서 인버스 신호를 같은 사이클의 롱보다 먼저 발주한다.
+  # 근거: 실거래에서 인버스가 유일한 누적 흑자 축(6건 5승 +4,256원)인데
+  # 8/3 포지션 한도 경쟁에서 롱에 밀려 미발주 실측. 측정 검증 전 적용임을
+  # 명시 — breadth 국면 예측력은 소급 194일 기준 미달(measurement.md).
+  # 국면 채점(score_first) 적중률로 사후 평가한다.
+  inverse_priority: true
+  inverse_priority_regimes: ["약세"]
+  # 약세 리스크 프로필 (사용자 결정 2026-08-03 후속 — "우선권이 발동되면
+  # 동시 포지션 수와 종목당 비중도 변경돼야 하지 않을까").
+  #  · inverse_reserved_slots: 롱이 쓸 수 없는 자리 수(한도 **내** 예약 —
+  #    총 동시 포지션 max_positions 는 불변). 롱은 max_positions-1 까지만,
+  #    인버스는 전체 한도 사용. 인버스가 이미 그만큼 열려 있으면 예약 소진.
+  #  · inverse_weight_pct: 인버스 종목당 비중 상한(%) — 일반 상한
+  #    (risk.max_position_weight_pct) 대신 적용. 지수 ETF 는 개별주 대비
+  #    저변동·손절 관통 위험이 낮다는 근거. 0 이면 각각 비활성.
+  # 적용 국면은 inverse_priority_regimes 와 동일(약세 한정).
+  inverse_reserved_slots: 1
+  inverse_weight_pct: 40
 
 # 급등주 스캐너: 거래대금상위(ka10032)에서 등락률·거래대금·가격 필터 교차
 scanner:

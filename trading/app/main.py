@@ -1166,6 +1166,9 @@ async def api_regime_history(_=Depends(require_auth)):
                       for r in rows],
             "recent": regime_log.entries(200),
             "score": regime_log.score(rows, market),
+            # 아침 첫 판정 기준 채점 — gap·effective 의 당일 정보 오염이 없는
+            # '예측' 관점(참고용 병기 — 9/29 판정 기준은 score 그대로다)
+            "score_first": regime_log.score(regime_log.daily_first(), market),
             "signals": list(regime_log.SIGNALS),
             "min_days": regime_log.MIN_DAYS,
         }

@@ -27,6 +27,18 @@ def test_daily_loss_limit():
     assert not ok and "한도" in why
 
 
+def test_can_open_reserve_blocks_long_but_keeps_total_limit():
+    """약세 인버스 예약 슬롯 — 롱은 max-reserve 까지, 전체 한도는 불변."""
+    st = risk.DailyRiskState(equity=1_000_000, daily_loss_limit_pct=2.0,
+                             open_positions=3, max_positions=4)
+    ok, why = st.can_open(reserve=1)          # 롱 후보: 3 >= 4-1 → 차단
+    assert not ok and "인버스 예약" in why
+    assert st.can_open(reserve=0)[0]          # 인버스 후보: 3 < 4 → 통과
+    st.open_positions = 4
+    ok, why = st.can_open(reserve=0)          # 전체 한도는 그대로
+    assert not ok and "최대 동시 포지션(4)" in why
+
+
 def test_backtest_orb_short_hits_target():
     rows = []
     # 09:00~09:14 범위 100~102

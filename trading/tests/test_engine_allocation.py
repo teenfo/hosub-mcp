@@ -394,3 +394,164 @@ def test_슬랙_문구가_수동_승인_상태를_구분한다():
     text = slack.pending_order_text(rec)
     assert "발주 불가 상태 — 수동 승인만" in text
     assert "최대 동시 포지션" in text
+
+
+# --- 인버스 발주 우선권 (사용자 결정 2026-08-03 — 하락장 수익 최우선) ---
+
+def _inv_prep(monkeypatch, eng, regime):
+    monkeypatch.setitem(settings.CONFIG, "inverse_etfs", ["114800"])
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        dict(settings.CONFIG.get("regime_gate", {}),
+                             inverse_priority=True,
+                             inverse_priority_regimes=["약세"],
+                             enabled=False))       # 인버스 '차단' 게이트는 끔
+    monkeypatch.setattr(eng, "_effective_regime", lambda: regime)
+    eng.regime = regime
+
+
+@pytest.mark.asyncio
+async def test_약세_국면에서는_인버스가_먼저_발주된다(monkeypatch):
+    """실측 8/3: 인버스 신호가 포지션 한도 경쟁에서 롱에 밀려 미발주 —
+    같은 사이클에서 자리·자금을 인버스가 먼저 가져가야 한다."""
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 1                    # 자리 하나를 두고 경쟁
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 10_000, 9_800, 10_400)],       # 롱(규칙 우선순위 높음)
+        "114800": [_sig("momentum", 10_000, 9_800, 10_400)],  # 인버스(낮음)
+    })
+    _inv_prep(monkeypatch, eng, "약세")
+    sent = []
+    monkeypatch.setattr(engine_mod.orders, "propose",
+                        lambda s, q: (sent.append(s.symbol), "oid")[1])
+    found = await eng.run_once()
+    assert found[0]["symbol"] == "114800"          # 인버스가 맨 앞
+    assert sent[0] == "114800"
+
+
+@pytest.mark.asyncio
+async def test_약세가_아니면_순서는_규칙_우선순위_그대로다(monkeypatch):
+    eng = SignalEngine(equity=1_000_000)
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 10_000, 9_800, 10_400)],
+        "114800": [_sig("momentum", 10_000, 9_800, 10_400)],
+    })
+    _inv_prep(monkeypatch, eng, "중립")
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert found[0]["symbol"] == "000100"          # orb(1.0) > momentum(0.6)
+
+
+@pytest.mark.asyncio
+async def test_우선권은_config_로_끈다(monkeypatch):
+    eng = SignalEngine(equity=1_000_000)
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 10_000, 9_800, 10_400)],
+        "114800": [_sig("momentum", 10_000, 9_800, 10_400)],
+    })
+    _inv_prep(monkeypatch, eng, "약세")
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        dict(settings.CONFIG["regime_gate"],
+                             inverse_priority=False))
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert found[0]["symbol"] == "000100"
+
+
+# --- 약세 리스크 프로필 (사용자 결정 2026-08-03 후속 — 예약 슬롯 + 인버스 비중) ---
+
+def _bear_profile(monkeypatch, eng, regime, slots=1, weight=40,
+                  held=frozenset()):
+    """우선권 설정 위에 약세 프로필을 명시적으로 얹는다(config 기본값 비의존).
+    held: 장부 보유 종목 — 로컬 DB 아티팩트에 좌우되지 않게 항상 고정한다."""
+    from app.trade import ledger as ledger_mod
+    _inv_prep(monkeypatch, eng, regime)
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        dict(settings.CONFIG["regime_gate"],
+                             inverse_reserved_slots=slots,
+                             inverse_weight_pct=weight))
+    monkeypatch.setattr(ledger_mod, "open_symbols", lambda: set(held))
+
+
+@pytest.mark.asyncio
+async def test_약세_예약슬롯은_롱의_마지막_자리를_막는다(monkeypatch):
+    """우선권(정렬)으로 못 푸는 부분 — 롱이 자리를 전부 점유하면 인버스가
+    영영 못 들어온다. 마지막 자리는 롱에게 주지 않는다(한도 내 예약)."""
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 2
+    eng.state.open_positions = 1
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {"000100": [_sig("orb", 10_000, 9_800, 10_400)]})
+    _bear_profile(monkeypatch, eng, "약세")
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert found[0].get("manual_only") is True     # 대기열엔 남되 자동발주 제외
+    assert "인버스 예약" in found[0]["note"]
+
+
+@pytest.mark.asyncio
+async def test_약세_인버스는_예약과_무관하게_전체_한도를_쓴다(monkeypatch):
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 2
+    eng.state.open_positions = 1
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {"114800": [_sig("momentum", 10_000, 9_800, 10_400)]})
+    _bear_profile(monkeypatch, eng, "약세")
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert not found[0].get("manual_only")         # 1 < 2 — 전체 한도 기준 통과
+
+
+@pytest.mark.asyncio
+async def test_인버스가_이미_열려있으면_예약은_소진된다(monkeypatch):
+    """예약은 '인버스 몫 확보'까지다 — 이미 인버스가 자리를 차지했으면
+    남은 자리는 롱이 쓴다(총 노출을 놀리지 않는다)."""
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 2
+    eng.state.open_positions = 1                   # 그 1건이 인버스
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {"000100": [_sig("orb", 10_000, 9_800, 10_400)]})
+    _bear_profile(monkeypatch, eng, "약세", held={"114800"})
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert not found[0].get("manual_only")
+
+
+@pytest.mark.asyncio
+async def test_약세_인버스는_별도_비중상한을_쓴다(monkeypatch):
+    """일반 상한 25%면 2주에 갇힌다 — 인버스는 40% 상한으로 4주."""
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 9
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 25)
+    monkeypatch.setitem(settings.RISK, "risk_per_trade_pct", 5.0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 100_000, 99_000, 103_000)],
+        "114800": [_sig("momentum", 100_000, 99_000, 103_000)],
+    })
+    _bear_profile(monkeypatch, eng, "약세")
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    by = {f["symbol"]: f for f in found}
+    assert by["000100"]["qty"] == 2                # 25% = 25만 원 → 2주
+    assert by["114800"]["qty"] == 4                # 40% = 40만 원 → 4주
+
+
+@pytest.mark.asyncio
+async def test_중립에서는_약세_프로필이_적용되지_않는다(monkeypatch):
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 2
+    eng.state.open_positions = 1
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 25)
+    monkeypatch.setitem(settings.RISK, "risk_per_trade_pct", 5.0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 100_000, 99_000, 103_000)],
+        "114800": [_sig("momentum", 100_000, 99_000, 103_000)],
+    })
+    _bear_profile(monkeypatch, eng, "중립")
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    by = {f["symbol"]: f for f in found}
+    assert not by["000100"].get("manual_only")     # 예약 없음 — 마지막 자리 사용
+    assert by["114800"]["qty"] == 2                # 인버스도 일반 상한 25%

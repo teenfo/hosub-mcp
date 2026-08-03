@@ -98,6 +98,21 @@ def daily() -> list[dict]:
             " (SELECT MAX(id) FROM regime_log GROUP BY date) ORDER BY date")]
 
 
+def daily_first() -> list[dict]:
+    """날짜별 **그날의 첫 판정** — '개장 전에 무엇을 예측했는가' 관점.
+
+    `daily()`(마지막 값)는 gap_bias 가 당일 시가로 갱신된 뒤라, effective 를
+    그 값으로 채점하면 **당일 정보로 당일을 맞히는 오염**이 생긴다. 예측력
+    채점은 이쪽이 정직하다(night_bias·전일 breadth 는 어차피 사전 정보라 양쪽
+    이 같다). 두 관점을 나란히 노출하고 9/29 판정은 사전 확정대로 daily()
+    기준을 유지한다 — 기준을 바꾸는 게 아니라 관점을 추가하는 것이다.
+    """
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM regime_log WHERE id IN"
+            " (SELECT MIN(id) FROM regime_log GROUP BY date) ORDER BY date")]
+
+
 def entries(limit: int = 500) -> list[dict]:
     with _conn() as conn:
         return [dict(r) for r in conn.execute(

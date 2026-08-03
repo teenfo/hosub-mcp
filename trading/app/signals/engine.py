@@ -445,6 +445,38 @@ class SignalEngine:
 
         # --- 2단계: 우선순위 정렬 (규칙 기대값 × 손익비 — 결정론) ---
         ranked = priority.order(cands, settings.RULES)
+        # 인버스 발주 우선권(사용자 결정 2026-08-03 — 하락장 수익 최우선 전제).
+        # 약세 유효국면에서는 인버스 ETF 신호를 같은 사이클의 롱보다 먼저
+        # 발주한다 — 실측 8/3: 인버스 신호 2건(누적 유일 흑자 축, 6건 5승)이
+        # 포지션 한도 경쟁에서 롱에 밀려 미발주됐다. **측정 근거가 아니라
+        # 사용자 결정이다**(breadth 국면 예측력은 소급 194일 기준 미달로
+        # measurement.md 에 기록) — 국면 채점(score_first) 적중률로 사후
+        # 평가하고, regime_gate.inverse_priority 로 배포 없이 끈다.
+        # 정렬은 stable — 인버스/롱 각각의 내부 순위는 유지된다.
+        gate_cfg = settings.CONFIG.get("regime_gate", {})
+        inv = set(settings.CONFIG.get("inverse_etfs", []))
+        inv_regime = bool(inv) and self.regime in tuple(gate_cfg.get(
+            "inverse_priority_regimes", ["약세"]))
+        if gate_cfg.get("inverse_priority", True) and ranked and inv_regime:
+            ranked.sort(key=lambda c: c["symbol"] not in inv)
+        # 약세 리스크 프로필(사용자 결정 2026-08-03 후속 — 우선권만으로는 롱
+        # 기준 자리·비중에 갇혀 '작게' 이긴다는 지적).
+        #  · 예약 슬롯: 롱은 max_positions-reserved 까지만 — 롱이 자리를 전부
+        #    점유해 인버스가 못 들어오는 문제는 정렬로 못 푼다. 총 한도는 불변.
+        #  · 인버스 비중 상한 별도: 지수 ETF 는 개별주 대비 저변동·손절 관통
+        #    위험이 낮고 대상이 2~3종뿐이라 분산 논리가 약하다.
+        # 값 0 이면 각각 비활성. 국면 조건은 우선권과 같은 목록을 쓴다.
+        reserved = (int(gate_cfg.get("inverse_reserved_slots", 0) or 0)
+                    if inv_regime else 0)
+        inv_w = (float(gate_cfg.get("inverse_weight_pct", 0) or 0)
+                 if inv_regime else 0.0)
+        if not 0 < inv_w <= 100:
+            inv_w = 0.0
+        # 이미 인버스가 예약분만큼 자리를 차지했으면 예약은 소진된 것 — 롱이
+        # 남은 자리를 쓴다. 보유 조회(_backfill_held)가 비어 있으면(조회 실패)
+        # 예약이 전부 남은 것으로 계산돼 롱이 더 제한된다 — 하락장 수익 최우선
+        # 전제에서 보수적인 방향이라 그대로 둔다.
+        inverse_open = len(self._backfill_held & inv) if inv_regime else 0
         if len(ranked) > 1:
             log.info("사이클 신호 %d건 발주 순서: %s", len(ranked),
                      " > ".join(f"{c['name']}({c['rule']} {c['priority']:.0f})"
@@ -465,8 +497,12 @@ class SignalEngine:
             # 승인대기 목록에 흔적조차 남지 않았다 — 사용자는 신호가 났다는 사실도
             # 모른다. 이제 '리스크·비중 기준 수량' 을 먼저 정하고, 살 수 있는지는
             # 따로 표시해 매매 데스크가 판정한다.
+            # 약세 국면의 인버스는 별도 비중 상한(inv_w)을 쓴다 — 일반 상한에
+            # 갇히면 주력 수단이 '작게' 이긴다. 그 외에는 종전 상한 그대로.
+            is_inv = symbol in inv
+            eff_w = inv_w if (is_inv and inv_w > 0) else max_w
             qty = risk.position_size(self.equity, risk_pct, sig.entry, sig.stop,
-                                     max_weight_pct=max_w)
+                                     max_weight_pct=eff_w)
             # 비중 상한이 0주를 내는 경우(1주 값 > 상한인 고가주)에도 **1주로
             # 제안은 만든다** — 보이지 않으면 판단할 수 없다. 다만 그 사실을
             # over_weight 로 남겨 자동승인이 집어가지 못하게 한다.
@@ -518,8 +554,11 @@ class SignalEngine:
                     rec["fundable"] = fundable = sig.entry <= avail
                     rec["manual_only"] = True
                     rec["note"] = ("리스크 기준 수량 0주 — 1주로 제안. "
-                                   + self._zero_qty_note(sig, risk_pct, max_w, avail))
-                ok, why = self.state.can_open()
+                                   + self._zero_qty_note(sig, risk_pct, eff_w, avail))
+                # 약세 국면 인버스 예약 슬롯 — 롱 후보만 예약 잔여분을 뺀
+                # 한도로 판정한다. 인버스가 이미 예약분만큼 열려 있으면 잔여 0.
+                reserve = 0 if is_inv else max(0, reserved - inverse_open)
+                ok, why = self.state.can_open(reserve)
                 if not ok:
                     rec["manual_only"] = True
                     rec["note"] = f"{why} — 자동발주 제외, 수동 승인만"
@@ -547,6 +586,10 @@ class SignalEngine:
                     # 계산 — 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음
                     # 사이클에 _sync_open_positions 가 장부 실제값으로 다시 맞춘다.
                     self.state.open_positions += 1
+                    if is_inv:
+                        # 같은 사이클에서 인버스가 자리를 잡으면 예약 소진으로
+                        # 반영 — 뒤에 오는 롱이 남은 자리를 쓸 수 있다.
+                        inverse_open += 1
                     if held is not None:
                         held.add(symbol)
                 elif not fundable and not rec.get("note"):
