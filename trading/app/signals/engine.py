@@ -445,6 +445,21 @@ class SignalEngine:
 
         # --- 2단계: 우선순위 정렬 (규칙 기대값 × 손익비 — 결정론) ---
         ranked = priority.order(cands, settings.RULES)
+        # 인버스 발주 우선권(사용자 결정 2026-08-03 — 하락장 수익 최우선 전제).
+        # 약세 유효국면에서는 인버스 ETF 신호를 같은 사이클의 롱보다 먼저
+        # 발주한다 — 실측 8/3: 인버스 신호 2건(누적 유일 흑자 축, 6건 5승)이
+        # 포지션 한도 경쟁에서 롱에 밀려 미발주됐다. **측정 근거가 아니라
+        # 사용자 결정이다**(breadth 국면 예측력은 소급 194일 기준 미달로
+        # measurement.md 에 기록) — 국면 채점(score_first) 적중률로 사후
+        # 평가하고, regime_gate.inverse_priority 로 배포 없이 끈다.
+        # 정렬은 stable — 인버스/롱 각각의 내부 순위는 유지된다.
+        gate_cfg = settings.CONFIG.get("regime_gate", {})
+        if (gate_cfg.get("inverse_priority", True) and ranked
+                and self.regime in tuple(gate_cfg.get(
+                    "inverse_priority_regimes", ["약세"]))):
+            inv = set(settings.CONFIG.get("inverse_etfs", []))
+            if inv:
+                ranked.sort(key=lambda c: c["symbol"] not in inv)
         if len(ranked) > 1:
             log.info("사이클 신호 %d건 발주 순서: %s", len(ranked),
                      " > ".join(f"{c['name']}({c['rule']} {c['priority']:.0f})"

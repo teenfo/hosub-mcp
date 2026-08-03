@@ -394,3 +394,67 @@ def test_슬랙_문구가_수동_승인_상태를_구분한다():
     text = slack.pending_order_text(rec)
     assert "발주 불가 상태 — 수동 승인만" in text
     assert "최대 동시 포지션" in text
+
+
+# --- 인버스 발주 우선권 (사용자 결정 2026-08-03 — 하락장 수익 최우선) ---
+
+def _inv_prep(monkeypatch, eng, regime):
+    monkeypatch.setitem(settings.CONFIG, "inverse_etfs", ["114800"])
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        dict(settings.CONFIG.get("regime_gate", {}),
+                             inverse_priority=True,
+                             inverse_priority_regimes=["약세"],
+                             enabled=False))       # 인버스 '차단' 게이트는 끔
+    monkeypatch.setattr(eng, "_effective_regime", lambda: regime)
+    eng.regime = regime
+
+
+@pytest.mark.asyncio
+async def test_약세_국면에서는_인버스가_먼저_발주된다(monkeypatch):
+    """실측 8/3: 인버스 신호가 포지션 한도 경쟁에서 롱에 밀려 미발주 —
+    같은 사이클에서 자리·자금을 인버스가 먼저 가져가야 한다."""
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 1                    # 자리 하나를 두고 경쟁
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 10_000, 9_800, 10_400)],       # 롱(규칙 우선순위 높음)
+        "114800": [_sig("momentum", 10_000, 9_800, 10_400)],  # 인버스(낮음)
+    })
+    _inv_prep(monkeypatch, eng, "약세")
+    sent = []
+    monkeypatch.setattr(engine_mod.orders, "propose",
+                        lambda s, q: (sent.append(s.symbol), "oid")[1])
+    found = await eng.run_once()
+    assert found[0]["symbol"] == "114800"          # 인버스가 맨 앞
+    assert sent[0] == "114800"
+
+
+@pytest.mark.asyncio
+async def test_약세가_아니면_순서는_규칙_우선순위_그대로다(monkeypatch):
+    eng = SignalEngine(equity=1_000_000)
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 10_000, 9_800, 10_400)],
+        "114800": [_sig("momentum", 10_000, 9_800, 10_400)],
+    })
+    _inv_prep(monkeypatch, eng, "중립")
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert found[0]["symbol"] == "000100"          # orb(1.0) > momentum(0.6)
+
+
+@pytest.mark.asyncio
+async def test_우선권은_config_로_끈다(monkeypatch):
+    eng = SignalEngine(equity=1_000_000)
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {
+        "000100": [_sig("orb", 10_000, 9_800, 10_400)],
+        "114800": [_sig("momentum", 10_000, 9_800, 10_400)],
+    })
+    _inv_prep(monkeypatch, eng, "약세")
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        dict(settings.CONFIG["regime_gate"],
+                             inverse_priority=False))
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid")
+    found = await eng.run_once()
+    assert found[0]["symbol"] == "000100"
