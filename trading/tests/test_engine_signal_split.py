@@ -13,6 +13,7 @@ def _prep(monkeypatch, eng, sig):
     """run_once 의존성(잔고 동기화·가드·데이터·규칙)을 테스트용으로 고정."""
     monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
     eng.equity_synced = True
+    eng._fired_restored = True          # 주문 이력 DB(로컬 아티팩트)에 의존하지 않게
 
     async def _noop_sync():
         return None
@@ -20,6 +21,15 @@ def _prep(monkeypatch, eng, sig):
     async def _noop_backfill(sym):
         return None
 
+    # 기본값도 모킹한다 — 대기열 무조건 생성(2026-08-03) 이후에는 qty 0 경로도
+    # propose 를 부르므로, 안 걸면 테스트가 실 DB 에 주문을 남긴다(실측: 이
+    # 오염이 같은 파일의 뒤 테스트 4건을 _fired 복원으로 전멸시켰다).
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid-fix")
+
+    async def _noop_send(order_id, qty=None):
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _noop_send)
     monkeypatch.setattr(eng, "_sync_equity", _noop_sync)
     monkeypatch.setattr(eng, "day_guard_status",
                         lambda: {"halted": False, "reason": "", "pct": 0.0})
@@ -57,7 +67,9 @@ async def test_qty_zero_note_risk_vs_balance(monkeypatch):
                  target=22_000, reason="x")  # dist=900 > 0.5%예산 713; 여력=6주
     _prep(monkeypatch, eng, sig)
     found = await eng.run_once()
-    assert found[0]["qty"] == 0
+    # 대기열 무조건 생성(2026-08-03): 0주로 삼키지 않고 1주 제안 + 수동 승인만
+    assert found[0]["qty"] == 1
+    assert found[0].get("manual_only") is True
     assert "리스크 한도" in found[0]["note"]      # 잔고 문제가 아님을 명시
     assert "잔고 부족" not in found[0]["note"]
 
@@ -133,8 +145,12 @@ async def test_long_only_allows_long_orders(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_unaffordable_signal_recorded_but_no_order(monkeypatch):
-    # 자산 142,589원으로 44만원짜리 종목 → 1주도 못 산다
+async def test_unaffordable_signal_still_reaches_the_queue(monkeypatch):
+    """자산 142,589원으로 44만원짜리 종목 — 1주도 못 사지만 **대기열에는 오른다.**
+
+    사용자 결정(2026-08-03): 계좌가 발주 불가능한 상태여도 승인 대기열에는
+    무조건 올린다. 자동발주만 제외(manual_only) — 입금 후 수동 승인 가능.
+    """
     eng = SignalEngine(equity=142_589)
     sig = Signal(rule="orb", side="long", entry=441_500, stop=428_500,
                  target=460_000, reason="고가주 신호")
@@ -142,14 +158,18 @@ async def test_unaffordable_signal_recorded_but_no_order(monkeypatch):
     calls = []
     monkeypatch.setattr(engine_mod.orders, "propose",
                         lambda s, q: (calls.append(q), "oid")[1])
+    auto = []
 
+    async def _spy(order_id, qty=None):
+        auto.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy)
     found = await eng.run_once()
-    # 감시 신호는 금액 제한 없이 기록된다(최근 신호에 남음)
     assert len(found) == 1
-    assert found[0]["qty"] == 0
-    assert found[0]["actionable"] is False
-    assert "order_id" not in found[0]
-    assert "잔고 부족" in found[0]["note"]
-    # 승인대기 주문은 만들어지지 않는다(잔고 참고)
-    assert calls == []
-    assert eng.last_signals[0]["actionable"] is False
+    assert found[0]["qty"] == 1                     # 1주로 제안
+    assert found[0]["actionable"] is True
+    assert found[0]["order_id"] == "oid"
+    assert found[0]["fundable"] is False            # 살 수 없다는 사실은 표시
+    assert found[0].get("manual_only") is True
+    assert calls == [1] and auto == []              # 대기열 생성, 자동발주 없음

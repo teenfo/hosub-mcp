@@ -58,13 +58,17 @@ async def test_blocked_signal_revives_when_actionable(monkeypatch):
     monkeypatch.setattr(engine_mod.orders, "propose",
                         lambda s, q: (calls.append(q), "oid")[1])
 
+    # 대기열 무조건 생성(사용자 결정 2026-08-03) 이후 '부활' 은 필요 없어졌다 —
+    # 잔고 부족 신호도 **처음부터** 1주 제안으로 대기열에 오르고(자동발주만 제외),
+    # 입금 후에는 그 대기 건을 그대로 승인하면 된다.
     r1 = await eng.run_once()
-    assert r1 and r1[0]["actionable"] is False and calls == []   # 잔고 부족 기록만
+    assert r1 and r1[0]["actionable"] is True and calls == [1]
+    assert r1[0].get("manual_only") is True and r1[0]["fundable"] is False
     r2 = await eng.run_once()
-    assert r2 == []                                               # 같은 상태 반복 기록 안 함
-    eng.equity = 10_000_000                                       # 입금 후
+    assert r2 == []                                # 같은 신호를 다시 제안하지 않는다
+    eng.equity = 10_000_000                        # 입금 후에도 —
     r3 = await eng.run_once()
-    assert r3 and r3[0]["actionable"] is True and len(calls) == 1  # 되살아나 발주
+    assert r3 == [] and calls == [1]               # 이미 대기열에 있으므로 중복 생성 없음
 
 
 def await_(coro):

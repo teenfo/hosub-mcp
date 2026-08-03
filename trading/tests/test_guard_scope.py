@@ -51,6 +51,10 @@ def _prep(monkeypatch, eng, guard, sig=None):
     monkeypatch.setattr(eng, "_rules_for", lambda s: settings.RULES)
     monkeypatch.setattr(engine_mod.collector, "backfill_minutes", fake_backfill)
     monkeypatch.setattr(engine_mod.orders, "approve_and_send", _noop_send)
+    # 기본 모킹 — 대기열 무조건 생성(2026-08-03) 이후 가드 도달 상태에서도
+    # propose 가 불리므로, 안 걸면 테스트가 실 DB(로컬 아티팩트)에 주문을 남겨
+    # 다른 파일의 _fired 복원 테스트를 오염시킨다(실측).
+    monkeypatch.setattr(engine_mod.orders, "propose", lambda s, q: "oid-guard")
     monkeypatch.setattr(engine_mod.rules, "evaluate_all",
                         lambda df, cfg, prev: [sig] if sig else [])
     return backfilled
@@ -69,8 +73,11 @@ async def test_backfill_runs_even_when_guard_halts(monkeypatch):
     monkeypatch.setitem(settings.RISK, "auto_approve", True)
     backfilled = _prep(monkeypatch, eng, HALTED, _sig())
 
-    assert await eng.run_once() == []          # 신호는 나가지 않고
-    assert backfilled == ["005930"]            # 분봉 수집은 돌았다
+    found = await eng.run_once()
+    # 대기열 무조건 생성(2026-08-03): 가드 도달 + 자동 모드에서도 신호는
+    # 기록·대기열에 남고(guard_warn 표시) 분봉 수집도 돈다
+    assert len(found) == 1 and found[0]["guard_warn"]
+    assert backfilled == ["005930"]
 
 
 @pytest.mark.asyncio
@@ -88,15 +95,25 @@ async def test_backfill_runs_even_when_equity_unsynced(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_guard_blocks_entries_in_auto_mode(monkeypatch):
+    """가드가 막는 것은 **자동발주**다 — 대기열 생성까지 막지 않는다
+    (사용자 결정 2026-08-03: 발주 불가 상태여도 대기열에는 무조건)."""
     eng = SignalEngine(equity=1_000_000)
     monkeypatch.setitem(settings.RISK, "auto_approve", True)
     _prep(monkeypatch, eng, HALTED, _sig())
-    sent = []
+    sent, auto = [], []
     monkeypatch.setattr(engine_mod.orders, "propose",
                         lambda s, q: (sent.append(s.symbol), "oid")[1])
 
-    assert await eng.run_once() == []
-    assert sent == []                           # 주문 자체가 만들어지지 않는다
+    async def _spy(order_id, qty=None):
+        auto.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy)
+    found = await eng.run_once()
+    assert len(found) == 1 and sent == ["005930"]   # 대기열은 생긴다
+    assert auto == []                               # 자동발주는 안 나간다
+    assert "auto_status" not in found[0]
+    assert "일일 손실 한도" in found[0]["guard_warn"]
 
 
 @pytest.mark.asyncio

@@ -398,10 +398,12 @@ class SignalEngine:
         self.guard = self.day_guard_status()
         auto = bool(settings.RISK.get("auto_approve", False))
         if self.guard["halted"] and auto:
-            self.last_run = datetime.now(KST).isoformat(timespec="seconds")
-            log.info("일일 가드 작동(자동 발주 모드): %s (오늘 %+.2f%%)",
-                     self.guard["reason"], self.guard["pct"])
-            return found
+            # 종전에는 여기서 사이클을 통째로 끝내 **신호가 기록조차 안 됐다.**
+            # 대기열 무조건 생성(사용자 결정 2026-08-03)에 따라 평가·기록·대기열은
+            # 계속하고 자동발주만 멈춘다 — 아래 자동발주 조건이 halted 를
+            # 재확인하고, guard_warn 이 화면·일지에 '한도 도달 후 진입' 을 남긴다.
+            log.info("일일 가드 작동(자동 발주 정지 — 평가·대기열은 계속): %s "
+                     "(오늘 %+.2f%%)", self.guard["reason"], self.guard["pct"])
         guard_warn = self.guard["reason"] if self.guard["halted"] else ""
         if guard_warn:
             log.info("일일 가드 도달했으나 수동 승인 모드 — 신호 평가 계속: %s",
@@ -495,15 +497,33 @@ class SignalEngine:
             elif held is not None and symbol in held:
                 rec["note"] = ("종목 중복 — 이미 보유·진입한 종목입니다"
                                "(한 종목의 같은 움직임에 두 번 걸리지 않도록 차단)")
-            elif qty < 1:
-                rec["note"] = self._zero_qty_note(sig, risk_pct, max_w, avail)
             else:
+                # **계좌 상태(수량 0·포지션 한도·손실 가드)는 대기열 생성을 막지
+                # 않는다**(사용자 결정 2026-08-03: "계좌가 발주 불가능한 상태여도
+                # 승인 대기열에는 무조건 올려야 함"). 종전에는 오늘 하루에만
+                # 포지션 한도 16건이 기록만 남고 대기열에 흔적이 없었다 — 사용자는
+                # 자리를 정리하면 살 수 있었다는 사실 자체를 몰랐다.
+                #
+                # 위의 전략 게이트(시간창·국면·롱온리·중복)는 종전대로 미생성이다
+                # — 그건 계좌 상태가 아니라 '지금은 사지 않는다'는 결정 자체다.
+                #
+                # manual_only 는 자동발주가 집어가지 못하게 하는 플래그다.
+                # approve_and_send 는 한도를 재검사하지 않으므로(사람 결정 우선)
+                # 사용자가 자리를 정리하고 승인하면 그대로 발주된다.
+                actionable = True
+                if qty < 1:
+                    qty = 1
+                    rec["qty"] = qty
+                    rec["need_cash"] = int(sig.entry)
+                    rec["fundable"] = fundable = sig.entry <= avail
+                    rec["manual_only"] = True
+                    rec["note"] = ("리스크 기준 수량 0주 — 1주로 제안. "
+                                   + self._zero_qty_note(sig, risk_pct, max_w, avail))
                 ok, why = self.state.can_open()
-                if ok:
-                    actionable = True
-                else:
-                    rec["note"] = f"진입 보류 — {why}"
-                    log.info("신호 차단 %s %s: %s", symbol, sig.rule, why)
+                if not ok:
+                    rec["manual_only"] = True
+                    rec["note"] = f"{why} — 자동발주 제외, 수동 승인만"
+                    log.info("신호 수동 대기 %s %s: %s", symbol, sig.rule, why)
             # 중복 처리: 비발주 상태가 그대로면 기록도 반복하지 않는다. 단 '차단→해제'
             # (입금·포지션 정리·국면 전환 등)로 발주 가능해진 신호는 다시 살아난다.
             # (이미 발주된 신호 prev is True 는 1단계에서 걸러졌다.)
@@ -521,7 +541,7 @@ class SignalEngine:
                     # 가드 도달 상태에서 만든 승인대기 주문 — 화면·일지에 표시해
                     # 사용자가 '오늘 한도를 넘긴 뒤의 진입'임을 알고 승인하게 한다.
                     rec["guard_warn"] = guard_warn
-                if fundable:
+                if fundable and not rec.get("manual_only"):
                     avail = max(0.0, avail - need)   # 남은 현금에서 차감
                     # 같은 사이클에서 한도를 넘어 발주하지 않도록 즉시 반영(보수적
                     # 계산 — 승인 대기 상태여도 자리를 점유한 것으로 본다). 다음
@@ -529,9 +549,11 @@ class SignalEngine:
                     self.state.open_positions += 1
                     if held is not None:
                         held.add(symbol)
-                else:
+                elif not fundable and not rec.get("note"):
                     # 자금이 모자란 제안은 자리를 점유하지 않는다. 점유시키면
                     # 살 수도 없는 주문이 뒤에 오는 살 수 있는 신호를 막는다.
+                    # (manual_only 사유가 이미 있으면 덮지 않는다 — 한도·수량 0
+                    # 사유가 자금 문구에 지워지면 사용자가 원인을 잘못 읽는다.)
                     rec["note"] = (f"자금 부족 — 필요 {need:,.0f}원 / 가용 "
                                    f"{avail:,.0f}원. 승인대기에는 남습니다")
                 if over_weight:
@@ -540,7 +562,9 @@ class SignalEngine:
                 # 완전 자동 발주: 승인 없이 즉시 발주(소액 계좌 + 안전장치 전제).
                 # **자금이 되고 비중 상한을 넘지 않는 것만** 집어간다 — 데스크의
                 # 스크리닝이 여기다. 나머지는 대기열에 남아 사람이 판단한다.
-                if settings.RISK.get("auto_approve") and fundable and not over_weight:
+                if (settings.RISK.get("auto_approve") and fundable
+                        and not over_weight and not rec.get("manual_only")
+                        and not self.guard["halted"]):
                     try:
                         res = await orders.approve_and_send(rec["order_id"])
                         rec["auto_status"] = res.get("status")

@@ -65,6 +65,10 @@ def pending_order_text(rec: dict) -> str:
     need = int(rec.get("need_cash") or qty * entry)
     if rec.get("over_weight"):
         head = "⚠️ 비중 상한 초과 — 수동 승인만"
+    elif rec.get("manual_only"):
+        # 포지션 한도·손실 가드·리스크 0주 — 계좌 상태가 발주 불가여도 대기열에는
+        # 올린다(사용자 결정 2026-08-03). 사유는 note 로 함께 나간다.
+        head = "🟠 발주 불가 상태 — 수동 승인만"
     elif rec.get("fundable"):
         head = "🟢 승인대기"
     else:
