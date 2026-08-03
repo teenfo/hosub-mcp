@@ -145,3 +145,45 @@ def test_대조_리포트(env):
     assert len(d["unmatched_fills"]) == 1              # 수동 매매 1건
     assert d["qty_mismatch"] == [{"symbol": "005930", "ledger_qty": 10,
                                   "account_qty": 7}]
+
+
+# --- 일지 주값 전환 재료 (2026-08-03) ---
+
+def test_broker_daily_for_는_신선도를_따지지_않는다(env):
+    """가드(180초)와 달리 지난 거래일의 값은 확정치다 — 일지가 언제 읽어도 같다."""
+    fills.store_daily("2026-07-31", {"realized": -14_656.0,
+                                     "commission": 940, "tax": 6_336})
+    row = fills.broker_daily_for("2026-07-31")
+    assert row["realized"] == -14_656.0
+    assert fills.broker_daily_for("2026-07-30") is None
+
+
+@pytest.mark.asyncio
+async def test_ensure_daily_지난날_저장분이_있으면_API_를_안_부른다(env, monkeypatch):
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "k")
+    fills.store_daily("2026-07-31", {"realized": -14_656.0})
+    import app.kiwoom.client as mod
+
+    class _Boom:
+        async def daily_realized(self, *a, **k):
+            raise AssertionError("지난 날짜 확정치가 있는데 API 를 불렀다")
+
+    monkeypatch.setattr(mod, "client", _Boom())
+    row = await fills.ensure_daily("2026-07-31")
+    assert row["realized"] == -14_656.0
+
+
+@pytest.mark.asyncio
+async def test_ensure_daily_없는_날은_받아서_채운다(env, monkeypatch):
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "k")
+    import app.kiwoom.client as mod
+
+    class _C:
+        async def daily_realized(self, frm, to):
+            assert (frm, to) == ("20260730", "20260730")
+            return {"return_code": 0, "rlzt_pl": "-5055",
+                    "trde_cmsn": "300", "trde_tax": "1500", "dt_rlzt_pl": []}
+
+    monkeypatch.setattr(mod, "client", _C())
+    row = await fills.ensure_daily("2026-07-30")
+    assert row["realized"] == -5_055.0
