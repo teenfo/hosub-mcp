@@ -95,9 +95,19 @@ class DailyRiskState:
     def loss_limit_hit(self) -> bool:
         return self.realized_pnl <= -self.equity * self.daily_loss_limit_pct / 100
 
-    def can_open(self) -> tuple[bool, str]:
+    def can_open(self, reserve: int = 0) -> tuple[bool, str]:
+        """reserve: 이 후보가 쓸 수 없는 예약 슬롯 수.
+
+        약세 국면의 인버스 전용 슬롯(사용자 결정 2026-08-03) — 롱 후보는
+        `max_positions - reserve` 까지만, 인버스 후보는 reserve=0 으로 전체
+        한도를 쓴다. 총 동시 포지션은 늘지 않는다(한도 **내** 예약).
+        """
         if self.loss_limit_hit:
             return False, "일일 손실 한도 도달 — 신규 진입 차단"
-        if self.open_positions >= self.max_positions:
+        limit = self.max_positions - max(0, int(reserve))
+        if self.open_positions >= limit:
+            if self.open_positions < self.max_positions:
+                return False, (f"롱 가용 슬롯({limit}/{self.max_positions}) 도달"
+                               f" — 약세 국면 인버스 예약 {reserve}자리 제외")
             return False, f"최대 동시 포지션({self.max_positions}) 도달"
         return True, ""
