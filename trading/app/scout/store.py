@@ -195,6 +195,20 @@ def _conn() -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS ix_premarket_obs_code ON premarket_obs (code, ts);
 
+        -- KRX 장전 동시호가(08:30~09:00) 예상체결 관측 — 시점별로 쌓는다.
+        --
+        -- premarket_obs(NXT 실체결)와 접지 않는 이유가 같다: 동시호가 30분의
+        -- **경로**(예상체결가가 어디서 출발해 어디로 수렴하나)가 질문이지
+        -- 평균이 아니다. exp_price 가 NULL 인 행은 '공개 전' 이다 — 0 으로
+        -- 채우면 '못 쟀다' 와 '예상가 0' 이 섞인다(preopen.py 판정 docstring).
+        CREATE TABLE IF NOT EXISTS preopen_obs (
+            ts TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            price REAL, change_pct REAL,
+            exp_price REAL, exp_qty INTEGER,
+            PRIMARY KEY (ts, code)
+        );
+        CREATE INDEX IF NOT EXISTS ix_preopen_obs_code ON preopen_obs (code, ts);
+
         CREATE TABLE IF NOT EXISTS opening_obs (
             d TEXT PRIMARY KEY,
             n INTEGER NOT NULL,          -- 관측 종목 수
@@ -464,6 +478,53 @@ def record_premarket(rows: list[dict], now: datetime | None = None) -> int:
               r.get("volume")) for r in rows],
         )
     return len(rows)
+
+
+def premarket_codes(day: str) -> list[tuple[str, str | None]]:
+    """그날 NXT 프리마켓에 나타난 종목 — 동시호가 관측(preopen)의 유니버스 확장.
+
+    이름은 사람이 읽는 칸이라 없으면 None 으로 둔다.
+    """
+    with _conn() as conn:
+        return [(r["code"], r["name"]) for r in conn.execute(
+            "SELECT code, MAX(name) AS name FROM premarket_obs"
+            " WHERE substr(ts,1,10) = ? GROUP BY code", (day,))]
+
+
+def record_preopen(quotes: dict[str, dict], names: dict[str, str] | None = None,
+                   now: datetime | None = None) -> int:
+    """동시호가 예상체결 스냅샷을 시점별로 쌓는다. 반환: 적재 행 수.
+
+    `quotes` 는 quote.parse_watch_info 의 결과 그대로다 — exp_price/exp_qty 가
+    **없는** 행은 NULL 로 남는다(공개 전). .get() 이 그 규약을 지킨다.
+    """
+    if not quotes:
+        return 0
+    names = names or {}
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="minutes")
+    with _conn() as conn:
+        conn.executemany(
+            "INSERT OR REPLACE INTO preopen_obs (ts, code, name, price,"
+            " change_pct, exp_price, exp_qty) VALUES (?,?,?,?,?,?,?)",
+            [(ts, code, names.get(code), q.get("price"), q.get("change_pct"),
+              q.get("exp_price"), q.get("exp_qty")) for code, q in quotes.items()],
+        )
+    return len(quotes)
+
+
+def preopen_days(limit: int = 30) -> list[dict]:
+    """동시호가 관측 요약 — 날짜별 스냅샷 수·종목 수·예상체결 커버리지.
+
+    `with_exp` 가 0 에 머무는 날이 이어지면 공개 시각이 창보다 늦거나 필드가
+    안 오는 것이다 — 첫 실측에서 이 컬럼이 공개 시각을 확정한다.
+    """
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT substr(ts,1,10) AS d, COUNT(DISTINCT ts) AS snapshots,"
+            " COUNT(DISTINCT code) AS codes,"
+            " SUM(CASE WHEN exp_price IS NOT NULL THEN 1 ELSE 0 END) AS with_exp,"
+            " COUNT(*) AS rows_"
+            " FROM preopen_obs GROUP BY 1 ORDER BY 1 DESC LIMIT ?", (limit,))]
 
 
 def premarket_days(limit: int = 30) -> list[dict]:

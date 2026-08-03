@@ -73,7 +73,7 @@ _TRADING_GET_RE = re.compile(
     r"|bars/\d{6}(/dates)?|trades/\d{6}|backtest/\d{6}|stock/\d{6}"
     r"|backtest/coverage|backtest/report/(latest|history)|backtest/sweep/latest"
     r"|research/(event-study|ranking|news-impact|trailing|trailing/real|timeofday|flowsignal)|scout|regime/history"
-    r"|cases|premarket|flows|fills|kelly|profile|vpin)$"
+    r"|cases|premarket|preopen|flows|fills|kelly|profile|vpin)$"
 )
 _TRADING_POST_RE = re.compile(
     r"^(orders/[0-9a-f]{12}/(approve|reject)|settings|watchlist(/remove|/mode)?"
