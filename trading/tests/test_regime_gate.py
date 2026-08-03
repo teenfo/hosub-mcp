@@ -80,6 +80,8 @@ async def test_run_once_gates_inverse_in_bull(monkeypatch):
                         lambda s: (types.SimpleNamespace(empty=False), None))
     monkeypatch.setattr(eng, "_rules_for", lambda s: {})
     monkeypatch.setattr(engine_mod.collector, "backfill_minutes", lambda s: _noop())
+    monkeypatch.setattr(engine_mod.rules, "entry_window_note",
+                        lambda rule, now, cfg: None)   # 벽시계 비의존
     monkeypatch.setattr(engine_mod.rules, "evaluate_all",
                         lambda df, cfg, prev: [Signal(
                             rule="momentum", side="long", entry=1125, stop=1110,

@@ -37,6 +37,11 @@ def _prep(monkeypatch, eng, sig):
                         lambda sym: (types.SimpleNamespace(empty=False), None))
     monkeypatch.setattr(eng, "_rules_for", lambda sym: {})
     monkeypatch.setattr(engine_mod.collector, "backfill_minutes", _noop_backfill)
+    # 진입 시간창 게이트를 무력화 — 벽시계를 읽어 15:00 이후 실행 시 전 신호가
+    # 차단돼 테스트가 시간대에 따라 갈린다(실측 2026-08-03 15:47). 창 동작
+    # 자체는 test_entry_window 가 시각을 주입해 검증한다.
+    monkeypatch.setattr(engine_mod.rules, "entry_window_note",
+                        lambda rule, now, cfg: None)
     monkeypatch.setattr(engine_mod.rules, "evaluate_all",
                         lambda df, cfg, prev: [sig])
 

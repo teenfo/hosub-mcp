@@ -168,13 +168,24 @@ class RealtimeFeed:
     async def _run(self) -> None:
         backoff = 5
         while True:
+            started = time.monotonic()
             try:
                 await self._connect_once()
-                backoff = 5  # 정상 종료 후엔 빠르게 재접속
             except Exception as e:  # noqa: BLE001 - 재접속 루프
                 log.warning("WS 재접속 %ds 후: %s", backoff, e)
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, 60)  # 장 마감 등 지속 실패 시 완화
+                continue
+            # **'정상 종료' 도 금방 끊겼으면 백오프한다.** REG 거부 등으로 세션이
+            # 예외 없이 즉시 끝나는 경로는 종전에 무대기 재접속이었다 — 실측
+            # 2026-08-03 15:11 토큰 갱신 사고에서 시간당 3,380회 재접속 폭풍.
+            if time.monotonic() - started < 30:
+                log.warning("WS 세션이 %.0f초 만에 끝남 — %ds 백오프 후 재접속",
+                            time.monotonic() - started, backoff)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, 60)
+            else:
+                backoff = 5                 # 충분히 산 세션 뒤에는 빠르게
 
     async def _connect_once(self) -> None:
         token = await token_manager.get()
@@ -196,6 +207,28 @@ class RealtimeFeed:
 
     async def _session(self, ws, token: str) -> None:
         await ws.send(json.dumps({"trnm": "LOGIN", "token": token}))
+        # **LOGIN 응답을 확인한 뒤에만 REG 를 보낸다.** 종전에는 연달아 보냈고
+        # 보통은 서버가 순서대로 처리해 문제가 없었지만, 토큰 갱신 직후에는
+        # 인증 처리가 끝나기 전에 REG 가 도착해 rc=100013(로그인 인증 전 전문)
+        # 으로 거부됐다 — 그 거부가 재접속을 부르고 재접속이 같은 경합을 반복해
+        # 폭풍이 됐다(실측 2026-08-03 15:11~15:32, 시간당 3,380회).
+        while True:
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            msg = json.loads(raw)
+            trnm = msg.get("trnm")
+            if trnm == "PING":
+                await ws.send(raw)
+                continue
+            if trnm == "LOGIN":
+                rc = str(msg.get("return_code", "0"))
+                if rc not in ("0", "", "None"):
+                    # 무효 토큰일 수 있다 — 캐시를 버려 다음 접속이 재발급하게
+                    # 하고, 예외로 나가 _run 의 백오프를 탄다.
+                    token_manager.reset()
+                    raise RuntimeError(
+                        f"WS LOGIN 거부 rc={rc} msg={msg.get('return_msg')}")
+                break
+            # LOGIN 응답 전의 다른 프레임은 무시(REAL 이 먼저 올 일은 없다)
         data = [{"item": sorted(self._symbols), "type": ["0B"]}]  # 0B=주식체결
         exec_type = self._exec_type()
         if exec_type:

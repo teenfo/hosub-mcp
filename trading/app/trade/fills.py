@@ -71,9 +71,24 @@ def _key(day: str, e: dict) -> str:
 
 def store_today(execs: list[dict], day: str | None = None) -> int:
     """당일 체결 스냅샷 교체 저장 — REST 응답이 그날의 전체 진실이므로
-    부분 upsert 가 아니라 통째로 갈아끼운다(멱등)."""
+    부분 upsert 가 아니라 통째로 갈아끼운다(멱등).
+
+    **빈 응답은 이미 쌓인 스냅샷을 지우지 못한다.** 실측 2026-08-03 15:22:
+    토큰 갱신 사고 중 200-빈 응답이 그날 체결 38건을 통째로 지우고 계좌
+    실현을 0 으로 만들었다 — '조회 실패 = 빈 결과' 사고 계열(감시목록
+    replace_*([]) 증발과 같은 구조). 당일 체결은 늘어나기만 하고 줄지
+    않으므로, 비어 있지 않던 스냅샷에 빈 응답이 오면 그건 데이터가 아니라
+    장애다. 유지하고 경고만 남긴다.
+    """
     day = day or datetime.now(KST).date().isoformat()
     ts = datetime.now(KST).isoformat(timespec="seconds")
+    if not execs:
+        have = len(today_fills(day))
+        if have:
+            log.warning("체결내역 빈 응답 — 기존 스냅샷 %d건 유지(조회 장애로 간주)",
+                        have)
+            return have
+        return 0
     with _conn() as conn:
         conn.execute("DELETE FROM broker_fills WHERE d=?", (day,))
         conn.executemany(
@@ -87,13 +102,32 @@ def store_today(execs: list[dict], day: str | None = None) -> int:
 
 
 def store_daily(day: str, parsed: dict) -> None:
-    """증권사 계산 실현손익(순액) — ka10074 parse_daily 결과."""
+    """증권사 계산 실현손익(순액) — ka10074 parse_daily 결과.
+
+    두 가지는 저장하지 않는다(실측 2026-08-03 15:22 — 토큰 사고 중 0 이
+    +3,884 를 덮었고, 이 값은 일일 가드·일지의 주값이다):
+      · 조회 실패(ok=False) — 실패는 값이 아니다
+      · 전부 0 인데 기존 행이 0 이 아님 — 거래 없는 날의 정당한 0 은 기존
+        행도 0(또는 없음)이므로, 이 조합은 빈 응답이 확정치를 덮는 경우뿐이다
+    """
+    if parsed.get("ok") is False:
+        log.warning("실현손익 조회 실패 응답 — 저장하지 않음: %s",
+                    parsed.get("error"))
+        return
+    vals = (float(parsed.get("realized") or 0),
+            float(parsed.get("commission") or 0), float(parsed.get("tax") or 0))
     with _conn() as conn:
+        if vals == (0.0, 0.0, 0.0):
+            row = conn.execute(
+                "SELECT realized, commission, tax FROM broker_daily WHERE d=?",
+                (day,)).fetchone()
+            if row and any(row):
+                log.warning("실현손익 전부 0 응답 — 기존 확정치(%s원) 유지",
+                            row["realized"])
+                return
         conn.execute(
             "INSERT OR REPLACE INTO broker_daily VALUES (?,?,?,?,?)",
-            (day, float(parsed.get("realized") or 0),
-             float(parsed.get("commission") or 0), float(parsed.get("tax") or 0),
-             datetime.now(KST).isoformat(timespec="seconds")))
+            (day, *vals, datetime.now(KST).isoformat(timespec="seconds")))
 
 
 def broker_daily_for(day: str) -> dict | None:
