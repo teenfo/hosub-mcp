@@ -282,17 +282,37 @@ class KiwoomClient:
         )
 
     # --- 주문 ---
-    async def order(self, side: str, symbol: str, qty: int, price: int = 0) -> dict:
-        """side: buy/sell. price=0 이면 시장가."""
+    async def order(self, side: str, symbol: str, qty: int, price: int = 0,
+                    trde_tp: str | None = None) -> dict:
+        """side: buy/sell. price=0 이면 시장가.
+
+        `trde_tp` 를 주면 그 유형으로 발주한다(문서 기준: 3=시장가 · 0=보통
+        지정가 · **6=최유리지정가** — 매도 시 매수최우선호가를 지정가로,
+        호가 잠식 없이 체결). 6 은 아직 실호출 미검증이라 호출부(execute_exit)
+        가 거부 시 시장가 재발주 안전망을 갖는다 — 코드가 틀려도 종전 동작.
+        """
         tr = TR_ORDER_BUY if side == "buy" else TR_ORDER_SELL
         body = {
             "dmst_stex_tp": "KRX",
             "stk_cd": symbol,
             "ord_qty": str(qty),
             "ord_uv": str(price) if price else "",
-            "trde_tp": "3" if price == 0 else "0",  # 3=시장가, 0=보통(지정가)
+            "trde_tp": trde_tp or ("3" if price == 0 else "0"),
         }
         return await self._call(PATH_ORDER, tr, body)
+
+    async def cancel_order(self, orig_ord_no: str, symbol: str) -> dict:
+        """주문 취소(kt10003) — 잔량 전부. 최유리지정가 청산의 미체결 폴백용.
+
+        `cncl_qty` 0 = 잔량 전량 취소(문서 관례). 이미 전량 체결된 주문의
+        취소는 거부가 정상이다 — 호출부는 실패를 삼키고 잔량을 재계산한다.
+        """
+        return await self._call(PATH_ORDER, "kt10003", {
+            "dmst_stex_tp": "KRX",
+            "orig_ord_no": orig_ord_no,
+            "stk_cd": symbol,
+            "cncl_qty": "0",
+        })
 
     async def trade_value_rank(self, market: str = "000",
                                stex_tp: str = venue.TP_KRX) -> dict:

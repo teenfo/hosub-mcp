@@ -394,6 +394,18 @@ def fill_price_of(ord_no: str) -> float | None:
     return float(row["price"]) if row else None
 
 
+def filled_qty(ord_no: str) -> int:
+    """그 주문번호로 지금까지 수신한 체결 수량 합. 최유리지정가 청산의
+    미체결 잔량 판정용 — price>0 이 체결 행이다(접수 이벤트는 price 0)."""
+    if not ord_no:
+        return 0
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(qty), 0) FROM exec_fills"
+            " WHERE ord_no=? AND price>0", (ord_no,)).fetchone()
+    return int(row[0] or 0)
+
+
 def close_position(pos_id: str, exit_px: float, reason: str = "manual",
                    ord_no: str | None = None) -> bool:
     """포지션을 청산 기록한다.
