@@ -28,10 +28,7 @@ from .scout import observe as scout_observe
 from .scout import flows as scout_flows
 from .scout import premarket as scout_premarket
 from .scout import preopen as scout_preopen
-<<<<<<< HEAD
 from .scout import hourly as scout_hourly
-=======
->>>>>>> origin/main
 from .trade import desk, orders
 from . import journal
 
@@ -513,12 +510,9 @@ async def lifespan(app: FastAPI):
         # KRX 동시호가(08:30~09:00) — 예상체결 관측. 09:00 버킷 모순(합성 최고
         # vs 실거래 최악)을 풀 재료이고, 판단에는 쓰지 않는다(preopen.py 판정).
         asyncio.create_task(scout_preopen.loop()),
-<<<<<<< HEAD
         # 시간당 발굴(장중 매시) — 야간 3규칙을 진행 중인 오늘 봉으로 재평가.
         # 관측 전용 — 신호·편입에 닿지 않는다(hourly.py 판정 docstring).
         asyncio.create_task(scout_hourly.loop()),
-=======
->>>>>>> origin/main
         # 수급 — 마감 후 1회. 감시목록 세부(기관 13주체·공매도·장전비중).
         # 전종목 수급은 야간 배치가 함께 가져온다(scout/nightly.py).
         asyncio.create_task(scout_flows.loop()),
@@ -1057,7 +1051,6 @@ async def api_preopen(_=Depends(require_auth)):
             "days": await asyncio.to_thread(scout_store.preopen_days)}
 
 
-<<<<<<< HEAD
 @app.get("/api/hourly")
 async def api_hourly(_=Depends(require_auth)):
     """시간당 발굴 관측 — 최근 픽 + 일자별 요약(조회 전용)."""
@@ -1074,8 +1067,6 @@ async def api_hourly_run(_=Depends(require_auth)):
     return {"ok": True, **await scout_hourly.evaluate_once()}
 
 
-=======
->>>>>>> origin/main
 @app.get("/api/cases")
 async def api_cases(rule: str | None = None, hour: int | None = None,
                     limit: int = 20, _=Depends(require_auth)):
