@@ -27,6 +27,7 @@ from .scout import bars_obs as scout_bars_obs
 from .scout import observe as scout_observe
 from .scout import flows as scout_flows
 from .scout import premarket as scout_premarket
+from .scout import preopen as scout_preopen
 from .trade import desk, orders
 from . import journal
 
@@ -505,6 +506,9 @@ async def lifespan(app: FastAPI):
         # NXT 프리마켓(08:00~08:50) — 우리가 못 보던 한 시간. 조회만
         # 하고 주문은 여전히 KRX 로 나간다(dmst_stex_tp 는 안 건드린다).
         asyncio.create_task(scout_premarket.loop()),
+        # KRX 동시호가(08:30~09:00) — 예상체결 관측. 09:00 버킷 모순(합성 최고
+        # vs 실거래 최악)을 풀 재료이고, 판단에는 쓰지 않는다(preopen.py 판정).
+        asyncio.create_task(scout_preopen.loop()),
         # 수급 — 마감 후 1회. 감시목록 세부(기관 13주체·공매도·장전비중).
         # 전종목 수급은 야간 배치가 함께 가져온다(scout/nightly.py).
         asyncio.create_task(scout_flows.loop()),
@@ -1028,6 +1032,19 @@ async def api_premarket(_=Depends(require_auth)):
 
     return {"window": premarket.window(), "enabled": premarket.enabled(),
             "days": await asyncio.to_thread(scout_store.premarket_days)}
+
+
+@app.get("/api/preopen")
+async def api_preopen(_=Depends(require_auth)):
+    """KRX 동시호가 예상체결 관측 — 날짜별 요약(조회 전용).
+
+    `with_exp` 가 예상체결가 공개 커버리지다 — 첫 실측에서 공개 시각을 이
+    값으로 확정한다(preopen.py docstring).
+    """
+    from .scout import preopen, store as scout_store
+
+    return {"window": preopen.window(), "enabled": preopen.enabled(),
+            "days": await asyncio.to_thread(scout_store.preopen_days)}
 
 
 @app.get("/api/cases")
