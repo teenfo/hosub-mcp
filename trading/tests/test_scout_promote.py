@@ -529,3 +529,34 @@ def test_상한_초과_강등도_침묵부터_뺀다():
     # 000002 가 점수는 같지만 신호를 냈다 → 침묵한 000001 이 먼저 밀린다
     rows = _plan(cands, cur, max_trade=1)
     assert [r["code"] for r in _by(rows, "demote")] == ["000001"]
+
+
+# --- 사용자 지정 매매 금지 핀 (no_trade, 2026-08-03) ---
+
+def test_no_trade_핀은_게이트를_다_통과해도_매매_승격이_안_된다():
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    c = _c(price=12_000)
+    rows = _plan([c], cur, no_trade=["000001"])
+    assert _by(rows, "promote_trade") == []
+
+
+def test_no_trade_핀이_매매_tier_에_있으면_수집전용으로_내린다():
+    cur = _cur(tier={"000001": TRADE}, since={"000001": LONG_AGO})
+    rows = _plan([_c()], cur, no_trade=["000001"])
+    demote = [r for r in rows if r["action"] == "demote"]
+    assert demote and demote[0]["to_tier"] == COLLECT
+    assert "no_trade" in demote[0]["reason"]
+
+
+def test_no_trade_핀이라도_보유_중이면_내리지_않는다():
+    """매매 tier 에서 빠지면 청산 감시가 가격을 잃는다 — held 규약이 우선."""
+    cur = _cur(tier={"000001": TRADE}, since={"000001": LONG_AGO},
+               held=["000001"])
+    rows = _plan([_c()], cur, no_trade=["000001"])
+    assert [r for r in rows if r["action"] == "demote"] == []
+
+
+def test_no_trade_핀도_수집전용_신규_편입은_된다():
+    """관측·신호는 계속 쌓인다 — 매매만 금지."""
+    rows = _plan([_c(score=0.5)], _cur(), no_trade=["000001"])
+    assert [r["to_tier"] for r in rows] == [COLLECT]

@@ -109,6 +109,11 @@ DEFAULTS = {
     # 상한 초과 강등의 사이클당 상한 — max_trade 급락·held 오산으로 매매 tier 를
     # 한 사이클에 통째로 비우지 못하게 한다(진단 2026-08-01 M6)
     "max_demote": 10,
+    # 매매 승격 금지 종목(사용자 지정 블랙리스트) — 수집전용까지만. set_mode 로
+    # 내려도 엔진이 게이트 통과 시 되올리므로 핀이 따로 필요하다. **성과 기반
+    # 자동 강등이 아니다**(그건 측정으로 기각: 과거 손익→다음 거래 상관 −0.050,
+    # 2026-07-31) — 사용자가 명시 지정한 종목만, config 로 언제든 되돌린다.
+    "no_trade": [],
 }
 
 
@@ -193,6 +198,7 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
 
     prob = int(conf.get("probation_sessions", 0) or 0)
     prob_line = session_open_before(now, prob) if prob > 0 else None
+    no_trade = {str(c) for c in (conf.get("no_trade") or [])}
 
     def probation_done(code: str) -> bool:
         """수집 tier 를 `probation_sessions`세션 거쳤는가 — 매매 승격의 게이트.
@@ -258,6 +264,8 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
             continue
         if tier == COLLECT:
             # 매매 승격은 **게이트로만** 판정한다 — 점수는 보지 않는다
+            if c.code in no_trade:
+                continue                       # 사용자 지정 핀 — 수집전용까지만
             if c.sources and set(c.sources) <= OBSERVE_ONLY:
                 # 관측 전용 소스만 지목 — max_tier=collect 하드 룰.
                 # 하네스 통과(flow)는 편입 근거이지 실거래 근거가 아니다.
@@ -292,6 +300,17 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
     dropped: set[str] = set()
     if not in_session(now):
         return out
+    # 사용자 지정 핀이 매매 tier 에 남아 있으면 수집전용으로 내린다 —
+    # 핀 지정 후 set_mode 를 빠뜨렸거나 사용자가 수동으로 되올린 경우의 안전망.
+    # 보유 중이면 내리지 않는다(청산 감시가 가격을 잃는다 — held 규약 그대로).
+    for code in sorted(no_trade):
+        if cur.tier.get(code) == TRADE and code not in cur.held:
+            out.append({
+                "code": code, "name": cur.names.get(code, code),
+                "action": "demote", "from_tier": TRADE, "to_tier": COLLECT,
+                "score": by_code[code].score if code in by_code else 0.0,
+                "sources": list(by_code[code].sources) if code in by_code else [],
+                "reason": "사용자 지정 매매 금지(no_trade) — 수집전용 고정"})
     for code, tier in cur.tier.items():
         if tier == NONE or code in cur.protected:
             continue
