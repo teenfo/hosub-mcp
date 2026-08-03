@@ -187,3 +187,33 @@ async def test_ensure_daily_없는_날은_받아서_채운다(env, monkeypatch):
     monkeypatch.setattr(mod, "client", _C())
     row = await fills.ensure_daily("2026-07-30")
     assert row["realized"] == -5_055.0
+
+
+# --- 빈 응답 가드 (실측 2026-08-03 15:22 — 토큰 사고 중 스냅샷·확정치 증발) ---
+
+def test_빈_응답은_쌓인_스냅샷을_지우지_못한다(env):
+    fills.store_today([_fill()], DAY)
+    assert fills.store_today([], DAY) == 1          # 기존 1건 유지
+    assert len(fills.today_fills(DAY)) == 1
+
+
+def test_처음부터_빈_날은_빈_저장이_정상이다(env):
+    assert fills.store_today([], DAY) == 0
+    assert fills.today_fills(DAY) == []
+
+
+def test_조회_실패_응답은_확정치를_덮지_않는다(env):
+    fills.store_daily(DAY, {"realized": -198.0, "commission": 600})
+    fills.store_daily(DAY, {"ok": False, "error": "조회 실패"})
+    assert fills.broker_daily_for(DAY)["realized"] == -198.0
+
+
+def test_전부_0_응답은_0_아닌_확정치를_덮지_않는다(env):
+    fills.store_daily(DAY, {"realized": 3_884.0, "commission": 470, "tax": 3_166})
+    fills.store_daily(DAY, {"realized": 0, "commission": 0, "tax": 0})
+    assert fills.broker_daily_for(DAY)["realized"] == 3_884.0
+
+
+def test_거래_없는_날의_정당한_0_은_저장된다(env):
+    fills.store_daily(DAY, {"realized": 0, "commission": 0, "tax": 0})
+    assert fills.broker_daily_for(DAY)["realized"] == 0.0

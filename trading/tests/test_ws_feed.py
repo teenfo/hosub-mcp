@@ -134,3 +134,91 @@ def test_데스크_REST_는_stale_sec_당_1회(monkeypatch):
         st = asyncio.run(desk.tick(lambda s: None, rest_price, _noop, now=now))
     assert calls["n"] == 1         # 종전에는 3콜이 나갔다
     assert st["rest_cache"] == 1 and st["watched"] == 1
+
+
+# --- LOGIN 확인 후 REG + 재접속 백오프 (실측 2026-08-03 15:11 토큰 갱신 폭풍) ---
+
+class _ScriptWS(FakeWS):
+    """recv 를 대본대로 돌려주는 가짜 소켓. 대본이 끝나면 세션을 닫는다."""
+
+    def __init__(self, frames):
+        super().__init__()
+        self._frames = list(frames)
+
+    async def recv(self):
+        if not self._frames:
+            raise ConnectionError("대본 끝")
+        return json.dumps(self._frames.pop(0))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration          # LOGIN 이후 본문 루프는 바로 종료
+
+
+def test_LOGIN_확인_전에는_REG_를_보내지_않는다():
+    feed = ws_mod.RealtimeFeed(_noop)
+    feed._symbols = {"000001"}
+    ws = _ScriptWS([{"trnm": "PING"},                      # LOGIN 전 PING 은 회신만
+                    {"trnm": "LOGIN", "return_code": "0"}])
+    asyncio.run(feed._session(ws, "tok"))
+    trnms = [m["trnm"] for m in ws.sent]
+    assert trnms.index("LOGIN") < trnms.index("REG")
+    # LOGIN 응답을 받기 전 프레임은 PING 회신뿐 — REG 는 ack 뒤 정확히 한 번
+    assert trnms.count("REG") == 1
+
+
+def test_LOGIN_거부는_예외로_나가고_토큰_캐시를_버린다(monkeypatch):
+    from app.kiwoom import auth
+
+    reset = []
+    monkeypatch.setattr(auth.token_manager, "reset", lambda: reset.append(1))
+    monkeypatch.setattr(ws_mod, "token_manager", auth.token_manager)
+    feed = ws_mod.RealtimeFeed(_noop)
+    ws = _ScriptWS([{"trnm": "LOGIN", "return_code": "8005",
+                     "return_msg": "잘못된 접근 토큰"}])
+    with pytest.raises(RuntimeError, match="LOGIN 거부"):
+        asyncio.run(feed._session(ws, "bad"))
+    assert reset == [1]                    # 다음 접속이 재발급하게 한다
+
+
+def test_짧게_끝난_세션도_백오프한다(monkeypatch):
+    """REG 거부 등 '정상 종료' 즉시 재접속이 폭풍이 됐다 — 시간당 3,380회 실측."""
+    feed = ws_mod.RealtimeFeed(_noop)
+    slept, calls = [], {"n": 0}
+
+    async def _fast_connect():
+        calls["n"] += 1
+        if calls["n"] >= 3:
+            raise asyncio.CancelledError   # 루프 종료용
+
+    async def _spy_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(feed, "_connect_once", _fast_connect)
+    monkeypatch.setattr(ws_mod.asyncio, "sleep", _spy_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(feed._run())
+    assert slept == [5, 10]                # 즉시 재접속이 아니라 지수 백오프
+
+
+@pytest.mark.asyncio
+async def test_토큰_발급은_동시에_한_번만(monkeypatch):
+    """만료 시점에 REST·WS 가 동시에 갱신하면 이중 발급 — 늦게 저장된 쪽이
+    무효 토큰일 수 있다(실측 2026-08-03 15:11, 같은 초 2회 발급 직후 사고)."""
+    from app.kiwoom.auth import TokenManager
+
+    tm = TokenManager()
+    n = {"fetch": 0}
+
+    async def _fake_fetch():
+        n["fetch"] += 1
+        await asyncio.sleep(0.01)
+        tm._token, tm._expires_at = "tok", 9e12
+        return "tok"
+
+    monkeypatch.setattr(tm, "_fetch", _fake_fetch)
+    got = await asyncio.gather(tm.get(), tm.get(), tm.get())
+    assert got == ["tok"] * 3
+    assert n["fetch"] == 1

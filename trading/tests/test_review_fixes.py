@@ -50,6 +50,8 @@ async def test_blocked_signal_revives_when_actionable(monkeypatch):
         return None
 
     monkeypatch.setattr(engine_mod.collector, "backfill_minutes", _nb)
+    monkeypatch.setattr(engine_mod.rules, "entry_window_note",
+                        lambda rule, now, cfg: None)   # 벽시계 비의존
     monkeypatch.setattr(engine_mod.rules, "evaluate_all",
                         lambda df, cfg, prev: [Signal(
                             rule="orb", side="long", entry=10_000, stop=9_800,
