@@ -29,10 +29,11 @@ Signal(code, name, source, kind, strength(0~1), raw, evidence, observed_at, ttl_
 |---|---|---|---|
 | `volume` 거래대금 상위 | `sources/intraday.py` | 순위 r → `1-(r-1)/N` | 장중, 짧은 감쇠 |
 | `gainers` 등락률 상위 | `sources/intraday.py` | 순위 → 동일 | 장중 |
-| `presurge` 거래량 급증 | `sources/intraday.py` | 급증률 로그 스케일 | **max_tier=collect 하드 룰**(측정 이력 없음) |
+| `presurge` 거래량 급증 | `sources/intraday.py` | 급증률 로그 스케일 | **max_tier=collect 하드 룰**(측정 이력 없음, `model.OBSERVE_ONLY`) |
 | `nightly` 야간 발굴 | `sources/slow.py` | **전 팔 0.667 고정**(`NIGHTLY_STRENGTH`) | `observed_at`=배치 시각 17:30 고정 — 감쇠·TTL 이 실제로 작동(아침 ≈0.43, ~22h 만료) |
 | `news` 뉴스·공시 | `sources/slow.py` | TNM 점수/100 | `impact_direction` 악재·불명 차단, min_score 70 |
 | `manual` 수동 | — | 1.0 | **점수 미산입**(고정핀) — 아래 참조 |
+| `flow` 외국인/STV 수급 | `sources/slow.py` | **0.667 고정**(`FLOW_STRENGTH`) — 검증된 건 top_n 선별이지 미세 순서가 아니다 | 두 관문 통과 최초 신호(2026-08-03). **max_tier=collect 하드 룰**, `observed_at`=수급 확정일 17:30 고정, API 콜 0(flow_obs 소비), 4주 판정은 docstring 사전 확정 |
 
 `observed_at` 재도장 금지: 소스가 같은 신호를 재수집해도 관측 시각을 갱신하면
 감쇠·TTL 이 무력해진다(진단 2026-08-01 M3에서 수정).
@@ -41,7 +42,7 @@ Signal(code, name, source, kind, strength(0~1), raw, evidence, observed_at, ttl_
 
 ```
 total(code) = Σ_groups  max_{s ∈ group} ( strength × decay(age, half_life) )
-그룹: intraday(volume/gainers/presurge) · daily(nightly) · news · human
+그룹: intraday(volume/gainers/presurge) · daily(nightly) · news · human · flow
 ```
 
 - **그룹 내 max, 그룹 간 합** — 장중 3소스는 같은 팩터(당일 모멘텀)의 세 뷰라서
@@ -57,6 +58,9 @@ total(code) = Σ_groups  max_{s ∈ group} ( strength × decay(age, half_life) )
 
 매매 tier 승격 게이트 (**전부 통과해야 함** — 점수 임계 없음):
 
+0. **관측 전용 하드 룰** — `model.OBSERVE_ONLY`(flow·presurge)만 지목한 종목은
+   게이트와 무관하게 매매 tier 불가(max_tier=collect). 검증된 소스가 함께
+   가리키면 통과. 2026-08-03 flow 편입에서 메커니즘 성문화
 1. **유동성** (거래대금 하한)
 2. **체결가능성** — `trade_tier_cap`(가격 상한, 예수금 대비), 가격을 모르면 승격하지
    않는다. nightly/news/manual 은 가격이 낡으므로 승격 결정 시 실측가를 붙인다

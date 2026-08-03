@@ -393,6 +393,76 @@ def _install_httpx(monkeypatch, payload, seen=None):
     monkeypatch.setattr(httpx, "AsyncClient", _Client)
 
 
+# --- ⑦ 수급 소스 (외국인/STV, 2026-08-03 편입) ---
+#
+# 두 관문(IC 재현 t=4.9 · 랭킹 하네스 vs_liquid 전 손절폭 양수)을 통과한
+# 최초의 선별 신호. 그래도 관측 전용이다 — 승격 하드 룰은 test_scout_promote 가,
+# 여기서는 신호 생성 규약(비율 순위·양수만·ETF 제외·observed_at 고정)을 지킨다.
+
+def _flow_rows(monkeypatch, day, rows):
+    from app.scout import store
+
+    monkeypatch.setattr(store, "latest_flows", lambda: (day, rows))
+
+
+@pytest.mark.asyncio
+async def test_flow_는_수량_비율_순위다_절대량이_아니다(monkeypatch):
+    """frgn_stv = 순매수 수량/거래량. 절대량이 큰 대형주가 아니라 비율 상위가
+    뽑혀야 한다 — 하네스가 검증한 것이 정확히 이 정의다."""
+    _flow_rows(monkeypatch, "2026-07-31", [
+        {"code": "000001", "name": "가", "foreign_": 900, "volume": 100_000, "close": 5_000},
+        {"code": "000002", "name": "나", "foreign_": 500, "volume": 10_000, "close": 7_000},
+    ])
+    got = await slow.FlowSource().collect()
+    assert [s.code for s in got] == ["000002", "000001"]     # 0.05 > 0.009
+    assert got[0].raw == pytest.approx(0.05)
+    # 세기는 균일 — 검증된 것은 top_n 선별이지 상위 안의 미세 순서가 아니다
+    assert [s.strength for s in got] == [model.FLOW_STRENGTH] * 2
+    assert got[0].price == 7_000
+
+
+@pytest.mark.asyncio
+async def test_flow_순매도와_ETF_는_후보가_아니다(monkeypatch):
+    """순매도는 매수 근거가 아니고, ETF 는 유니버스 오염의 전례가 있다
+    (하네스·IC 재현 둘 다 이름 제외 유니버스로 통과했다 — 실전도 맞춘다)."""
+    _flow_rows(monkeypatch, "2026-07-31", [
+        {"code": "000001", "name": "가", "foreign_": -500, "volume": 10_000, "close": 1},
+        {"code": "000002", "name": "KODEX 인버스", "foreign_": 900, "volume": 1_000, "close": 1},
+        {"code": "000003", "name": "다", "foreign_": 100, "volume": 10_000, "close": 1},
+    ])
+    got = await slow.FlowSource().collect()
+    assert [s.code for s in got] == ["000003"]
+
+
+@pytest.mark.asyncio
+async def test_flow_observed_at_은_수급_확정일로_고정된다(monkeypatch):
+    """재수집 시각으로 재도장하면 감쇠·TTL 이 무력해진다(nightly M3 사고).
+    배치가 멎으면 신호도 다음 날 저녁 자연 만료돼야 한다."""
+    _flow_rows(monkeypatch, "2026-07-31", [
+        {"code": "000001", "name": "가", "foreign_": 100, "volume": 1_000, "close": 1}])
+    got = await slow.FlowSource().collect()
+    assert got[0].observed_at.isoformat() == "2026-07-31T17:30:00+09:00"
+    assert got[0].ttl_sec == model.TTL_SEC[model.FLOW] == 86_400
+
+
+@pytest.mark.asyncio
+async def test_flow_top_n_은_설정을_따른다(monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "scout",
+                        dict(settings.CONFIG.get("scout", {}), flow={"top_n": 1}))
+    _flow_rows(monkeypatch, "2026-07-31", [
+        {"code": f"00000{i}", "name": f"종목{i}", "foreign_": i * 100,
+         "volume": 1_000, "close": 1} for i in (1, 2, 3)])
+    got = await slow.FlowSource().collect()
+    assert [s.code for s in got] == ["000003"]
+
+
+@pytest.mark.asyncio
+async def test_flow_원장이_비면_0건이지_예외가_아니다(monkeypatch):
+    """첫 배치 전에는 flow_obs 가 비어 있다 — 정상 상태이지 장애가 아니다."""
+    _flow_rows(monkeypatch, None, [])
+    assert await slow.FlowSource().collect() == []
+
+
 # --- ⑥ 스위치 ---
 
 def test_sources_expose_interval_and_enabled():

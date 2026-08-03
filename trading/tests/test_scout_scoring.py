@@ -152,7 +152,7 @@ def test_weights_are_flat():
 def test_max_possible_is_group_count():
     """점수에 안 들어가는 그룹은 빼야 화면의 임계선 비율이 실제와 맞는다."""
     assert scoring.max_possible() == float(len(set(model.GROUPS) - scoring.UNSCORED))
-    assert scoring.max_possible() == 3.0
+    assert scoring.max_possible() == 4.0    # intraday·daily·news·flow (human 제외)
 
 
 # --- ⑤ 부가 정보 ---

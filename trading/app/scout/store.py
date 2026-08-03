@@ -422,6 +422,29 @@ def flow_coverage(days: int = 30) -> list[dict]:
             " FROM flow_obs GROUP BY d ORDER BY d DESC LIMIT ?", (days,))]
 
 
+def latest_flows() -> tuple[str | None, list[dict]]:
+    """전종목 수급(ka10086)의 **최신 일자** 한 단면 — FlowSource 의 입력.
+
+    최신 일자는 `foreign_` 가 실린 행 기준으로 잡는다. 감시목록 한정
+    소스(ka10059 등)가 다른 날짜에 자기 칸만 채워 둔 행이 있을 수 있는데,
+    그 날짜를 '최신' 으로 읽으면 수급 없는 단면이 나온다.
+
+    frgn_stv(외국인 순매수 수량/거래량) 계산은 호출자가 한다 — 여기는 원장
+    조회만. `volume` 이 NULL 이거나 0 인 행은 분모가 없으므로 뺀다.
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT MAX(d) AS d FROM flow_obs WHERE foreign_ IS NOT NULL"
+        ).fetchone()
+        day = row["d"] if row else None
+        if not day:
+            return None, []
+        return day, [dict(r) for r in conn.execute(
+            "SELECT code, name, foreign_, volume, close FROM flow_obs"
+            " WHERE d = ? AND foreign_ IS NOT NULL"
+            "   AND volume IS NOT NULL AND volume > 0", (day,))]
+
+
 def record_premarket(rows: list[dict], now: datetime | None = None) -> int:
     """NXT 프리마켓 순위를 시점별로 쌓는다. 반환: 적재 행 수.
 
