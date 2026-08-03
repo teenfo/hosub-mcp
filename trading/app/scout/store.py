@@ -209,6 +209,17 @@ def _conn() -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS ix_preopen_obs_code ON preopen_obs (code, ts);
 
+        -- 시간당 발굴 픽 원장(관측 전용, scout/hourly.py). 시점별로 쌓는다 —
+        -- "몇 시에 새로 생긴 패턴인가" 가 판정의 분할 축이다. evaluated 는
+        -- 픽 0건과 평가 실패(0종목)를 구분한다.
+        CREATE TABLE IF NOT EXISTS hourly_picks (
+            ts TEXT NOT NULL, code TEXT NOT NULL, name TEXT,
+            score REAL, prev_score REAL, close REAL, reasons TEXT,
+            evaluated INTEGER,
+            PRIMARY KEY (ts, code)
+        );
+        CREATE INDEX IF NOT EXISTS ix_hourly_picks_code ON hourly_picks (code, ts);
+
         CREATE TABLE IF NOT EXISTS opening_obs (
             d TEXT PRIMARY KEY,
             n INTEGER NOT NULL,          -- 관측 종목 수
@@ -525,6 +536,48 @@ def preopen_days(limit: int = 30) -> list[dict]:
             " SUM(CASE WHEN exp_price IS NOT NULL THEN 1 ELSE 0 END) AS with_exp,"
             " COUNT(*) AS rows_"
             " FROM preopen_obs GROUP BY 1 ORDER BY 1 DESC LIMIT ?", (limit,))]
+
+
+def record_hourly(picks: list[dict], evaluated: int,
+                  now: datetime | None = None) -> int:
+    """시간당 발굴 픽 스냅샷. 픽 0건이어도 **평가 사실을 남긴다**(마커 행) —
+    '패턴이 없었다' 와 '평가가 안 돌았다' 를 4주 뒤 구분해야 한다."""
+    ts = (now or datetime.now(UTC)).astimezone(KST).isoformat(timespec="minutes")
+    with _conn() as conn:
+        if not picks:
+            conn.execute(
+                "INSERT OR REPLACE INTO hourly_picks (ts, code, name, evaluated)"
+                " VALUES (?, '', NULL, ?)", (ts, evaluated))
+            return 0
+        conn.executemany(
+            "INSERT OR REPLACE INTO hourly_picks (ts, code, name, score,"
+            " prev_score, close, reasons, evaluated) VALUES (?,?,?,?,?,?,?,?)",
+            [(ts, p["code"], p.get("name"), p.get("score"), p.get("prev_score"),
+              p.get("close"), json.dumps(p.get("reasons") or [],
+                                         ensure_ascii=False), evaluated)
+             for p in picks])
+    return len(picks)
+
+
+def hourly_latest(limit: int = 50) -> list[dict]:
+    """가장 최근 평가 시점의 픽(마커 행 제외) — 화면·알림용."""
+    with _conn() as conn:
+        row = conn.execute("SELECT MAX(ts) AS t FROM hourly_picks").fetchone()
+        if not row or not row["t"]:
+            return []
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM hourly_picks WHERE ts=? AND code != ''"
+            " ORDER BY score DESC, code LIMIT ?", (row["t"], limit))]
+
+
+def hourly_days(limit: int = 30) -> list[dict]:
+    """일자별 요약 — 평가 횟수·픽 수(마커 행 제외)."""
+    with _conn() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT substr(ts,1,10) AS d, COUNT(DISTINCT ts) AS runs,"
+            " SUM(CASE WHEN code != '' THEN 1 ELSE 0 END) AS picks,"
+            " COUNT(DISTINCT CASE WHEN code != '' THEN code END) AS codes"
+            " FROM hourly_picks GROUP BY 1 ORDER BY 1 DESC LIMIT ?", (limit,))]
 
 
 def premarket_days(limit: int = 30) -> list[dict]:

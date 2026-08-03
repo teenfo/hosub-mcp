@@ -91,6 +91,12 @@ def parse_watch_info(raw: dict) -> dict[str, dict]:
             "volume": _num(row.get("trde_qty"), int),
             "trde_prica": _num(row.get("trde_prica"), int),
             "spread_pct": spread_pct(row),
+            # 당일 원시 OHL — 시간당 발굴(scout/hourly)이 진행 중인 오늘 봉을
+            # 합성하는 재료다. day_pos(비율)와 달리 원값이 있어야 봉이 된다.
+            # 0 이면 키를 빼서 '못 받았다' 를 구분한다(extra_fields 규약).
+            **{k: abs(_num(row.get(f))) for k, f in
+               (("open", "open_pric"), ("high", "high_pric"), ("low", "low_pric"))
+               if abs(_num(row.get(f))) > 0},
             **extra_fields(row),
         }
     return out
