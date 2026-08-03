@@ -406,3 +406,46 @@ def test_facts_flags_unconfirmed_exits():
         by_exit_reason={"stop": {"trades": 2, "expectancy_pct": -0.5}},
         positions=[{"exit_fill_confirmed": 1}, {"exit_fill_confirmed": 0}]))
     assert any("실체결가가 확인되지 않아" in x for x in f)
+
+
+# --- 실현손익 주값은 계좌다 (사용자 결정 2026-08-03) ---
+#
+# 건별 실비용 정정 후에도 계좌와 백원대 차이가 남는다(실측 7/31: 건별 −14,426
+# vs 계좌 −14,656). 증권사는 이동평균 단가·건별 절사로 계산하고 원장 밖 수동
+# 매매도 포함한다 — 일지의 헤드라인은 계좌 확정치를 쓰고 건별 합은 병기한다.
+
+def test_계좌값이_있으면_실현손익_주값은_계좌다(db):
+    from app.trade import fills
+
+    ledger.open_position(_order("a1"), fill=10_000)
+    ledger.monitor(lambda s: 10_500)
+    day = ledger.positions(status="closed")[0]["closed"][:10]
+    fills.store_daily(day, {"realized": 777.0, "commission": 10, "tax": 20})
+
+    e = journal.build(day)
+    assert e["trades"]["pnl_source"] == "broker"
+    assert e["trades"]["pnl_krw"] == 777.0
+    assert e["trades"]["engine_pnl_krw"] != 777.0     # 건별 합은 대조로 남는다
+    assert e["broker"]["realized"] == 777.0
+    assert any("계좌 확정" in f for f in e["facts"])
+    assert any("차이" in f and "건별 합" in f for f in e["facts"])
+
+
+def test_계좌값이_없으면_건별_합이고_그_사실을_밝힌다(db):
+    ledger.open_position(_order("a1"), fill=10_000)
+    ledger.monitor(lambda s: 10_500)
+    day = ledger.positions(status="closed")[0]["closed"][:10]
+
+    e = journal.build(day)
+    assert e["trades"]["pnl_source"] == "engine"
+    assert any("계좌값 미확보" in f for f in e["facts"])
+
+
+def test_거래_0건이어도_계좌_실현이_있으면_보인다(db):
+    """원장 밖 수동 매매만 있던 날 — '거래 없음' 으로 삼키면 계좌와 어긋난다."""
+    from app.trade import fills
+
+    fills.store_daily("2026-07-27", {"realized": -3_000.0})
+    e = journal.build("2026-07-27")
+    assert e["trades"]["pnl_krw"] == -3_000.0
+    assert not any("청산된 거래 없음" in f for f in e["facts"])

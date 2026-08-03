@@ -173,13 +173,25 @@ def facts(entry: dict) -> list[str]:
     out: list[str] = []
     t, sig = entry["trades"], entry["signals"]
 
-    if t["trades"] == 0:
+    if t["trades"] == 0 and not (t.get("pnl_source") == "broker" and t.get("pnl_krw")):
         out.append("청산된 거래 없음 — 성과 판단 불가.")
     else:
+        # 실현손익은 계좌 확정치가 주값이다(사용자 결정 2026-08-03). 승률·기대값은
+        # 건별(positions) 통계 그대로다 — 계좌 총액은 건으로 쪼갤 수 없다.
+        src = ("계좌 확정" if t.get("pnl_source") == "broker"
+               else "건별 합 — 계좌값 미확보")
         out.append(
             f"청산 {t['trades']}건(승 {t['wins']} · 패 {t['losses']}), "
-            f"승률 {t['win_rate']}%, 실현손익 {t['pnl_krw']:,.0f}원, "
+            f"승률 {t['win_rate']}%, 실현손익 {t['pnl_krw']:,.0f}원({src}), "
             f"건당 기대값 {t['expectancy_pct']:+.2f}%.")
+        if t.get("pnl_source") == "broker":
+            diff = round(t["pnl_krw"] - (t.get("engine_pnl_krw") or 0), 0)
+            if diff:
+                out.append(
+                    f"계좌 실현손익과 건별 합({t.get('engine_pnl_krw', 0):,.0f}원)의 "
+                    f"차이 {diff:+,.0f}원 — 증권사 평균단가·건별 절사 방식 차이이거나 "
+                    "원장 밖 수동 매매분. 차이가 수천 원대로 벌어지면 원장 정렬"
+                    "(fills)을 의심할 것.")
 
         # 결과를 사유보다 **먼저** 적는다. 사유만 보면 올라간 손절선에서 이익으로
         # 끝난 건까지 손실로 읽힌다(사용자 지침 2026-07-30).
@@ -464,6 +476,27 @@ def build(day: str | None = None) -> dict:
         "breakeven_shadow": breakeven.report(day),
         "summary": {},
     }
+    # 실현손익 주값은 **계좌(증권사 계산, ka10074 순액)** 다 — 사용자 결정
+    # 2026-08-03: 모든 원장 계산은 계좌 데이터 기준. 건별 합(positions)은 실비용
+    # 정정 후에도 계좌와 백원대 차이가 남는다(실측 7/31: 건별 −14,426 vs 계좌
+    # −14,656, 230원 — 증권사는 이동평균 단가·건별 절사로 계산하고 원장 밖
+    # 수동 매매도 포함한다). 건별 합은 대조값으로 병기한다 — 차이가 커지면
+    # 원장이 계좌를 놓치고 있다는 신호라서, 숨기는 게 아니라 나란히 보여야 한다.
+    from .trade import fills as broker_fills
+
+    t = entry["trades"]
+    t["engine_pnl_krw"] = t["pnl_krw"]
+    broker = None
+    try:
+        broker = broker_fills.broker_daily_for(day)
+    except Exception:  # noqa: BLE001 - 계좌값 조회 실패가 일지를 막지 않는다
+        log.warning("broker_daily 조회 실패 — 건별 합으로 표기", exc_info=True)
+    if broker is not None:
+        t["pnl_krw"] = round(float(broker["realized"] or 0), 0)
+        t["pnl_source"] = "broker"
+        entry["broker"] = broker
+    else:
+        t["pnl_source"] = "engine"
     # 케이스 원장 — 오늘 청산분을 사후 측정치와 함께 남기고, 누적 요약을 싣는다.
     # 일지가 매일 '오늘의 집계'만 보던 것을 **누적된 사실 위에서** 읽게 하려는
     # 것이다. 실패해도 일지는 만든다 — 관측이 기록을 막을 이유가 없다.
@@ -631,6 +664,14 @@ async def generate(day: str | None = None, with_summary: bool = True) -> dict:
     '진행 중 스냅샷'이라, 조회할 때 저장본 대신 그때그때 다시 계산한다.
     """
     reconciled = await _reconcile_first()
+    # 계좌 확정 실현손익 확보 — 동기화 루프는 당일만 저장하므로, 지난 날짜
+    # 재생성은 여기서 받아 와야 계좌 기준 주값이 성립한다.
+    try:
+        from .trade import fills as _fills
+
+        await _fills.ensure_daily(day or datetime.now(KST).date().isoformat())
+    except Exception:  # noqa: BLE001 - 확보 실패는 build 가 건별 합으로 표기한다
+        log.warning("계좌 실현손익 확보 실패", exc_info=True)
     entry = build(day)
     # 대사에 실패했으면 숫자가 모델 비용 기준이라는 사실을 일지에 남긴다.
     # 조용히 모델값을 쓰면 그게 실측인 줄 알고 읽게 된다.

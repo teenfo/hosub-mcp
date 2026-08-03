@@ -96,6 +96,45 @@ def store_daily(day: str, parsed: dict) -> None:
              datetime.now(KST).isoformat(timespec="seconds")))
 
 
+def broker_daily_for(day: str) -> dict | None:
+    """그날의 증권사 실현손익 행 — **신선도 조건 없음.**
+
+    `broker_realized_today`(가드 주값, 180초)와 용도가 다르다: 지난 거래일의
+    값은 확정치라 나이를 따질 이유가 없고, 일지가 이 값을 주값으로 쓴다
+    (사용자 결정 2026-08-03: 모든 원장 계산은 계좌 데이터 기준).
+    """
+    with _conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM broker_daily WHERE d=?", (day,)).fetchone()
+    return dict(row) if row else None
+
+
+async def ensure_daily(day: str) -> dict | None:
+    """그날 `broker_daily` 를 확보한다 — 없으면 ka10074 로 받아 채운다.
+
+    동기화 루프(main._fills_sync)는 **당일만** 저장하므로, 지난 날짜의 일지
+    재생성은 이 경로 없이는 계좌값을 영영 못 얻는다. 당일은 저장분이 있어도
+    재조회한다 — 장중 저장분은 마감 확정치보다 낡았을 수 있다.
+    """
+    from .. import settings
+
+    today = datetime.now(KST).date().isoformat()
+    have = broker_daily_for(day)
+    if have is not None and day < today:
+        return have                       # 지난 날짜 확정치 — API 콜을 아낀다
+    if not settings.KIWOOM_APP_KEY:
+        return have
+    from ..kiwoom.client import client
+    from ..kiwoom.realized import parse_daily
+
+    try:
+        d8 = day.replace("-", "")
+        store_daily(day, parse_daily(await client.daily_realized(d8, d8)))
+    except Exception:  # noqa: BLE001 - 조회 실패면 저장분(있다면)으로 간다
+        log.warning("증권사 실현손익 조회 실패 %s", day, exc_info=True)
+    return broker_daily_for(day)
+
+
 def today_fills(day: str | None = None) -> list[dict]:
     day = day or datetime.now(KST).date().isoformat()
     with _conn() as conn:
