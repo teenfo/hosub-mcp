@@ -171,7 +171,12 @@ async def test_already_fired_signal_not_reordered(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_max_positions_still_enforced(monkeypatch):
-    """우선순위가 높아도 동시 포지션 한도는 그대로 막는다."""
+    """한도 도달 시 **자동발주는 막되 대기열에는 올린다**.
+
+    사용자 결정(2026-08-03): 계좌가 발주 불가능한 상태여도 승인 대기열에는
+    무조건 올린다 — 종전에는 하루 16건(실측 8/3)이 기록만 남고 대기열에
+    흔적이 없어, 자리를 정리하면 살 수 있었다는 사실을 사용자가 몰랐다.
+    """
     eng = SignalEngine(equity=1_000_000)
     eng.state.max_positions = 1
     eng.state.open_positions = 1                  # 이미 한도 소진
@@ -180,13 +185,20 @@ async def test_max_positions_still_enforced(monkeypatch):
         "000100": [_sig("orb", 10_000, 9_800, 10_400)],
         "000200": [_sig("momentum", 10_000, 9_800, 10_400)],
     })
-    sent = []
+    sent, auto = [], []
     monkeypatch.setattr(engine_mod.orders, "propose",
                         lambda s, q: (sent.append(s.symbol), "oid")[1])
 
+    async def _spy_send(order_id, qty=None):
+        auto.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy_send)
     found = await eng.run_once()
-    assert len(found) == 2 and sent == []         # 수량은 나오지만 발주는 없음
-    assert all(f["actionable"] is False for f in found)
+    assert len(found) == 2 and len(sent) == 2     # 대기열 생성
+    assert auto == []                             # 자동발주는 없음
+    assert all(f["actionable"] for f in found)
+    assert all(f.get("manual_only") for f in found)
     assert all("최대 동시 포지션" in f["note"] for f in found)
 
 
@@ -208,9 +220,18 @@ async def test_cycle_stops_at_position_limit(monkeypatch):
     monkeypatch.setattr(engine_mod.orders, "propose",
                         lambda s, q: (sent.append(s.symbol), "oid")[1])
 
+    auto = []
+
+    async def _spy_send(order_id, qty=None):
+        auto.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy_send)
     found = await eng.run_once()
-    assert len(sent) == 2                         # 한도까지만 발주
-    assert sum(f["actionable"] for f in found) == 2
+    # 대기열은 4건 전부 생기고, **자동발주만** 한도(2)에서 멈춘다
+    assert len(sent) == 4
+    assert len(auto) == 2
+    assert sum(bool(f.get("manual_only")) for f in found) == 2
     assert "최대 동시 포지션" in found[-1]["note"]
 
 
@@ -312,3 +333,64 @@ def test_batch_never_exceeds_cap_even_with_many_holdings(monkeypatch):
     e._backfill_held = {"000001", "000002", "000003"}
     got = e._backfill_batch([f"{i:06d}" for i in range(10)])
     assert len(got) == 2 and set(got) <= e._backfill_held
+
+
+# --- 계좌 상태와 무관하게 대기열은 생긴다 (사용자 결정 2026-08-03) ---
+
+@pytest.mark.asyncio
+async def test_가드_도달_자동모드에서도_대기열은_생긴다(monkeypatch):
+    """종전에는 가드+자동 모드가 사이클을 통째로 끝내 신호가 기록조차 안 됐다."""
+    eng = SignalEngine(equity=1_000_000)
+    eng.state.max_positions = 5
+    monkeypatch.setitem(settings.RISK, "auto_approve", True)
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {"000100": [_sig("orb", 10_000, 9_800, 10_400)]})
+    monkeypatch.setattr(eng, "day_guard_status",
+                        lambda: {"halted": True, "reason": "일일 손실 한도 도달",
+                                 "pct": -2.1})
+    sent, auto = [], []
+    monkeypatch.setattr(engine_mod.orders, "propose",
+                        lambda s, q: (sent.append(s.symbol), "oid")[1])
+
+    async def _spy(order_id, qty=None):
+        auto.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy)
+    found = await eng.run_once()
+    assert len(sent) == 1 and auto == []          # 대기열 생성, 자동발주 정지
+    assert found[0]["guard_warn"]                 # '한도 도달 후 진입' 표시
+
+
+@pytest.mark.asyncio
+async def test_리스크_기준_0주는_1주로_제안된다(monkeypatch):
+    """고가주라 리스크 예산으로 0주가 나와도 — 보이지 않으면 판단할 수 없다."""
+    eng = SignalEngine(equity=100_000)
+    eng.state.max_positions = 5
+    monkeypatch.setitem(settings.RISK, "max_position_weight_pct", 0)
+    _prep(monkeypatch, eng, {"000100": [_sig("orb", 200_000, 196_000, 208_000)]})
+    sent, auto = [], []
+    monkeypatch.setattr(engine_mod.orders, "propose",
+                        lambda s, q: (sent.append((s.symbol, q)), "oid")[1])
+
+    async def _spy(order_id, qty=None):
+        auto.append(order_id)
+        return {"status": "sent", "message": ""}
+
+    monkeypatch.setattr(engine_mod.orders, "approve_and_send", _spy)
+    found = await eng.run_once()
+    assert sent == [("000100", 1)]                # 1주로 제안
+    assert auto == []                             # 자동발주 제외
+    assert found[0].get("manual_only")
+    assert "리스크 기준 수량 0주" in found[0]["note"]
+
+
+def test_슬랙_문구가_수동_승인_상태를_구분한다():
+    from app.notify import slack
+
+    rec = {"name": "가", "symbol": "000100", "qty": 1, "entry": 10_000,
+           "rule": "orb", "side": "long", "stop": 9_800, "target": 10_400,
+           "manual_only": True, "note": "최대 동시 포지션(4) 도달 — 자동발주 제외"}
+    text = slack.pending_order_text(rec)
+    assert "발주 불가 상태 — 수동 승인만" in text
+    assert "최대 동시 포지션" in text
