@@ -167,7 +167,7 @@ export function makeGearModal(container, title, { icon = "gear-fill", size = "mo
 // 상시 노출되던 1분봉 카드를 여기로 이관(사용자 결정 2026-08-04). 상시 폴링이
 // 사라지고 모달이 열려 있는 동안만 갱신하므로 API 부담은 오히려 준다.
 // loaded 는 코드 전환 시 비우는 지연 로드 플래그 — 탭을 열 때만 조회한다.
-const _STOCK_MODAL = { el: null, modal: null, title: null, tabs: null,
+const _STOCK_MODAL = { el: null, modal: null, title: null, tabs: null, tierBox: null,
                        code: "", name: "", loaded: {}, chart: null, timer: null };
 
 /** "종목명 (코드)" 클릭 링크 — innerHTML 문자열용. */
@@ -190,13 +190,15 @@ export function stockCell(code, name, opts) {
 function _ensureModal() {
   if (_STOCK_MODAL.modal) return _STOCK_MODAL;
   const title = el("h5", { class: "modal-title" }, "종목 정보");
+  // 종목명 옆 tier 뱃지 + 매매/수집전용 전환 버튼 자리(사용자 결정 2026-08-04).
+  const tierBox = el("span", { class: "d-flex align-items-center gap-2" });
   const body = el("div", { class: "modal-body pt-2 small" });
   // 차트 탭 때문에 modal-xl — lg 폭에서는 1분봉이 읽히지 않는다.
   const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
     el("div", { class: "modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable" },
       el("div", { class: "modal-content" }, [
         el("div", { class: "modal-header py-2" }, [
-          title,
+          el("div", { class: "d-flex align-items-center flex-wrap gap-2" }, [title, tierBox]),
           el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
         ]),
         body,
@@ -219,9 +221,50 @@ function _ensureModal() {
     if (b) _onStockTab(b.dataset.tab);
   });
   modalEl.addEventListener("hidden.bs.modal", _chartTimerStop);
-  Object.assign(_STOCK_MODAL, { el: modalEl, title, tabs,
+  Object.assign(_STOCK_MODAL, { el: modalEl, title, tabs, tierBox,
                                 modal: new bootstrap.Modal(modalEl) });
   return _STOCK_MODAL;
+}
+
+// ---- 매매/수집전용 전환 — 종목명 옆 뱃지+버튼 (감시목록 밖 종목은 표시만) ----
+
+async function _loadTier(code) {
+  const m = _STOCK_MODAL;
+  m.tierBox.innerHTML = "";
+  let entry = null;
+  try {
+    const d = await fetchJSON("/api/trading/watchlist");
+    entry = (d.entries || []).find((e) => e.code === code) || null;
+  } catch (e) { return; }   // 조회 실패면 전환 UI 를 그리지 않는다 — 오조작 방지
+  if (m.code !== code) return;
+  if (!entry) {
+    m.tierBox.appendChild(el("span", { class: "badge text-bg-light text-dark",
+      title: "감시목록에 없는 종목 — 편입은 발굴·감시 페이지에서" }, "감시목록에 없음"));
+    return;
+  }
+  const cur = !!entry.collect_only;
+  m.tierBox.appendChild(el("span",
+    { class: "badge text-bg-" + (cur ? "secondary" : "success") },
+    cur ? "수집전용" : "매매"));
+  const btn = el("button", {
+    class: "btn btn-sm btn-outline-" + (cur ? "success" : "secondary"), type: "button",
+    title: cur ? "매매 대상으로 전환(신호·주문 활성)" : "수집전용으로 전환(매매 제외)",
+  }, cur ? "매매로" : "수집전용으로");
+  btn.onclick = async () => {
+    // 매매 방향 전환만 확인을 받는다 — 신호·자동주문 대상이 되는 실거래
+    // 방향이라 보수적으로(수집전용 전환은 매매를 좁히는 쪽이라 즉시).
+    if (cur && !confirm(`${m.name || code} 을(를) 매매 대상으로 전환합니다.\n`
+        + "신호 평가·주문 제안(자동승인 켜져 있으면 자동발주) 대상이 됩니다.")) return;
+    btn.disabled = true;
+    try {
+      await postJSON("/api/trading/watchlist/mode", { code, collect_only: !cur });
+      _loadTier(code);        // 서버 확정값으로 다시 그린다
+    } catch (e) {
+      alert("전환 실패: " + e.message);
+      btn.disabled = false;
+    }
+  };
+  m.tierBox.appendChild(btn);
 }
 
 // 키움은 가격에 전일대비 방향 부호를 붙여 보낸다(현재가 '-208500' 은 마이너스
@@ -617,6 +660,7 @@ export function openStockModal(code, name, opts = {}) {
   // 모달이 떠 있는 동안의 탭 전환은 재조회하지 않는다.
   m.loaded = {};
   m.modal.show();
+  _loadTier(c);                    // 열 때마다 tier 최신값(전환 버튼 포함)
   const tab = opts.tab || "info";
   m.tabs.show(tab);
   _onStockTab(tab);
