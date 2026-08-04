@@ -1,5 +1,6 @@
 // 트레이딩 그룹 페이지(매매 데스크·발굴감시·성과백테스트) 공용 헬퍼.
 import { badge, el, fetchJSON } from "../app.js";
+import { createProChart, MA_DEFS } from "../chart.js";
 
 export async function postJSON(path, body) {
   const res = await fetch(path, {
@@ -162,7 +163,12 @@ export function makeGearModal(container, title, { icon = "gear-fill", size = "mo
 // 곳과 el() 로 만드는 곳이 섞여 있어, 노드마다 onclick 을 다는 방식이면 절반은
 // 적용되지 않는다. 위임이면 `data-stock` 속성만 있으면 어느 쪽이든 동작한다.
 
-const _STOCK_MODAL = { el: null, modal: null, body: null, title: null };
+// 모달은 탭 4개(기본정보·1분봉·뉴스공시·엔진판단)로 나뉜다 — 매매 데스크에
+// 상시 노출되던 1분봉 카드를 여기로 이관(사용자 결정 2026-08-04). 상시 폴링이
+// 사라지고 모달이 열려 있는 동안만 갱신하므로 API 부담은 오히려 준다.
+// loaded 는 코드 전환 시 비우는 지연 로드 플래그 — 탭을 열 때만 조회한다.
+const _STOCK_MODAL = { el: null, modal: null, title: null, tabs: null,
+                       code: "", name: "", loaded: {}, chart: null, timer: null };
 
 /** "종목명 (코드)" 클릭 링크 — innerHTML 문자열용. */
 export function stockHTML(code, name, { plain = false } = {}) {
@@ -185,8 +191,9 @@ function _ensureModal() {
   if (_STOCK_MODAL.modal) return _STOCK_MODAL;
   const title = el("h5", { class: "modal-title" }, "종목 정보");
   const body = el("div", { class: "modal-body pt-2 small" });
+  // 차트 탭 때문에 modal-xl — lg 폭에서는 1분봉이 읽히지 않는다.
   const modalEl = el("div", { class: "modal fade", tabindex: "-1" },
-    el("div", { class: "modal-dialog modal-dialog-centered modal-lg modal-dialog-scrollable" },
+    el("div", { class: "modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable" },
       el("div", { class: "modal-content" }, [
         el("div", { class: "modal-header py-2" }, [
           title,
@@ -198,7 +205,21 @@ function _ensureModal() {
                          "data-bs-dismiss": "modal" }, "닫기")),
       ])));
   document.body.appendChild(modalEl);
-  Object.assign(_STOCK_MODAL, { el: modalEl, body, title,
+  const tabs = makeTabs([
+    { id: "info", label: "기본정보", icon: "info-circle" },
+    { id: "chart", label: "1분봉 차트", icon: "graph-up" },
+    { id: "news", label: "뉴스·공시", icon: "newspaper" },
+    { id: "engine", label: "엔진 판단", icon: "cpu" },
+  ]);
+  tabs.mount(body);
+  // makeTabs 의 show 는 클로저라 밖에서 감쌀 수 없다 — nav 버블링으로 탭 전환을
+  // 잡아 지연 로드를 건다(버튼 자체 onclick 이 먼저 돌아 pane 은 이미 보인다).
+  tabs.nav.addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-tab]");
+    if (b) _onStockTab(b.dataset.tab);
+  });
+  modalEl.addEventListener("hidden.bs.modal", _chartTimerStop);
+  Object.assign(_STOCK_MODAL, { el: modalEl, title, tabs,
                                 modal: new bootstrap.Modal(modalEl) });
   return _STOCK_MODAL;
 }
@@ -270,24 +291,24 @@ const BASIC_GROUPS = [
   ]],
 ];
 
-async function _render(code, name) {
-  const m = _ensureModal();
-  m.title.innerHTML = `<i class="bi bi-graph-up me-1"></i>${name || ""} `
-                    + `<span class="text-secondary">${code}</span>`;
-  m.body.innerHTML = '<div class="text-secondary">불러오는 중…</div>';
-  m.modal.show();
+async function _renderInfo(code, name) {
+  const m = _STOCK_MODAL;
+  m.tabs.set("info", el("div", { class: "text-secondary" }, "불러오는 중…"));
   let d;
   try {
     d = await fetchJSON(`/api/trading/stock/${code}`);
   } catch (e) {
-    m.body.innerHTML = `<div class="text-danger">기본정보 조회 실패: ${e.message}</div>`
-      + '<div class="text-secondary mt-1">키움 API 연결·레이트리밋을 확인하세요.</div>';
+    m.loaded.info = false;      // 다음에 탭을 다시 열면 재시도
+    m.tabs.set("info", el("div", {
+      html: `<div class="text-danger">기본정보 조회 실패: ${e.message}</div>`
+        + '<div class="text-secondary mt-1">키움 API 연결·레이트리밋을 확인하세요.</div>' }));
     return;
   }
+  if (m.code !== code) return;  // 로드 중 다른 종목으로 전환됨 — 늦은 응답은 버린다
   const b = d.basic || {};
   m.title.innerHTML = `<i class="bi bi-graph-up me-1"></i>${b.stk_nm || name || ""} `
                     + `<span class="text-secondary">${code}</span>`;
-  m.body.innerHTML = "";
+  const box = el("div");
 
   // 맨 위 한 줄 — 지금 갖고 있는가, 얼마인가. 나머지는 그 다음이다.
   const head = [];
@@ -295,7 +316,7 @@ async function _render(code, name) {
   else if (d.held === 0) head.push('<span class="badge text-bg-light text-dark">미보유</span>');
   if (d.price != null) head.push(`<span class="fs-5 fw-semibold">${fmt(d.price)}원</span>`);
   if (b.flu_rt != null) head.push(_rate(b.flu_rt));
-  m.body.appendChild(el("div", { class: "d-flex gap-2 align-items-center mb-3", html: head.join(" ") }));
+  box.appendChild(el("div", { class: "d-flex gap-2 align-items-center mb-3", html: head.join(" ") }));
 
   for (const [group, rows] of BASIC_GROUPS) {
     const cells = rows
@@ -304,19 +325,301 @@ async function _render(code, name) {
         + `<div class="text-secondary" style="font-size:.72rem">${label}</div>`
         + `<div>${fn(b[key], b)}</div></div>`);
     if (!cells.length) continue;
-    m.body.appendChild(el("div", { class: "mb-2" }, [
+    box.appendChild(el("div", { class: "mb-2" }, [
       el("div", { class: "fw-semibold border-bottom pb-1 mb-1" }, group),
       el("div", { class: "row g-0", html: cells.join("") }),
     ]));
   }
-  m.body.appendChild(el("div", { class: "text-secondary mt-2", style: "font-size:.72rem" },
+  box.appendChild(el("div", { class: "text-secondary mt-2", style: "font-size:.72rem" },
     `키움 ka10001 · ${d.cached ? "캐시(최대 5분)" : "방금 조회"}`
     + " — 가격은 실시간 스냅샷, 나머지는 기본정보"));
+  m.tabs.set("info", box);
 }
 
-/** 종목 기본정보 모달 열기. 페이지가 직접 부를 수도 있다. */
-export function openStockModal(code, name) {
-  if (/^\d{6}$/.test(String(code || ""))) _render(String(code), name || "");
+// ---- 1분봉 탭 — 매매 데스크 카드에서 이관(동작 동일: 날짜·기간·BB·체결 마커) ----
+
+function _chartTimerStop() {
+  if (_STOCK_MODAL.timer) { clearInterval(_STOCK_MODAL.timer); _STOCK_MODAL.timer = null; }
+}
+
+function _ensureChartPane() {
+  const m = _STOCK_MODAL;
+  if (m.chart) return m.chart;
+  const host = el("div", { style: "width:100%;height:52vh;min-height:300px" });
+  const pro = createProChart(host, { up: "#d64545", down: "#3a6fd8", axis: "time" });
+  const dateInp = el("input", { type: "date", class: "form-control form-control-sm w-auto",
+                                title: "데이터가 있는 날짜만 선택됩니다" });
+  const dateList = el("datalist", { id: "stock-modal-bar-dates" });
+  dateInp.setAttribute("list", "stock-modal-bar-dates");
+  const today = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "오늘");
+  const periodGroup = el("div", { class: "btn-group btn-group-sm" });
+  const periodBtns = [["30분", 30], ["1시간", 60], ["2시간", 120], ["전체", "all"]]
+    .map(([lbl, n]) => {
+      const btn = el("button", { class: "btn btn-outline-secondary", type: "button" }, lbl);
+      btn.onclick = () => {
+        pro.setVisibleCount(n);
+        periodBtns.forEach((x) => x.classList.toggle("active", x === btn));
+      };
+      periodGroup.appendChild(btn);
+      return btn;
+    });
+  const bb = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "볼린저밴드");
+  let bbOn = false;
+  bb.onclick = () => { bbOn = !bbOn; bb.classList.toggle("active", bbOn); pro.setIndicator("bb", bbOn); };
+  const legend = el("div", { class: "small d-flex gap-2 flex-wrap align-items-center ms-auto" },
+    MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`))
+      .concat([
+        el("span", { style: "color:#7a5cff;font-weight:600",
+          title: "실제 매수 체결가 — 삼각형 꼭짓점이 그 가격입니다" }, "▲ 매수"),
+        el("span", { class: "text-secondary", style: "font-weight:600",
+          title: "실제 매도 체결가(이익=빨강 / 손실=파랑). ~ 표시는 실체결 미확인(이론가)" },
+          "▼ 매도"),
+      ]));
+  const st = { host, pro, dateInp, dateList, periodBtns, dates: [], date: "", key: "" };
+  dateInp.onchange = () => {
+    const v = dateInp.value;
+    if (v && st.dates.length && !st.dates.includes(v)) {
+      alert("해당 날짜의 분봉 데이터가 없습니다 (보유: " + st.dates.slice(0, 5).join(", ") + " …)");
+      dateInp.value = st.date || st.dates[0] || "";
+      return;
+    }
+    st.date = (v && v === st.dates[0]) ? "" : v;      // 최신일이면 실시간 모드
+    _chartLoad(true);
+  };
+  today.onclick = () => { st.date = ""; dateInp.value = st.dates[0] || ""; _chartLoad(true); };
+  m.tabs.set("chart", el("div", {}, [
+    el("div", { class: "d-flex align-items-center gap-2 flex-wrap mb-2" },
+      [dateInp, today, dateList, periodGroup, bb,
+       el("span", { class: "small text-secondary" }, "휠 확대·드래그 이동·더블클릭 리셋"), legend]),
+    host,
+  ]));
+  m.chart = st;
+  return st;
+}
+
+async function _chartDates() {
+  const m = _STOCK_MODAL, st = m.chart;
+  try {
+    st.dates = (await fetchJSON(`/api/trading/bars/${m.code}/dates`)).dates || [];
+  } catch (e) { st.dates = []; }
+  st.dateList.innerHTML = "";
+  for (const day of st.dates) st.dateList.appendChild(el("option", { value: day }));
+  if (st.dates.length) {
+    st.dateInp.min = st.dates[st.dates.length - 1];
+    st.dateInp.max = st.dates[0];
+  }
+  st.dateInp.value = st.date || (st.dates[0] || "");
+  st.dateInp.title = st.dates.length
+    ? `데이터 보유 ${st.dates.length}일 (${st.dates[st.dates.length - 1]} ~ ${st.dates[0]})`
+    : "저장된 분봉 없음";
+}
+
+// 체결 오버레이 — 그날 이 종목을 실제로 얼마에 사고팔았는지 차트에 겹쳐 본다.
+async function _chartMarks() {
+  const m = _STOCK_MODAL, st = m.chart;
+  const day = st.date || (st.dates[0] || new Date().toLocaleDateString("sv-SE"));
+  try {
+    st.pro.setMarkers(await fetchJSON(
+      `/api/trading/trades/${m.code}?date=${encodeURIComponent(day)}`));
+  } catch (e) { st.pro.setMarkers(null); }   // 조회 실패는 차트 자체를 막지 않는다
+}
+
+async function _chartLoad(force = false) {
+  const m = _STOCK_MODAL, st = m.chart;
+  if (!m.code || !st) return;
+  try {
+    const q = st.date ? `?tf=1m&date=${st.date}` : "?tf=1m&live=1";
+    const bars = await fetchJSON(`/api/trading/bars/${m.code}${q}`);
+    const key = m.code + "|" + st.date;
+    if (force || key !== st.key) {
+      st.key = key;
+      st.pro.setData(bars);                       // 종목·날짜 전환 → 새로 그림
+      st.periodBtns.forEach((x) => x.classList.remove("active"));
+      _chartMarks();                              // 전환 시에만 체결 재조회
+    } else {
+      st.pro.update(bars);                        // 실시간 갱신 → 확대/이동 보존
+    }
+  } catch (e) { /* 조회 실패 — 다음 주기에 재시도 */ }
+}
+
+async function _showChartTab() {
+  const m = _STOCK_MODAL;
+  const st = _ensureChartPane();
+  if (st.key.split("|")[0] !== m.code) {          // 종목 전환 — 날짜부터 다시
+    st.date = "";
+    await _chartDates();
+  }
+  await _chartLoad(true);
+  // 실시간 갱신은 모달이 열려 있고 이 탭이 보이는 동안만(hidden/탭 전환 시 해제)
+  // — 데스크 상시 카드 시절보다 API 부담이 줄어든 이유가 이 조건이다.
+  _chartTimerStop();
+  m.timer = setInterval(() => { if (!m.chart.date) _chartLoad(false); }, 4000);
+}
+
+// ---- 뉴스·공시 탭 — TNM 수집분(이 종목으로 매칭된 항목) ----
+
+async function _loadNews(code) {
+  const m = _STOCK_MODAL;
+  m.tabs.set("news", el("div", { class: "text-secondary" }, "불러오는 중…"));
+  let items;
+  try {
+    items = (await fetchJSON(`/api/tnm/items?ticker=${code}&limit=30`)).items || [];
+  } catch (e) {
+    m.loaded.news = false;
+    m.tabs.set("news", el("div", { class: "text-danger" }, "TNM 조회 실패: " + e.message));
+    return;
+  }
+  if (m.code !== code) return;
+  if (!items.length) {
+    m.tabs.set("news", el("div", { class: "text-secondary" }, "수집된 뉴스·공시 없음"), 0);
+    return;
+  }
+  const tbl = el("table", { class: "table table-sm table-hover small mb-0" });
+  tbl.appendChild(el("thead", {}, el("tr", {
+    html: "<th>시각</th><th>출처</th><th>점수</th><th>분류</th><th>제목</th>" })));
+  const tb = el("tbody");
+  for (const it of items) {
+    tb.appendChild(el("tr", {
+      html: `<td class="text-secondary text-nowrap">${(it.published_at || "").slice(5, 16).replace("T", " ")}</td>`
+        + `<td class="text-nowrap">${it.source || "-"}</td>`
+        + `<td>${it.score ?? "-"}</td>`
+        + `<td class="text-nowrap">${it.status === "ok" ? (it.category || "-") : it.status}</td>`
+        + `<td>${it.url ? `<a href="${it.url}" target="_blank" rel="noopener">${it.title}</a>` : it.title}</td>` }));
+  }
+  tbl.appendChild(tb);
+  m.tabs.set("news", el("div", { class: "table-responsive" }, tbl), items.length);
+}
+
+// ---- 엔진 판단 탭 — 발굴 엔진(tier·점수·소스·결정) + 매매 신호(차단 사유 포함) ----
+
+async function _loadEngine(code) {
+  const m = _STOCK_MODAL;
+  m.tabs.set("engine", el("div", { class: "text-secondary" }, "불러오는 중…"));
+  // 조회 둘은 서로 독립 — 한쪽 실패가 다른 쪽 표시를 막지 않는다.
+  let sc = null, sigs = null;
+  try { sc = await fetchJSON("/api/trading/scout"); } catch (e) { /* 아래에서 표기 */ }
+  try { sigs = await fetchJSON("/api/trading/signals"); } catch (e) { /* 아래에서 표기 */ }
+  if (m.code !== code) return;
+  const box = el("div");
+  const section = (label, node) => box.appendChild(el("div", { class: "mb-3" }, [
+    el("div", { class: "fw-semibold border-bottom pb-1 mb-1" }, label), node]));
+
+  if (!sc) {
+    section("발굴 엔진", el("div", { class: "text-danger" }, "발굴 엔진 조회 실패"));
+  } else {
+    const wl = (sc.watchlist || []).find((w) => w.code === code);
+    const cand = (sc.candidates || []).find((c) => c.code === code);
+    const stateBits = [];
+    if (wl) {
+      stateBits.push(`<span class="badge text-bg-${wl.tier === "trade" ? "danger" : "secondary"}">`
+        + `${wl.tier === "trade" ? "매매 감시" : "수집전용"}</span>`);
+      if (wl.protected) stateBits.push('<span class="badge text-bg-info">보호(보유·수동)</span>');
+    } else {
+      stateBits.push('<span class="badge text-bg-light text-dark">감시목록에 없음</span>');
+    }
+    if (cand) {
+      stateBits.push(`후보 점수 <b>${cand.score}</b> · 소스 ${cand.group_count}그룹`
+        + ` (${(cand.sources || []).join(", ") || "-"})`);
+    }
+    section("발굴 엔진", el("div", { html: stateBits.join(" ") }));
+    if (cand && cand.evidence && cand.evidence.length) {
+      section("근거", el("div", { class: "text-secondary",
+        html: [].concat(cand.evidence).map((s) => String(s)).join("<br>") }));
+    }
+    // 소스별 살아있는 신호 — 취합 전 원시 관점(어느 소스가 언제 봤는가)
+    const srcRows = [];
+    for (const [src, rows] of Object.entries(sc.by_source || {})) {
+      for (const r of rows) if (r.code === code) srcRows.push({ src, ...r });
+    }
+    if (srcRows.length) {
+      const tbl = el("table", { class: "table table-sm small mb-0" });
+      tbl.appendChild(el("thead", {}, el("tr", {
+        html: "<th>소스</th><th>종류</th><th>세기</th><th>유효세기</th><th>관측</th>" })));
+      const tb = el("tbody");
+      for (const r of srcRows.sort((a, b) => b.effective - a.effective)) {
+        tb.appendChild(el("tr", {
+          html: `<td>${r.src}</td><td>${r.kind || "-"}</td><td>${r.strength}</td>`
+            + `<td>${r.effective}</td>`
+            + `<td class="text-secondary">${(r.observed_at || "").slice(5, 16).replace("T", " ")}</td>` }));
+      }
+      tbl.appendChild(tb);
+      section(`소스 신호 (${srcRows.length})`, el("div", { class: "table-responsive" }, tbl));
+    }
+    const decs = (sc.decisions || []).filter((d) => d.code === code).slice(0, 10);
+    if (decs.length) {
+      const tbl = el("table", { class: "table table-sm small mb-0" });
+      const tb = el("tbody");
+      for (const d of decs) {
+        tb.appendChild(el("tr", {
+          html: `<td class="text-secondary text-nowrap">${(d.ts || "").slice(5, 16).replace("T", " ")}</td>`
+            + `<td>${d.action || "-"}</td><td>${d.reason || ""}</td>` }));
+      }
+      tbl.appendChild(tb);
+      section("최근 승격·강등 결정", el("div", { class: "table-responsive" }, tbl));
+    }
+  }
+
+  if (!sigs) {
+    section("매매 신호", el("div", { class: "text-danger" }, "신호 조회 실패"));
+  } else {
+    const mine = (Array.isArray(sigs) ? sigs : []).filter((s) => s.symbol === code);
+    if (!mine.length) {
+      section("매매 신호(최근)", el("div", { class: "text-secondary" }, "최근 신호 없음"));
+    } else {
+      const tbl = el("table", { class: "table table-sm small mb-0" });
+      tbl.appendChild(el("thead", {}, el("tr", {
+        html: "<th>시각</th><th>규칙</th><th>수량</th><th>상태</th><th>비고</th>" })));
+      const tb = el("tbody");
+      for (const s of mine) {
+        tb.appendChild(el("tr", {
+          html: `<td class="text-secondary text-nowrap">${(s.ts || "").slice(11, 16)}</td>`
+            + `<td>${s.rule || "-"}</td><td>${s.qty ?? "-"}</td>`
+            + `<td>${s.actionable ? '<span class="badge text-bg-success">발주 대상</span>'
+                                  : '<span class="badge text-bg-secondary">미발주</span>'}</td>`
+            + `<td class="text-secondary">${s.note || s.guard_warn || ""}</td>` }));
+      }
+      tbl.appendChild(tb);
+      section(`매매 신호(최근 ${mine.length}건)`, el("div", { class: "table-responsive" }, tbl));
+    }
+  }
+  m.tabs.set("engine", box);
+}
+
+function _onStockTab(id) {
+  const m = _STOCK_MODAL;
+  if (!m.code) return;
+  _chartTimerStop();               // 차트 탭을 떠나면 실시간 갱신도 멈춘다
+  if (id === "info") {
+    if (!m.loaded.info) { m.loaded.info = true; _renderInfo(m.code, m.name); }
+  } else if (id === "chart") {
+    _showChartTab();
+  } else if (id === "news") {
+    if (!m.loaded.news) { m.loaded.news = true; _loadNews(m.code); }
+  } else if (id === "engine") {
+    if (!m.loaded.engine) { m.loaded.engine = true; _loadEngine(m.code); }
+  }
+}
+
+/** 종목 모달 열기. opts.tab 으로 시작 탭 지정(info|chart|news|engine). */
+export function openStockModal(code, name, opts = {}) {
+  const c = String(code || "").trim();
+  if (!/^\d{6}$/.test(c)) return;
+  const m = _ensureModal();
+  if (m.code !== c) {              // 종목 전환 — 차트 키·날짜 선택 초기화
+    m.code = c;
+    m.name = name || "";
+    if (m.chart) { m.chart.key = ""; m.chart.date = ""; m.chart.dates = []; }
+    m.title.innerHTML = `<i class="bi bi-graph-up me-1"></i>${m.name} `
+                      + `<span class="text-secondary">${c}</span>`;
+  }
+  // 열 때마다 지연 로드 플래그를 비운다 — 같은 종목을 다시 열어도 엔진 판단·
+  // 신호는 그 사이 변했을 수 있다(기본정보는 서버 5분 캐시라 부담 없음).
+  // 모달이 떠 있는 동안의 탭 전환은 재조회하지 않는다.
+  m.loaded = {};
+  m.modal.show();
+  const tab = opts.tab || "info";
+  m.tabs.show(tab);
+  _onStockTab(tab);
 }
 
 // document 위임 — 어느 페이지에서 만든 링크든 한 번의 등록으로 동작한다.

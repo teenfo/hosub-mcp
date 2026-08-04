@@ -1,10 +1,12 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
-import { createProChart, MA_DEFS } from "../chart.js";
-import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge, stockHTML } from "./tradelib.js";
+import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge, stockHTML,
+         openStockModal } from "./tradelib.js";
 
-// 매매 데스크 (트레이딩 그룹): 장중 실행에 필요한 것만 — 상태·가드·승인대기·신호·1분봉.
+// 매매 데스크 (트레이딩 그룹): 장중 실행에 필요한 것만 — 상태·가드·승인대기·신호.
 // 종목 소싱은 '발굴·감시', 리뷰는 '성과·백테스트' 페이지가 담당한다.
+// 1분봉 차트는 상시 카드에서 빼서 공통 종목 모달의 탭으로 옮겼다(사용자 결정
+// 2026-08-04) — 종목명 클릭(기본정보) 또는 차트 아이콘(차트 탭 바로)으로 연다.
 
 // 실시간 가격 스트림(SSE) — 페이지 재진입 시 이전 연결을 닫기 위한 싱글턴.
 // 스트림이 죽어도 2초 폴링(refreshPrices)이 폴백이라 화면은 계속 움직인다.
@@ -31,16 +33,15 @@ export default {
 
     const status = card("트레이딩 상태", null, { icon: "bi-activity" });
     const pending = card("승인 대기 주문", null, { wide: true, icon: "bi-hourglass-split" });
-    const chart = card("1분봉 차트", null, { wide: true, icon: "bi-candlestick" });
     const signals = card("최근 신호", null, { wide: true, icon: "bi-lightning" });
     const guardC = card("일일 목표·가드", null, { icon: "bi-shield-check" });
     const posC = card("보유 포지션 · 청산 관리", null, { wide: true, icon: "bi-briefcase" });
     // 각 카드를 독립 그리드 아이템으로 등록(id·기본 폭). 편집 모드에서 자유 배치·크기조절.
+    // (구 "chart" 카드는 종목 모달 탭으로 이관 — 저장된 레이아웃에 남은 id 는 무시된다)
     const CARDS = [
       ["status", status, 6], ["guard", guardC, 6],
       ["positions", posC, 12],
       ["pending", pending, 12], ["signals", signals, 12],
-      ["chart", chart, 12],
     ];
     CARDS.forEach(([id, c, w], i) => {
       c.col.dataset.cardId = id;
@@ -483,150 +484,20 @@ export default {
       }
     };
 
-    // 1분봉도 상용급 인터랙티브 차트(시각 축) — 실시간 갱신은 확대/이동을 보존.
-    const mHost = el("div", { style: "width:100%;height:52vh;min-height:300px" });
-    const symbolSel = el("select", { class: "form-select form-select-sm w-auto" });
-    const mChart = createProChart(mHost, { up: "#d64545", down: "#3a6fd8", axis: "time" });
-    const mPeriods = [["30분", 30], ["1시간", 60], ["2시간", 120], ["전체", "all"]];
-    const mPeriodGroup = el("div", { class: "btn-group btn-group-sm" });
-    const mPeriodBtns = mPeriods.map(([lbl, n]) => {
-      const b = el("button", { class: "btn btn-outline-secondary", type: "button" }, lbl);
-      b.onclick = () => { mChart.setVisibleCount(n); mPeriodBtns.forEach((x) => x.classList.toggle("active", x === b)); };
-      mPeriodGroup.appendChild(b);
-      return b;
-    });
-    const mBB = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "볼린저밴드");
-    let mBBon = false;
-    mBB.onclick = () => { mBBon = !mBBon; mBB.classList.toggle("active", mBBon); mChart.setIndicator("bb", mBBon); };
-    const mLegend = el("div", { class: "small d-flex gap-2 flex-wrap align-items-center ms-auto" },
-      MA_DEFS.map((d) => el("span", { style: `color:${d.color};font-weight:600` }, `━ MA${d.p}`))
-        .concat([
-          el("span", { style: "color:#7a5cff;font-weight:600",
-            title: "실제 매수 체결가 — 삼각형 꼭짓점이 그 가격입니다" }, "▲ 매수"),
-          el("span", { class: "text-secondary", style: "font-weight:600",
-            title: "실제 매도 체결가(이익=빨강 / 손실=파랑). ~ 표시는 실체결 미확인(이론가)" },
-            "▼ 매도"),
-        ]));
-    // 분봉은 하루 단위로 본다 — 기본 오늘(최근 거래일), 데이터 있는 날짜만 선택 가능
-    const mDate = el("input", { type: "date", class: "form-control form-control-sm w-auto",
-                                title: "데이터가 있는 날짜만 선택됩니다" });
-    const mDateList = el("datalist", { id: "bar-dates" });
-    const mToday = el("button", { class: "btn btn-sm btn-outline-secondary", type: "button" }, "오늘");
-    chart.body.append(
-      el("div", { class: "d-flex align-items-center gap-2 flex-wrap mb-2" },
-        [symbolSel, mDate, mToday, mDateList, mPeriodGroup, mBB,
-         el("span", { class: "small text-secondary" }, "휠 확대·드래그 이동·더블클릭 리셋"), mLegend]),
-      mHost,
-    );
-
+    // 감시목록 스냅샷 — 변경 감지(loadPositions 트리거)에만 쓴다.
     let watch = {};
-    let mCurSym = "";
-    let mCurDate = "";          // "" = 오늘(최근 거래일)
-    let mDates = [];            // 데이터 보유 날짜 (최신순)
 
-    const loadDates = async () => {
-      if (!symbolSel.value) return;
-      try {
-        const d = await fetchJSON(`/api/trading/bars/${symbolSel.value}/dates`);
-        mDates = d.dates || [];
-      } catch (e) { mDates = []; }
-      // 데이터 있는 날짜만 선택 가능하도록 범위·목록 제한 (브라우저 기본 표기)
-      mDateList.innerHTML = "";
-      for (const day of mDates) mDateList.appendChild(el("option", { value: day }));
-      mDate.setAttribute("list", "bar-dates");
-      if (mDates.length) {
-        mDate.min = mDates[mDates.length - 1];
-        mDate.max = mDates[0];
-      }
-      mDate.value = mCurDate || (mDates[0] || "");
-      mDate.title = mDates.length
-        ? `데이터 보유 ${mDates.length}일 (${mDates[mDates.length - 1]} ~ ${mDates[0]})`
-        : "저장된 분봉 없음";
-    };
-
-    // 체결 오버레이 — 그날 이 종목을 실제로 얼마에 사고팔았는지 차트에 겹쳐 본다.
-    const loadMarks = async () => {
-      if (!symbolSel.value) return;
-      const day = mCurDate || (mDates[0] || new Date().toLocaleDateString("sv-SE"));
-      try {
-        mChart.setMarkers(await fetchJSON(
-          `/api/trading/trades/${symbolSel.value}?date=${encodeURIComponent(day)}`));
-      } catch (e) { mChart.setMarkers(null); }   // 조회 실패는 차트 자체를 막지 않는다
-    };
-
-    const loadChart = async (force = false) => {
-      if (!symbolSel.value) return;
-      try {
-        const q = mCurDate ? `?tf=1m&date=${mCurDate}` : "?tf=1m&live=1";
-        const bars = await fetchJSON(`/api/trading/bars/${symbolSel.value}${q}`);
-        const key = symbolSel.value + "|" + mCurDate;
-        if (force || key !== mCurSym) {
-          mCurSym = key;
-          mChart.setData(bars);                       // 종목·날짜 전환 → 새로 그림
-          mPeriodBtns.forEach((x) => x.classList.remove("active"));
-          loadMarks();                                // 전환 시에만 체결 재조회
-        } else {
-          mChart.update(bars);                        // 실시간 갱신 → 확대/이동 보존
-        }
-      } catch (e) { /* 서비스 다운 시 상태 카드에 표시됨 */ }
-    };
-    symbolSel.onchange = async () => { mCurDate = ""; await loadDates(); loadChart(true); };
-    mDate.onchange = () => {
-      const v = mDate.value;
-      if (v && mDates.length && !mDates.includes(v)) {
-        alert("해당 날짜의 분봉 데이터가 없습니다 (보유: " + mDates.slice(0, 5).join(", ") + " …)");
-        mDate.value = mCurDate || mDates[0] || "";
-        return;
-      }
-      mCurDate = (v && v === mDates[0]) ? "" : v;     // 최신일이면 실시간 모드
-      loadChart(true);
-    };
-    mToday.onclick = () => { mCurDate = ""; mDate.value = mDates[0] || ""; loadChart(true); };
-
-    // --- 종목 → 1분봉 차트 연결 ---
-    // 신호·주문 표의 종목명을 누르면 차트 카드가 그 종목으로 바뀐다.
-    // 감시목록에서 빠진 종목(과거 주문 등)도 분봉이 남아 있으면 볼 수 있어야 하므로
-    // 드롭다운에 임시로 유지한다(chartExtra) — 감시목록 갱신에도 지워지지 않는다.
-    const chartExtra = {};
-    const rebuildSymbols = () => {
-      const keep = symbolSel.value;
-      const all = { ...watch, ...chartExtra };
-      symbolSel.innerHTML = "";
-      Object.entries(all)
-        .sort((a, b) => String(a[1]).localeCompare(String(b[1]), "ko"))   // 종목명 오름차순
-        .forEach(([code, nm]) =>
-          symbolSel.appendChild(el("option", { value: code }, `${nm} (${code})`)));
-      if (keep && all[keep]) symbolSel.value = keep;
-    };
-
-    const showOnChart = async (symbol, name) => {
-      if (!symbol) return;
-      if (!watch[symbol] && !chartExtra[symbol]) {
-        chartExtra[symbol] = name || symbol;
-        rebuildSymbols();
-      }
-      const jump = () => chart.col.scrollIntoView({ behavior: "smooth", block: "start" });
-      if (symbolSel.value === symbol) { jump(); return; }   // 이미 그 종목이면 이동만
-      symbolSel.value = symbol;
-      mCurDate = "";
-      jump();
-      await loadDates();
-      loadChart(true);
-    };
-
-    /** 표의 '종목명 (코드)' 셀 — 클릭하면 1분봉 차트로 이동.
-     *  a[href="#"] 는 해시 라우터(#/페이지)를 건드리므로 button 을 쓴다. */
-    // 종목명은 기본정보 모달(공통), 차트 아이콘은 이 화면 전용 동작.
-    // 클릭 하나에 둘을 묶으면 어느 쪽이 뜰지 예측할 수 없다 — 눌러야 할 것을
-    // 눈에 보이게 나눈다.
+    /** 표의 '종목명 (코드)' 셀 — 종목명은 기본정보 모달(공통), 차트 아이콘은
+     *  같은 모달의 1분봉 탭으로 바로 연다. 클릭 하나에 둘을 묶으면 어느 쪽이
+     *  뜰지 예측할 수 없다 — 눌러야 할 것을 눈에 보이게 나눈다. */
     const symbolCell = (symbol, name) => {
-      const chart = el("button", {
+      const chartBtn = el("button", {
         type: "button", class: "btn btn-link p-0 border-0 ms-1 align-baseline text-secondary",
-        title: "1분봉 차트에서 보기",
+        title: "1분봉 차트 보기",
       }, el("i", { class: "bi bi-graph-up" }));
-      chart.onclick = () => showOnChart(symbol, name);
+      chartBtn.onclick = () => openStockModal(symbol, name, { tab: "chart" });
       return el("td", { class: "text-nowrap" },
-                [el("span", { html: stockHTML(symbol, name) }), chart]);
+                [el("span", { html: stockHTML(symbol, name) }), chartBtn]);
     };
 
     // 데스크 설정(손절 전환선 계산용). renderDesk 가 갱신한다 — 보유 표와
@@ -1146,8 +1017,6 @@ export default {
       }
       if (s.watchlist && JSON.stringify(s.watchlist) !== JSON.stringify(watch)) {
         watch = s.watchlist;
-        rebuildSymbols();
-        loadDates().then(() => loadChart(true));
         loadPositions();
       }
     };
@@ -1382,7 +1251,7 @@ export default {
     ctx.addTimer(setInterval(() => { loadStatus(); loadOrders(); loadSignals(); }, 10_000));
     ctx.addTimer(setInterval(loadRisk, 30_000));
     ctx.addTimer(setInterval(loadPositions, 15_000));
-    ctx.addTimer(setInterval(() => { if (!mCurDate) loadChart(); }, 5_000)); // 실시간 분봉(오늘일 때만)
-    ctx.addTimer(setInterval(loadMarks, 20_000));    // 새 체결 반영(오늘·과거 공통)
+    // (구 분봉 카드의 5초/20초 폴링은 종목 모달 이관으로 제거 — 모달이 열려
+    //  있는 동안만 tradelib 쪽 타이머가 돈다)
   },
 };
