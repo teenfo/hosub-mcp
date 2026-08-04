@@ -27,6 +27,24 @@
 엔진 루프는 30초마다 도는데 매번 적재하면 하루 1,000행이 된다. `base_regime`
 은 10분 캐시, `gap_bias` 는 시가 확정 후 거의 고정이라 실제로는 하루 몇 번만
 바뀐다. 네 값의 조합이 직전과 같으면 건너뛴다 — 이력의 정보량은 그대로다.
+
+## intraday(장중 방향) 관측 — 판정 미사용, 원장만 (2026-08-04 편입)
+
+`intraday_bias`/`intraday_med` 는 감시목록 '시가 대비 현재가' 등락률 중앙값
+(임계는 gap 과 동일 ±0.5%)이다. **유효국면 합성에 넣지 않는다** — 편입 계기는
+2026-08-04 실측: 개장 갭업→하락 전환일에 유효국면이 아침 강세(night_bias)에
+갇혀 인버스 신호 3건이 차단됐다(09:29 114800 1,137 → 10:00 고점 +3.0%).
+장중 전환을 반영할 입력이 없다는 구조적 공백의 첫 비용 실측이다. 반대 방향
+(휩쏘일에 전환을 따라가 손해)의 비용은 아직 못 쟀으므로 게이트에 넣지 않는다.
+
+**판정 기준 (사전 확정 — 결과를 본 뒤 바꾸면 측정 폐기), 2026-09-01경:**
+- 표본: 장중 관측이 아침 유효국면과 **어긋난 전환일** ≥ 15일. 미달이면 연기 보고.
+- 반사실 평가: 전환 감지 시각 이후 (a) 차단됐던 인버스 신호를 허용했을 때의
+  브래킷 실현 R 합 − (b) 전환이 거짓이었던 날(종가가 아침 방향으로 회귀)
+  허용분의 손실 합. 합이 양수이고 t≥2 면 게이트 입력 승격을 **제안**(적용은
+  사용자 결정), 아니면 관측 폐기·measurement.md 기록.
+- dedup 은 intraday_bias 까지 포함 5값 기준 — 중앙값(원시)은 전이 시점 값만
+  남는다. 경계 진동 시 하루 수십 행까지 가능하나 관측 전용이라 허용.
 """
 import logging
 import sqlite3
@@ -57,26 +75,42 @@ def _conn() -> sqlite3.Connection:
         )"""
     )
     conn.execute("CREATE INDEX IF NOT EXISTS ix_regime_date ON regime_log (date)")
+    # 장중 방향 관측(2026-08-04) — 기존 컬럼 의미 불변, 추가만(연속성 규약).
+    for ddl in ("ALTER TABLE regime_log ADD COLUMN intraday_bias TEXT",
+                "ALTER TABLE regime_log ADD COLUMN intraday_med REAL"):
+        try:
+            conn.execute(ddl)
+        except sqlite3.OperationalError:
+            pass                      # 이미 추가됨
     return conn
 
 
 def record(night_bias: str, base_regime: str, gap_bias: str,
-           effective: str, now: datetime | None = None) -> bool:
-    """네 값을 append. 직전과 같으면 쓰지 않는다. 쓴 경우 True."""
+           effective: str, now: datetime | None = None,
+           intraday_bias: str | None = None,
+           intraday_med: float | None = None) -> bool:
+    """값을 append. 직전과 같으면 쓰지 않는다. 쓴 경우 True.
+
+    dedup 은 intraday_bias 까지 포함한 5값 기준 — 장중 방향 전이도 이력에
+    남아야 반사실 평가(전환 감지 시각)가 가능하다. intraday_med(원시 %)는
+    비교에 넣지 않는다: 매 사이클 미세하게 변해 dedup 이 무력화된다.
+    """
     now = now or datetime.now(KST)
     date = now.date().isoformat()
-    row = (night_bias, base_regime, gap_bias, effective)
+    row = (night_bias, base_regime, gap_bias, effective, intraday_bias)
     try:
         with _conn() as conn:
             last = conn.execute(
-                "SELECT night_bias, base_regime, gap_bias, effective FROM regime_log"
+                "SELECT night_bias, base_regime, gap_bias, effective,"
+                " intraday_bias FROM regime_log"
                 " WHERE date=? ORDER BY id DESC LIMIT 1", (date,)).fetchone()
             if last and tuple(last) == row:
                 return False
             conn.execute(
                 "INSERT INTO regime_log (date, ts, night_bias, base_regime,"
-                " gap_bias, effective) VALUES (?,?,?,?,?,?)",
-                (date, now.isoformat(timespec="seconds"), *row))
+                " gap_bias, effective, intraday_bias, intraday_med)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (date, now.isoformat(timespec="seconds"), *row, intraday_med))
     except Exception:  # noqa: BLE001 - 기록 실패가 매매를 막으면 안 된다
         # sqlite3.Error 만 잡으면 디스크·권한 문제(OSError)가 그대로 올라가
         # _effective_regime() 을 터뜨리고, 그러면 신호 평가 전체가 멈춘다.

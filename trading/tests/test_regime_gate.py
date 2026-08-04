@@ -51,7 +51,7 @@ def test_effective_regime_blends_base_gap_night(tmp_path, monkeypatch):
     eng = SignalEngine()
     monkeypatch.setattr(eng, "_base_regime", lambda: "강세")   # 전일 breadth 강세
     # 시가 갭 하락(약세) → 강세 base 를 한 단계 낮춰 중립
-    monkeypatch.setattr(eng, "_open_gap_bias", lambda: "약세")
+    monkeypatch.setattr(eng, "_gap_and_drift", lambda: ("약세", "중립", None))
     monkeypatch.setattr(eng, "_read_night_bias", lambda: "중립")
     assert eng._effective_regime() == "중립"
     # 야간리포트(미국장) 약세면 그것을 기준으로, 갭까지 약세면 약세 유지
@@ -94,3 +94,51 @@ async def test_run_once_gates_inverse_in_bull(monkeypatch):
     assert found and found[0]["actionable"] is False
     assert "국면 게이트" in found[0]["note"]
     assert calls == []                                # 강세장 인버스 매수 미발주
+
+
+# --- 장중 방향 관측(2026-08-04) — 판정 미사용, regime_log 적재용 계산 검증 ---
+
+def _bar_df(open_px, close_px):
+    import pandas as pd
+    idx = pd.DatetimeIndex([pd.Timestamp("2026-08-04 09:30:00")])
+    return pd.DataFrame({"open": [open_px], "high": [max(open_px, close_px)],
+                         "low": [min(open_px, close_px)], "close": [close_px],
+                         "volume": [1]}, index=idx)
+
+
+def test_장중_방향은_시가_대비_현재가_중앙값으로_계산된다(monkeypatch):
+    """8/4 실측(갭업→하락 전환)의 관측 경로 — 시가 대비 −1% 다수면 약세."""
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        {"use_open_gap": True, "open_gap_th": 0.5,
+                         "observe_intraday": True})
+    monkeypatch.setattr(settings, "WATCHLIST",
+                        {f"00000{i}": f"S{i}" for i in range(5)})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_today_df", lambda s: (_bar_df(100.0, 99.0), None))
+    gap, ib, med = eng._gap_and_drift()
+    assert gap == "중립"                  # prev 종가 없음 — 갭 표본 0
+    assert ib == "약세" and med == -1.0
+
+
+def test_장중_관측_표본_부족이면_중립_None(monkeypatch):
+    """못 잰 것을 0(중립 확신)으로 세지 않는다 — 값은 NULL 로 남는다."""
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        {"use_open_gap": True, "open_gap_th": 0.5,
+                         "observe_intraday": True})
+    monkeypatch.setattr(settings, "WATCHLIST", {"000001": "S1", "000002": "S2"})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_today_df", lambda s: (_bar_df(100.0, 98.0), None))
+    gap, ib, med = eng._gap_and_drift()
+    assert (ib, med) == ("중립", None)
+
+
+def test_장중_관측은_config_로_끈다(monkeypatch):
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        {"use_open_gap": True, "open_gap_th": 0.5,
+                         "observe_intraday": False})
+    monkeypatch.setattr(settings, "WATCHLIST",
+                        {f"00000{i}": f"S{i}" for i in range(5)})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_today_df", lambda s: (_bar_df(100.0, 99.0), None))
+    gap, ib, med = eng._gap_and_drift()
+    assert (ib, med) == ("중립", None)
