@@ -258,7 +258,8 @@ class SignalEngine:
                 "flatten": flatten, "flatten_reason": flat_why,
                 "equity": self.equity, "halted": halted, "reason": why,
                 "regime": self.regime, "base_regime": self.base_regime,
-                "gap_bias": self.gap_bias, "night_bias": self.night_bias}
+                "gap_bias": self.gap_bias, "night_bias": self.night_bias,
+                "intraday_bias": self.intraday_bias}
 
     def _today_df(self, symbol: str):
         df = store.load_bars(symbol, "1m", limit=800)
