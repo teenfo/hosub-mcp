@@ -1,7 +1,7 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
 import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge, stockHTML,
-         openStockModal } from "./tradelib.js";
+         openStockModal, regimeBadge } from "./tradelib.js";
 import { renderJournalDay } from "./journal.js";
 
 // 매매 데스크 (트레이딩 그룹): 장중 실행에 필요한 것만 — 상태·가드·승인대기·신호.
@@ -306,10 +306,7 @@ export default {
           `비중 ${r.max_position_weight_pct ? r.max_position_weight_pct + "%" : "무제한"} · 최대 ${r.max_positions ?? 3}종목`),
         el("span", { class: "badge text-bg-light text-dark", title: "신호 스캔 간격 · 돌파 확인" },
           `${r.scan_interval_sec ?? 60}초${r.confirm_on_close ? " · 돌파확인" : ""}`),
-        r.regime ? el("span", {
-          class: "badge text-bg-" + (r.regime === "강세" ? "danger" : r.regime === "약세" ? "primary" : "secondary"),
-          title: `전일 breadth ${r.base_regime || "-"} · 당일 시가갭 ${r.gap_bias || "-"} · 야간리포트 ${r.night_bias || "-"}` },
-          `시장 ${r.regime}${r.regime === "강세" ? " · 인버스 매수 보류" : " · 인버스 매수 허용"}`) : null,
+        r.regime ? regimeBadge(r) : null,   // 국면 표기는 공통 렌더러 하나로(유격 방지)
       ]));
       if (!r.halted && hi > 0 && r.pct < hi) {
         gStatus.appendChild(el("div", { class: "text-secondary mt-1" }, `목표까지 ${(hi - r.pct).toFixed(2)}% 남음`));

@@ -1,6 +1,7 @@
 import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
-import { postJSON, fmt, makeChanged, makeTabs, priceCellHTML, stockHTML } from "./tradelib.js";
+import { postJSON, fmt, makeChanged, makeTabs, priceCellHTML, stockHTML,
+         regimeBadge } from "./tradelib.js";
 import { mdToHtml, renderIframe } from "./briefing.js";
 import { createProChart, MA_DEFS } from "../chart.js";
 
@@ -607,19 +608,32 @@ async function renderWatchSection(container, ctx) {
       try { d = await fetchJSON("/api/trading/nightly"); } catch (e) { return; }
       if (!changed("source:nightly", d)) return;
 
-      // 시장 국면
+      // 시장 국면 — **유효국면(매매가 실제로 쓰는 값)을 주값으로**, 야간 발굴의
+      // breadth 국면은 '기준 입력'으로 병기한다. 종전에는 여기서 breadth 원값을
+      // "시장 국면"이라 불러 데스크의 유효국면과 정반대로 보이는 날이 있었다
+      // (실측 2026-08-04: 데스크 강세 vs 여기 약세 — 같은 이름, 다른 개념).
       const mk = d.market || {};
+      let eff = null;
+      try { eff = await fetchJSON("/api/trading/risk"); } catch (e) { /* 아래 폴백 */ }
       stRegime.innerHTML = "";
+      if (eff && eff.regime) {
+        stRegime.append(
+          el("span", { class: "small text-secondary" }, "시장 국면"),
+          el("span", { class: "fs-6" }, regimeBadge(eff)),
+        );
+      }
       if (mk.regime) {
         const tone = mk.regime === "강세" ? "danger" : mk.regime === "약세" ? "primary" : "secondary";
         stRegime.append(
-          el("span", { class: "small text-secondary" }, "시장 국면"),
-          el("span", { class: "fs-6" }, badge(mk.regime, tone)),
+          el("span", { class: "small text-secondary",
+            title: "유효 국면의 기준 입력 — 야간 발굴이 전일 일봉으로 계산" },
+            "기준 입력(전일 breadth)"),
+          badge(mk.regime, tone),
           el("span", { class: "small text-secondary" },
             `60이평 상회 ${mk.breadth_ma60}% · 20이평 ${mk.breadth_ma20}% · ` +
             `중앙 20일수익률 ${mk.median_ret20}% (${mk.analyzed}종목 분석)`),
         );
-      } else {
+      } else if (!eff || !eff.regime) {
         stRegime.appendChild(el("span", { class: "small text-secondary" },
           "시장 국면 미산출 — 야간 발굴 실행 후 표시됩니다"));
       }

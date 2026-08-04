@@ -106,6 +106,22 @@ export function makeTabs(defs) {
   };
 }
 
+// 유효 국면 뱃지 — **화면마다 국면을 다르게 그려서 생긴 유격의 해소 지점**
+// (실측 2026-08-04: 데스크는 유효국면 '강세', 발굴 페이지는 전일 breadth
+// '약세'를 둘 다 "시장 국면"이라 불러 서로 모순돼 보였다). 국면을 표시하는
+// 모든 화면은 이 함수를 쓴다 — 주값은 유효국면(합성) 하나, 구성요소(전일
+// breadth·야간리포트·시가갭·장중 관측)는 툴팁으로 병기한다.
+export function regimeBadge(d) {
+  const r = d.regime;
+  if (!r) return el("span");
+  const tone = r === "강세" ? "danger" : r === "약세" ? "primary" : "secondary";
+  const title = `유효 국면 = 야간리포트 ${d.night_bias || "-"}(없으면 전일 breadth `
+    + `${d.base_regime || "-"}) 기준 + 시가갭 ${d.gap_bias || "-"} 보정`
+    + (d.intraday_bias ? ` · 장중 관측 ${d.intraday_bias}(판정 미사용)` : "");
+  return el("span", { class: `badge text-bg-${tone}`, title },
+    `유효 국면 ${r}${r === "강세" ? " · 인버스 매수 보류" : " · 인버스 매수 허용"}`);
+}
+
 // 변경 감지 메모 팩토리: 폴링 데이터가 실제로 바뀔 때만 DOM 재렌더(깜빡임 제거).
 export function makeChanged() {
   const memo = {};
