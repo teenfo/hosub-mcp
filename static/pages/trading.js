@@ -2,6 +2,7 @@ import { fetchJSON, el, card, badge } from "../app.js";
 import { makeLayoutEditable } from "../layout.js";
 import { postJSON, fmt, won, pct, priceCellHTML, agoStr, leftStr, sideBadge, stockHTML,
          openStockModal } from "./tradelib.js";
+import { renderJournalDay } from "./journal.js";
 
 // 매매 데스크 (트레이딩 그룹): 장중 실행에 필요한 것만 — 상태·가드·승인대기·신호.
 // 종목 소싱은 '발굴·감시', 리뷰는 '성과·백테스트' 페이지가 담당한다.
@@ -52,6 +53,45 @@ export default {
     });
     // 저장된 배치·크기 복원 + '레이아웃 편집' 툴바 (브라우저별 localStorage)
     makeLayoutEditable(row, { key: "trading" });
+
+    // 보유 포지션 카드 헤더에 일지 버튼 — 청산을 다루는 자리에서 오늘 하루의
+    // 경과(집계·관찰 사실·청산 내역)를 바로 본다. 렌더러는 일지 페이지와 공유
+    // (renderJournalDay) — 같은 데이터를 두 벌로 그리면 반드시 어긋난다.
+    const posHeader = posC.col.querySelector(".card-header");
+    posHeader.classList.add("d-flex", "justify-content-between", "align-items-center");
+    const journalBtn = el("button", {
+      class: "btn btn-sm btn-link p-0 text-secondary", title: "오늘 매매일지 보기",
+      type: "button",
+    }, el("i", { class: "bi bi-journal-text" }));
+    posHeader.appendChild(journalBtn);
+    const journalBody = el("div", { class: "modal-body pt-2 small" });
+    const journalModalEl = el("div", { class: "modal fade", tabindex: "-1" },
+      el("div", { class: "modal-dialog modal-dialog-centered modal-xl modal-dialog-scrollable" },
+        el("div", { class: "modal-content" }, [
+          el("div", { class: "modal-header py-2" }, [
+            el("h5", { class: "modal-title", html: '<i class="bi bi-journal-text"></i> 오늘 매매일지' }),
+            el("button", { class: "btn-close", type: "button", "data-bs-dismiss": "modal" }),
+          ]),
+          journalBody,
+          el("div", { class: "modal-footer py-2" },
+            el("button", { class: "btn btn-sm btn-secondary", type: "button",
+                           "data-bs-dismiss": "modal" }, "닫기")),
+        ])));
+    container.appendChild(journalModalEl);
+    const journalModal = new bootstrap.Modal(journalModalEl);
+    journalBtn.onclick = async () => {
+      journalBody.innerHTML = '<div class="text-secondary">불러오는 중…</div>';
+      journalModal.show();
+      try {
+        // 날짜 미지정 = 오늘. 장중에는 서버가 그때그때 재계산한다(진행 중 뱃지).
+        const d = await fetchJSON("/api/trading/journal");
+        renderJournalDay(journalBody, d);
+      } catch (e) {
+        journalBody.innerHTML = "";
+        journalBody.appendChild(el("div", { class: "text-danger" },
+          "일지를 불러올 수 없습니다: " + e.message));
+      }
+    };
 
     // --- 매매 설정 입력 ---
     // 값 편집은 전부 기어 모달(섹션별 접이식)로 모으고, 카드에는 상태만 남긴다.
