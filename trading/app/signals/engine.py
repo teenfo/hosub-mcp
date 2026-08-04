@@ -48,6 +48,7 @@ class SignalEngine:
         self.gap_bias = "중립"         # 당일 시가 갭 방향
         self.night_bias = "중립"       # 야간 리포트(미국장 등) 익일 편향
         self.regime = "중립"           # 유효 국면 = base + 시가갭 + 야간리포트 결합
+        self.intraday_bias = "중립"    # 장중 방향 관측(판정 미사용 — 원장 적재만)
         # 분봉 백필 라운드로빈 — 한 사이클에 감시목록 전체를 부르지 않는다
         self._backfill_cursor = 0
         self._backfill_held: set[str] = set()
@@ -66,22 +67,52 @@ class SignalEngine:
         self._base_regime_at = now
         return self.base_regime
 
-    def _open_gap_bias(self) -> str:
-        """당일 '시가 갭 방향' — 감시목록 종목들의 시가 갭 중앙값(전일 종가 대비).
-        갭하락(음수) 다수면 약세, 갭상승 다수면 강세. 표본 부족하면 중립."""
+    def _gap_and_drift(self) -> tuple[str, str, float | None]:
+        """한 패스로 (시가갭 방향, 장중 방향 관측, 장중 중앙값%)을 계산.
+
+        시가갭: 감시목록 시가 갭 중앙값(전일 종가 대비) — 유효국면 합성 입력.
+        장중 방향: 같은 종목들의 **시가 대비 현재가** 등락률 중앙값 — **판정에
+        쓰지 않는 관측 전용**이다(실측 2026-08-04: 개장 갭업→하락 전환일에
+        유효국면이 아침 강세에 갇혀 인버스 신호 3건 차단, +1.5~3.0% 기회 상실.
+        반대로 장중 전환을 그대로 게이트에 넣으면 휩쏘일에 비용이 난다 —
+        어느 쪽이 잦은지는 regime_log 원장이 4주 뒤 답한다. 판정 기준은
+        regime_log docstring 에 사전 확정). 같은 감시목록 순회를 두 번 돌지
+        않기 위해 갭 계산 루프에 합쳤다 — 사이클당 로컬 읽기 증가 0, API 0.
+        """
         gate = settings.CONFIG.get("regime_gate", {})
-        if not gate.get("use_open_gap", True):
-            return "중립"
-        gaps = []
+        th = float(gate.get("open_gap_th", 0.5))
+        gaps: list[float] = []
+        moves: list[float] = []
         for sym in list(settings.WATCHLIST):
             df, prev = self._today_df(sym)
-            if prev and df is not None and not df.empty:
-                gaps.append((float(df["open"].iloc[0]) - prev) / prev * 100)
-        if len(gaps) < 5:
-            return "중립"
-        med = statistics.median(gaps)
-        th = float(gate.get("open_gap_th", 0.5))
-        return "약세" if med <= -th else ("강세" if med >= th else "중립")
+            if df is None or df.empty:
+                continue
+            try:
+                o = float(df["open"].iloc[0])
+                c = float(df["close"].iloc[-1])
+            except Exception:  # noqa: BLE001 - 한 종목의 이상 봉이 관측 전체를 막지 않게
+                continue
+            if prev:
+                gaps.append((o - prev) / prev * 100)
+            if o > 0:
+                moves.append((c - o) / o * 100)
+
+        def _bias(vals: list[float]) -> tuple[str, float | None]:
+            if len(vals) < 5:      # 표본 부족 — 방향을 걸지 않는다
+                return "중립", None
+            med = statistics.median(vals)
+            b = "약세" if med <= -th else ("강세" if med >= th else "중립")
+            return b, round(med, 3)
+
+        gap = _bias(gaps)[0] if gate.get("use_open_gap", True) else "중립"
+        if not gate.get("observe_intraday", True):
+            return gap, "중립", None
+        drift_bias, drift_med = _bias(moves)
+        return gap, drift_bias, drift_med
+
+    def _open_gap_bias(self) -> str:
+        """당일 '시가 갭 방향' — 기존 인터페이스 유지(테스트·호출부 호환)."""
+        return self._gap_and_drift()[0]
 
     def _read_night_bias(self) -> str:
         """야간 리포트가 남긴 익일 시장 편향(오늘 날짜일 때만 반영)."""
@@ -103,7 +134,9 @@ class SignalEngine:
         base = self._base_regime()
         self.night_bias = self._read_night_bias()
         anchor = self.night_bias if self.night_bias != "중립" else base
-        self.gap_bias = self._open_gap_bias()
+        self.gap_bias, self.intraday_bias, intraday_med = self._gap_and_drift()
+        # 장중 방향(intraday)은 **합성에 넣지 않는다** — 관측 전용(2026-08-04
+        # 사용자 승인). 게이트 입력 승격은 4주 반사실 평가 통과 후 별도 결정.
         score = _REGIME_ORDER[anchor] + _REGIME_ORDER[self.gap_bias]
         score = max(-1, min(1, score))
         self.regime = _ORDER_REGIME[score]
@@ -113,7 +146,9 @@ class SignalEngine:
 
         # self.base_regime 이 아니라 **실제로 합성에 쓰인 값**(base)을 남긴다.
         # 둘은 보통 같지만, 갈라지는 순간 이력이 조용히 거짓이 된다.
-        regime_log.record(self.night_bias, base, self.gap_bias, self.regime)
+        regime_log.record(self.night_bias, base, self.gap_bias, self.regime,
+                          intraday_bias=self.intraday_bias,
+                          intraday_med=intraday_med)
         return self.regime
 
     def _inverse_blocked(self, symbol: str, side: str = "long") -> bool:

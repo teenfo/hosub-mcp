@@ -68,6 +68,35 @@ def test_same_values_on_a_new_day_are_appended():
     assert {r["date"] for r in regime_log.entries()} == {"2026-07-27", "2026-07-28"}
 
 
+# --- ②-b 장중 방향 관측(2026-08-04) — 판정 미사용, 전이만 append ---
+
+def test_장중_방향_전이는_판정값이_같아도_append_된다():
+    """반사실 평가에는 '전환 감지 시각'이 필요하다 — 8/4 실측(강세 판정에
+    갇혀 인버스 3건 차단)의 재발 시각을 원장이 답할 수 있어야 한다."""
+    assert regime_log.record("강세", "약세", "중립", "강세", now=T,
+                             intraday_bias="중립", intraday_med=0.1) is True
+    assert regime_log.record("강세", "약세", "중립", "강세", now=T,
+                             intraday_bias="약세", intraday_med=-0.8) is True
+    r = regime_log.entries()[0]
+    assert (r["intraday_bias"], r["intraday_med"]) == ("약세", -0.8)
+
+
+def test_장중_중앙값만_변하면_append_하지_않는다():
+    """원시 %는 매 사이클 미세하게 변한다 — dedup 은 bias(전이)만 본다."""
+    regime_log.record("강세", "약세", "중립", "강세", now=T,
+                      intraday_bias="약세", intraday_med=-0.8)
+    assert regime_log.record("강세", "약세", "중립", "강세", now=T,
+                             intraday_bias="약세", intraday_med=-0.9) is False
+    assert len(regime_log.entries()) == 1
+
+
+def test_기존_4값_호출은_그대로_동작한다():
+    """intraday 미지정(None) 호출 — 하위 호환. NULL 은 '못 쟀다'로 남는다."""
+    assert _rec() is True
+    r = regime_log.entries()[0]
+    assert r["intraday_bias"] is None and r["intraday_med"] is None
+
+
 # --- ③ 기록 실패가 매매를 막지 않는다 ---
 
 def test_write_failure_is_swallowed(monkeypatch, tmp_path):
@@ -154,9 +183,12 @@ def test_engine_records_on_regime_evaluation(monkeypatch, tmp_path):
 
     e = SignalEngine()
     monkeypatch.setattr(e, "_base_regime", lambda: "약세")
-    monkeypatch.setattr(e, "_open_gap_bias", lambda: "중립")
+    monkeypatch.setattr(e, "_gap_and_drift", lambda: ("중립", "약세", -0.8))
     monkeypatch.setattr(e, "_read_night_bias", lambda: "강세")
     assert e._effective_regime() == "강세"
     r = regime_log.entries()[0]
     assert r["night_bias"] == "강세" and r["base_regime"] == "약세"
     assert r["gap_bias"] == "중립" and r["effective"] == "강세"
+    # 장중 방향 관측이 같은 레코드에 실린다 — 그러나 합성(effective)에는
+    # 반영되지 않는다(약세 관측인데 유효국면 강세 그대로 = 관측 전용 증명)
+    assert (r["intraday_bias"], r["intraday_med"]) == ("약세", -0.8)

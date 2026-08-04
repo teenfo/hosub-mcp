@@ -44,6 +44,11 @@ regime_gate:
   # 적용 국면은 inverse_priority_regimes 와 동일(약세 한정).
   inverse_reserved_slots: 1
   inverse_weight_pct: 40
+  # 장중 방향 관측(2026-08-04) — 감시목록 '시가 대비 현재가' 중앙값을 regime_log
+  # 에 병기 적재만 한다. **유효국면 합성·게이트에는 쓰지 않는다**(관측 전용).
+  # 계기: 8/4 갭업→하락 전환일에 아침 강세 판정이 인버스 3건을 차단한 실측.
+  # 판정 기준·시점(9/1경)은 regime_log docstring 에 사전 확정.
+  observe_intraday: true
 
 # 급등주 스캐너: 거래대금상위(ka10032)에서 등락률·거래대금·가격 필터 교차
 scanner:
