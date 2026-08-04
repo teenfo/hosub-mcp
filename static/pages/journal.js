@@ -8,6 +8,159 @@ const plCls = (n) => (n > 0 ? "text-danger" : n < 0 ? "text-primary" : "");
 const REASON_KO = { stop: "손절", target: "목표", eod: "마감정리",
                     timeout: "시간초과", manual: "수동" };
 
+const metric = (label, value, cls) => el("div", { class: "col-6 col-md-3 col-xl-2" },
+  el("div", { class: "border rounded p-2 h-100" }, [
+    el("div", { class: "small text-secondary" }, label),
+    el("div", { class: "fw-semibold " + (cls || "") }, value),
+  ]));
+
+/** 하루치 일지 본문을 target 에 그린다 — 일지 페이지와 매매 데스크의 일지
+ *  모달이 같은 렌더러를 쓴다(같은 데이터를 두 벌로 그리면 반드시 어긋난다). */
+export function renderJournalDay(target, d) {
+  target.innerHTML = "";
+  const t = d.trades || {};
+  const sig = d.signals || {};
+  target.appendChild(el("div", { class: "d-flex gap-2 align-items-center flex-wrap mb-2" }, [
+    el("span", { class: "fw-semibold" }, d.date),
+    d.final
+      ? el("span", { class: "badge text-bg-light text-dark" },
+          "확정 " + String(d.generated || "").slice(5, 16).replace("T", " "))
+      : el("span", { class: "badge text-bg-warning",
+          title: "장 마감 전이라 그때그때 다시 계산한 값입니다" }, "진행 중"),
+  ]));
+  target.appendChild(el("div", { class: "row g-2 mb-3" }, [
+    metric("청산", `${t.trades || 0}건`),
+    metric("승 / 패", `${t.wins || 0} / ${t.losses || 0}`),
+    metric("승률", t.trades ? `${t.win_rate}%` : "—"),
+    metric("실현손익", t.trades ? won(t.pnl_krw) : "—", plCls(t.pnl_krw)),
+    metric("건당 기대값", t.trades ? pct(t.expectancy_pct) : "—"),
+    metric("신호 / 미발주", `${sig.total || 0} / ${sig.blocked || 0}`),
+  ]));
+
+  // LLM 요약
+  const sum = d.summary || {};
+  if (sum.text) {
+    target.appendChild(el("div", { class: "card mb-3" }, [
+      el("div", { class: "card-header py-1 small fw-semibold",
+        html: `<i class="bi bi-chat-left-text"></i> 요약 <span class="text-secondary fw-normal">(${sum.role || "llm"} · 참고용)</span>` }),
+      el("div", { class: "card-body py-2 small", style: "white-space:pre-wrap" }, sum.text),
+    ]));
+  } else if (sum.pending) {
+    // 장중에는 요약을 만들지 않는다 — 오전까지의 손익을 하루의 결론처럼 쓰게 된다.
+    target.appendChild(el("div", { class: "alert alert-info py-2 px-3 small mb-3" },
+      [el("i", { class: "bi bi-hourglass-split" }),
+       " 요약 대기 — " + (sum.reason || "장 마감 후 작성됩니다") +
+       ". 아래 집계·관찰 사실은 지금까지의 실제 기록입니다."]));
+  } else if (sum.error || sum.reason) {
+    target.appendChild(el("div", { class: "alert alert-warning py-2 px-3 small mb-3" },
+      "요약 없음 — " + (sum.error || sum.reason) + " (아래 사실 정리는 그대로 유효합니다)"));
+  }
+
+  // 관찰 사실 (결정론)
+  const facts = d.facts || [];
+  if (facts.length) {
+    target.appendChild(el("div", { class: "mb-3" }, [
+      el("div", { class: "fw-semibold small mb-1",
+        html: '<i class="bi bi-clipboard-check"></i> 관찰 사실 (체결 기록에서 계산)' }),
+      // '[관측]' 로 시작하는 줄은 아직 검증되지 않은 관측치다 — 판단에
+      // 쓰이는 사실과 같은 무게로 읽히지 않도록 흐리게 둔다.
+      el("ul", { class: "small mb-0" }, facts.map((f) =>
+        el("li", { class: String(f).startsWith("[관측]") ? "text-muted" : "" }, f))),
+    ]));
+  }
+
+  // 청산 내역
+  const ps = d.positions || [];
+  if (ps.length) {
+    const tb = el("tbody");
+    for (const p of ps) {
+      tb.appendChild(el("tr", {}, [
+        el("td", { class: "small text-secondary text-nowrap" },
+          String(p.opened || "").slice(11, 16) + "→" + String(p.closed || "").slice(11, 16)),
+        el("td", { class: "text-nowrap", html: stockHTML(p.symbol, p.name) }),
+        el("td", {}, p.rule),
+        el("td", { class: "text-end" }, fmt(p.qty)),
+        el("td", { class: "text-end small",
+          title: p.exit_fill_confirmed
+            ? "실제 체결가" + (p.model_exit && p.model_exit !== p.exit
+                ? ` (이론가 ${fmt(p.model_exit)})` : "")
+            : "이론가(손절선·목표가) — 실체결 미수신" },
+          [`${fmt(p.entry)} → ${fmt(p.exit)}`,
+           p.exit_fill_confirmed ? null
+             : el("span", { class: "text-secondary" }, " ~")]),
+        // 결과(익절/손절)는 **실제 손익 부호**로 정한다 — 사유가 손절이어도
+        // 이익이면 익절이다. 기계적 사유는 그 뒤에 작게 남긴다: 목표에 닿은
+        // 이익과 올라간 손절선에 닿은 이익은 다음에 볼 곳이 다르다.
+        el("td", { class: "text-nowrap" }, [
+          el("span", {
+            class: "badge text-bg-" + (p.outcome === "익절" ? "danger"
+              : p.outcome === "손절" ? "primary" : "secondary"),
+            title: "실제 손익 부호로 정한 결과" },
+            p.outcome || "—"),
+          el("span", { class: "text-secondary ms-1", style: "font-size:.72rem",
+            title: "청산이 실제로 발동된 기계적 사유" },
+            REASON_KO[p.exit_reason] || p.exit_reason || ""),
+        ]),
+        el("td", { class: "text-end fw-semibold " + plCls(p.pnl_pct) },
+          `${pct(Number(p.pnl_pct || 0).toFixed(2))} (${won(p.pnl_krw)})`),
+      ]));
+    }
+    const tbl = el("table", { class: "table table-sm small mb-0" });
+    tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th>" +
+      "<th class='text-end'>수량</th><th class='text-end'>진입→청산</th>" +
+      "<th>결과 <span class='fw-normal text-secondary'>· 사유</span></th>" +
+      "<th class='text-end'>손익</th></tr>" }));
+    tbl.appendChild(tb);
+    target.appendChild(el("div", { class: "mb-3" }, [
+      el("div", { class: "fw-semibold small mb-1" }, "청산 내역"),
+      el("div", { class: "table-responsive" }, tbl),
+    ]));
+  }
+
+  // 미발주 사유 분포 — 자금 배분 설정의 직접적 결과라 따로 보여준다
+  const notes = sig.by_note || {};
+  const noteKeys = Object.keys(notes);
+  if (noteKeys.length) {
+    target.appendChild(el("div", { class: "mb-3" }, [
+      el("div", { class: "fw-semibold small mb-1",
+        html: '<i class="bi bi-funnel"></i> 미발주 사유 <span class="text-secondary fw-normal">— 자금·한도 설정을 조정할 근거</span>' }),
+      el("div", { class: "d-flex gap-2 flex-wrap" },
+        noteKeys.sort((a, b) => notes[b] - notes[a]).map((k) =>
+          el("span", { class: "badge text-bg-" +
+            (["잔고 부족", "비중 상한", "포지션 한도"].includes(k) ? "warning" : "light") +
+            (["잔고 부족", "비중 상한", "포지션 한도"].includes(k) ? "" : " text-dark") },
+            `${k} ${notes[k]}`))),
+    ]));
+  }
+
+  // 신호 전체 (우선순위 순서 확인용)
+  const rows = sig.rows || [];
+  if (rows.length) {
+    const tb = el("tbody");
+    for (const s of [...rows].sort((a, b) => (b.priority || 0) - (a.priority || 0))) {
+      tb.appendChild(el("tr", { class: s.actionable ? "" : "text-secondary" }, [
+        el("td", { class: "small text-nowrap" }, String(s.ts || "").slice(11, 16)),
+        el("td", { class: "text-nowrap", html: stockHTML(s.symbol, s.name) }),
+        el("td", {}, s.rule),
+        el("td", { class: "text-end" }, s.priority != null ? Math.round(s.priority) : "—"),
+        el("td", { class: "text-end" }, s.qty ? `${s.qty}주` : "—"),
+        el("td", {}, s.actionable
+          ? el("span", { class: "badge text-bg-success" }, "발주")
+          : el("span", { class: "badge text-bg-secondary" }, "미발주")),
+        el("td", { class: "small" }, s.note || s.reason || ""),
+      ]));
+    }
+    const tbl = el("table", { class: "table table-sm small mb-0" });
+    tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th>" +
+      "<th class='text-end'>우선순위</th><th class='text-end'>수량</th><th>결과</th><th>비고</th></tr>" }));
+    tbl.appendChild(tb);
+    target.appendChild(el("details", {}, [
+      el("summary", { class: "small fw-semibold" }, `신호 전체 ${rows.length}건 (우선순위 순)`),
+      el("div", { class: "table-responsive mt-2" }, tbl),
+    ]));
+  }
+}
+
 export default {
   id: "journal",
   title: "매매일지",
@@ -57,12 +210,6 @@ export default {
     const today = () => new Date().toLocaleDateString("sv-SE");   // YYYY-MM-DD (KST 로컬)
     let curDate = today();
 
-    const metric = (label, value, cls) => el("div", { class: "col-6 col-md-3 col-xl-2" },
-      el("div", { class: "border rounded p-2 h-100" }, [
-        el("div", { class: "small text-secondary" }, label),
-        el("div", { class: "fw-semibold " + (cls || "") }, value),
-      ]));
-
     const renderTrend = (d) => {
       trendBody.innerHTML = "";
       const c = d.cumulative || {};
@@ -111,150 +258,7 @@ export default {
       trendBody.appendChild(el("div", { class: "table-responsive" }, t));
     };
 
-    const renderDay = (d) => {
-      dayBody.innerHTML = "";
-      const t = d.trades || {};
-      const sig = d.signals || {};
-      dayBody.appendChild(el("div", { class: "d-flex gap-2 align-items-center flex-wrap mb-2" }, [
-        el("span", { class: "fw-semibold" }, d.date),
-        d.final
-          ? el("span", { class: "badge text-bg-light text-dark" },
-              "확정 " + String(d.generated || "").slice(5, 16).replace("T", " "))
-          : el("span", { class: "badge text-bg-warning",
-              title: "장 마감 전이라 그때그때 다시 계산한 값입니다" }, "진행 중"),
-      ]));
-      dayBody.appendChild(el("div", { class: "row g-2 mb-3" }, [
-        metric("청산", `${t.trades || 0}건`),
-        metric("승 / 패", `${t.wins || 0} / ${t.losses || 0}`),
-        metric("승률", t.trades ? `${t.win_rate}%` : "—"),
-        metric("실현손익", t.trades ? won(t.pnl_krw) : "—", plCls(t.pnl_krw)),
-        metric("건당 기대값", t.trades ? pct(t.expectancy_pct) : "—"),
-        metric("신호 / 미발주", `${sig.total || 0} / ${sig.blocked || 0}`),
-      ]));
-
-      // LLM 요약
-      const sum = d.summary || {};
-      if (sum.text) {
-        dayBody.appendChild(el("div", { class: "card mb-3" }, [
-          el("div", { class: "card-header py-1 small fw-semibold",
-            html: `<i class="bi bi-chat-left-text"></i> 요약 <span class="text-secondary fw-normal">(${sum.role || "llm"} · 참고용)</span>` }),
-          el("div", { class: "card-body py-2 small", style: "white-space:pre-wrap" }, sum.text),
-        ]));
-      } else if (sum.pending) {
-        // 장중에는 요약을 만들지 않는다 — 오전까지의 손익을 하루의 결론처럼 쓰게 된다.
-        dayBody.appendChild(el("div", { class: "alert alert-info py-2 px-3 small mb-3" },
-          [el("i", { class: "bi bi-hourglass-split" }),
-           " 요약 대기 — " + (sum.reason || "장 마감 후 작성됩니다") +
-           ". 아래 집계·관찰 사실은 지금까지의 실제 기록입니다."]));
-      } else if (sum.error || sum.reason) {
-        dayBody.appendChild(el("div", { class: "alert alert-warning py-2 px-3 small mb-3" },
-          "요약 없음 — " + (sum.error || sum.reason) + " (아래 사실 정리는 그대로 유효합니다)"));
-      }
-
-      // 관찰 사실 (결정론)
-      const facts = d.facts || [];
-      if (facts.length) {
-        dayBody.appendChild(el("div", { class: "mb-3" }, [
-          el("div", { class: "fw-semibold small mb-1",
-            html: '<i class="bi bi-clipboard-check"></i> 관찰 사실 (체결 기록에서 계산)' }),
-          // '[관측]' 로 시작하는 줄은 아직 검증되지 않은 관측치다 — 판단에
-          // 쓰이는 사실과 같은 무게로 읽히지 않도록 흐리게 둔다.
-          el("ul", { class: "small mb-0" }, facts.map((f) =>
-            el("li", { class: String(f).startsWith("[관측]") ? "text-muted" : "" }, f))),
-        ]));
-      }
-
-      // 청산 내역
-      const ps = d.positions || [];
-      if (ps.length) {
-        const tb = el("tbody");
-        for (const p of ps) {
-          tb.appendChild(el("tr", {}, [
-            el("td", { class: "small text-secondary text-nowrap" },
-              String(p.opened || "").slice(11, 16) + "→" + String(p.closed || "").slice(11, 16)),
-            el("td", { class: "text-nowrap", html: stockHTML(p.symbol, p.name) }),
-            el("td", {}, p.rule),
-            el("td", { class: "text-end" }, fmt(p.qty)),
-            el("td", { class: "text-end small",
-              title: p.exit_fill_confirmed
-                ? "실제 체결가" + (p.model_exit && p.model_exit !== p.exit
-                    ? ` (이론가 ${fmt(p.model_exit)})` : "")
-                : "이론가(손절선·목표가) — 실체결 미수신" },
-              [`${fmt(p.entry)} → ${fmt(p.exit)}`,
-               p.exit_fill_confirmed ? null
-                 : el("span", { class: "text-secondary" }, " ~")]),
-            // 결과(익절/손절)는 **실제 손익 부호**로 정한다 — 사유가 손절이어도
-            // 이익이면 익절이다. 기계적 사유는 그 뒤에 작게 남긴다: 목표에 닿은
-            // 이익과 올라간 손절선에 닿은 이익은 다음에 볼 곳이 다르다.
-            el("td", { class: "text-nowrap" }, [
-              el("span", {
-                class: "badge text-bg-" + (p.outcome === "익절" ? "danger"
-                  : p.outcome === "손절" ? "primary" : "secondary"),
-                title: "실제 손익 부호로 정한 결과" },
-                p.outcome || "—"),
-              el("span", { class: "text-secondary ms-1", style: "font-size:.72rem",
-                title: "청산이 실제로 발동된 기계적 사유" },
-                REASON_KO[p.exit_reason] || p.exit_reason || ""),
-            ]),
-            el("td", { class: "text-end fw-semibold " + plCls(p.pnl_pct) },
-              `${pct(Number(p.pnl_pct || 0).toFixed(2))} (${won(p.pnl_krw)})`),
-          ]));
-        }
-        const tbl = el("table", { class: "table table-sm small mb-0" });
-        tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th>" +
-          "<th class='text-end'>수량</th><th class='text-end'>진입→청산</th>" +
-          "<th>결과 <span class='fw-normal text-secondary'>· 사유</span></th>" +
-          "<th class='text-end'>손익</th></tr>" }));
-        tbl.appendChild(tb);
-        dayBody.appendChild(el("div", { class: "mb-3" }, [
-          el("div", { class: "fw-semibold small mb-1" }, "청산 내역"),
-          el("div", { class: "table-responsive" }, tbl),
-        ]));
-      }
-
-      // 미발주 사유 분포 — 자금 배분 설정의 직접적 결과라 따로 보여준다
-      const notes = sig.by_note || {};
-      const noteKeys = Object.keys(notes);
-      if (noteKeys.length) {
-        dayBody.appendChild(el("div", { class: "mb-3" }, [
-          el("div", { class: "fw-semibold small mb-1",
-            html: '<i class="bi bi-funnel"></i> 미발주 사유 <span class="text-secondary fw-normal">— 자금·한도 설정을 조정할 근거</span>' }),
-          el("div", { class: "d-flex gap-2 flex-wrap" },
-            noteKeys.sort((a, b) => notes[b] - notes[a]).map((k) =>
-              el("span", { class: "badge text-bg-" +
-                (["잔고 부족", "비중 상한", "포지션 한도"].includes(k) ? "warning" : "light") +
-                (["잔고 부족", "비중 상한", "포지션 한도"].includes(k) ? "" : " text-dark") },
-                `${k} ${notes[k]}`))),
-        ]));
-      }
-
-      // 신호 전체 (우선순위 순서 확인용)
-      const rows = sig.rows || [];
-      if (rows.length) {
-        const tb = el("tbody");
-        for (const s of [...rows].sort((a, b) => (b.priority || 0) - (a.priority || 0))) {
-          tb.appendChild(el("tr", { class: s.actionable ? "" : "text-secondary" }, [
-            el("td", { class: "small text-nowrap" }, String(s.ts || "").slice(11, 16)),
-            el("td", { class: "text-nowrap", html: stockHTML(s.symbol, s.name) }),
-            el("td", {}, s.rule),
-            el("td", { class: "text-end" }, s.priority != null ? Math.round(s.priority) : "—"),
-            el("td", { class: "text-end" }, s.qty ? `${s.qty}주` : "—"),
-            el("td", {}, s.actionable
-              ? el("span", { class: "badge text-bg-success" }, "발주")
-              : el("span", { class: "badge text-bg-secondary" }, "미발주")),
-            el("td", { class: "small" }, s.note || s.reason || ""),
-          ]));
-        }
-        const tbl = el("table", { class: "table table-sm small mb-0" });
-        tbl.appendChild(el("thead", { html: "<tr><th>시각</th><th>종목</th><th>규칙</th>" +
-          "<th class='text-end'>우선순위</th><th class='text-end'>수량</th><th>결과</th><th>비고</th></tr>" }));
-        tbl.appendChild(tb);
-        dayBody.appendChild(el("details", {}, [
-          el("summary", { class: "small fw-semibold" }, `신호 전체 ${rows.length}건 (우선순위 순)`),
-          el("div", { class: "table-responsive mt-2" }, tbl),
-        ]));
-      }
-    };
+    const renderDay = (d) => renderJournalDay(dayBody, d);
 
     const loadDay = async () => {
       let d;
