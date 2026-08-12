@@ -40,6 +40,8 @@ import sqlite3
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from .. import settings
+
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
 
@@ -61,6 +63,13 @@ def _conn() -> sqlite3.Connection:
         """CREATE TABLE IF NOT EXISTS broker_daily (
             d TEXT PRIMARY KEY, realized REAL, commission REAL, tax REAL,
             synced_at TEXT)""")
+    # 기록 시점 계좌 환경(real/mock) — 모의 일주일(2026-08-06~)이 실계좌
+    # 이력과 무표식으로 섞인 사고 재발 방지. 과거 행은 서버 1회성 백필.
+    for tbl in ("broker_fills", "broker_daily"):
+        try:
+            conn.execute(f"ALTER TABLE {tbl} ADD COLUMN env TEXT")
+        except sqlite3.OperationalError:
+            pass
     return conn
 
 
@@ -92,11 +101,12 @@ def store_today(execs: list[dict], day: str | None = None) -> int:
     with _conn() as conn:
         conn.execute("DELETE FROM broker_fills WHERE d=?", (day,))
         conn.executemany(
-            "INSERT OR REPLACE INTO broker_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO broker_fills VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [(_key(day, e), day, e.get("ord_no") or "", e.get("code") or "",
               e.get("name") or "", e.get("side") or "", int(e.get("qty") or 0),
               float(e.get("price") or 0), float(e.get("commission") or 0),
-              float(e.get("tax") or 0), e.get("time") or "", ts)
+              float(e.get("tax") or 0), e.get("time") or "", ts,
+              settings.KIWOOM_ENV)
              for e in execs])
     return len(execs)
 
@@ -126,8 +136,9 @@ def store_daily(day: str, parsed: dict) -> None:
                             row["realized"])
                 return
         conn.execute(
-            "INSERT OR REPLACE INTO broker_daily VALUES (?,?,?,?,?)",
-            (day, *vals, datetime.now(KST).isoformat(timespec="seconds")))
+            "INSERT OR REPLACE INTO broker_daily VALUES (?,?,?,?,?,?)",
+            (day, *vals, datetime.now(KST).isoformat(timespec="seconds"),
+             settings.KIWOOM_ENV))
 
 
 def broker_daily_for(day: str) -> dict | None:
