@@ -61,7 +61,12 @@ def _conn() -> sqlite3.Connection:
                      # 손절선이 **움직인** 시각. 시간 손절의 기준점이다 —
                      # 손절선이 올라갔다는 것은 아직 방향이 맞다는 뜻이므로
                      # 보유시간을 그 시점부터 다시 센다(사용자 지침 2026-07-29).
-                     ("stop_moved", "TEXT")):
+                     ("stop_moved", "TEXT"),
+                     # 기록 시점의 계좌 환경(real/mock). 2026-08-06 mock 전환 후
+                     # 일주일간 모의 거래가 실계좌 이력과 무표식으로 섞였다 —
+                     # 측정 표본을 env 로 자를 수 있어야 판정이 오염되지 않는다.
+                     # 과거 행 백필은 서버에서 1회성 SQL(8/6 10:40 경계).
+                     ("env", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -355,13 +360,16 @@ def open_position(order: dict, fill: float | None = None,
             "INSERT OR IGNORE INTO positions "
             "(id, opened, symbol, name, rule, side, qty, model_entry, entry, "
             "stop, target, closed, exit, exit_reason, pnl_pct, pnl_krw, "
-            "slippage_pct, status, ord_no, exec_symbol, fill_confirmed) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "slippage_pct, status, ord_no, exec_symbol, fill_confirmed, env) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (order["id"], datetime.now(KST).isoformat(timespec="seconds"),
              symbol, name, order["rule"], order["side"], int(order["qty"]),
              model_entry, entry, float(order["stop"]), float(order["target"]),
              None, None, None, None, None, round(slippage, 4), "open",
-             (ord_no or None), order.get("exec_symbol"), 0),
+             (ord_no or None), order.get("exec_symbol"), 0,
+             # 기록 시점 환경 — mock 표본이 실계좌 측정에 무표식으로 섞이는 것
+             # 방지(실사고 2026-08-06~12: 모의 일주일이 원장에 무표식 혼입)
+             settings.KIWOOM_ENV),
         )
 
 

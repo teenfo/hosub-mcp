@@ -63,6 +63,12 @@ def _conn() -> sqlite3.Connection:
             PRIMARY KEY (day, symbol, rule)
         )"""
     )
+    # 기록 시점 계좌 환경(real/mock) — 모의 표본이 실계좌 측정에 무표식으로
+    # 섞이는 것 방지(2026-08-06~12 혼입 사고). 과거 행은 서버 1회성 백필.
+    try:
+        conn.execute("ALTER TABLE signal_log ADD COLUMN env TEXT")
+    except sqlite3.OperationalError:
+        pass
     return conn
 
 
@@ -76,17 +82,17 @@ def record_signal(day: str, rec: dict) -> None:
         conn.execute(
             """INSERT INTO signal_log
                (day, symbol, rule, ts, name, side, entry, stop, target,
-                qty, priority, actionable, note, order_id)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                qty, priority, actionable, note, order_id, env)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(day, symbol, rule) DO UPDATE SET
                  ts=excluded.ts, qty=excluded.qty, priority=excluded.priority,
                  actionable=excluded.actionable, note=excluded.note,
-                 order_id=excluded.order_id""",
+                 order_id=excluded.order_id, env=excluded.env""",
             (day, rec.get("symbol", ""), rec.get("rule", ""), rec.get("ts"),
              rec.get("name"), rec.get("side"), rec.get("entry"), rec.get("stop"),
              rec.get("target"), rec.get("qty"), rec.get("priority"),
              1 if rec.get("actionable") else 0, rec.get("note"),
-             rec.get("order_id")),
+             rec.get("order_id"), settings.KIWOOM_ENV),
         )
 
 
