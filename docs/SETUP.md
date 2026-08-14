@@ -373,6 +373,23 @@ backup_script: daily_backup
 | 외부 https 접속 안 됨 (Caddy) | 포트포워딩(80/443)·DDNS·인증서. 부록 B 확인 |
 | Caddy 인증서 발급 실패 | 80/443 포워딩 안 됨, 또는 LE 레이트리밋. `journalctl -u caddy` 확인 |
 | `restart_service` 실패 | sudoers 에 systemctl 권한 없음(4번) |
+| 집 밖(중국 등)에서 아예 접속이 안 됨 | 검열망일 수 있다. 이 서버를 VPN 출구로 쓰는 법 → [`docs/VPN.md`](VPN.md) |
+
+---
+
+## 10-1. 이 서버를 VPN 출구로 쓰기
+
+집 밖 기기의 트래픽 전체를 한국 회선으로 뽑을 수 있다. 두 겹으로 둔다 —
+**Tailscale exit node**(이미 깔려 있음, 편함)를 1차로, **sing-box VLESS+WS**
+(기존 Caddy 443 에 숨김, 검열 내성 높음)를 2차로.
+
+```bash
+sudo /opt/hosub-mcp/deploy/vpn-exit-node.sh        # 1차
+sudo /opt/hosub-mcp/deploy/vpn-singbox-install.sh  # 2차 (공유기 변경 불필요)
+```
+
+⚠️ **인터넷이 되는 동안 미리 해둬야 하는 단계**(Tailscale 콘솔 승인·auth key 발급·
+앱 설치)가 있다. 상세는 → [`docs/VPN.md`](VPN.md)
 
 ---
 

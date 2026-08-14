@@ -69,6 +69,14 @@ services:
         - ["npm", "ci", "--omit=dev"]
       restart_after: true
       timeout_seconds: 600
+  vpn-singbox:
+    unit: vpn-singbox.service
+    description: "검열우회 VPN (sing-box, 127.0.0.1:8605 — Caddy 443 뒤 VLESS+WS). Tailscale exit node 가 막힐 때의 2차 수단"
+    # deploy 항목이 **없다** — 일부러 그렇다. 이 서비스의 설정은 깃이 아니라
+    # /etc/hosub-vpn/singbox.json 에 있는 비밀이라 git pull 로 반영할 게 없고,
+    # 설치·자격 재발급은 deploy/vpn-singbox-install.sh 를 직접 실행해야 한다.
+    # 여기 등록하는 목적은 restart_service / read_service_logs 로 **대화로 상태를
+    # 볼 수 있게** 하는 것뿐이다(중국에서 SSH 가 불안정할 때 유일한 진단 경로).
   # 예시) 서비스를 올린 뒤 아래 형태로 추가:
   # bcl-portal:
   #   unit: bcl-portal.service
