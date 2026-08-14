@@ -55,6 +55,43 @@ hosub.duckdns.org {
 		}
 	}
 
+	# jw-mcp 라우팅 (127.0.0.1:8604, jw-mcp.service).
+	#
+	# ⚠️ 이 블록은 서버에는 있었지만 이 파일에는 없었다. 그 상태에서
+	#    vpn-singbox-install.sh 가 "@vpn 마커 없음 → 레포판으로 교체"를 실행하면
+	#    jw 라우팅이 통째로 사라진다. caddy validate 는 문법만 보므로 통과해버려
+	#    롤백도 안 걸린다. 재발 방지로 **실서버 설정을 여기로 되돌려 커밋**한다.
+	#    → /etc/caddy/Caddyfile 을 바꿨으면 반드시 이 파일에도 반영할 것.
+	#
+	# ⚠️ handle_path 가 아니라 handle 을 쓴다. 프리픽스를 벗기지 않고 그대로 넘겨야
+	#    앱이 만드는 절대 URL(issuer·redirect·Set-Cookie Path)이 공개 주소와 일치한다.
+
+	# 1) 서비스 본문 — MCP·OAuth·계정 화면이 전부 /jw 아래에 있다.
+	@jw path /jw /jw/*
+	handle @jw {
+		reverse_proxy 127.0.0.1:8604 {
+			# 클라이언트가 보낸 XFF 를 신뢰하지 않는다(로그 위조 방지).
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# 2) OAuth 디스커버리 정본 경로.
+	#
+	#    issuer 가 https://hosub.duckdns.org/jw 이므로 RFC 8414/9728 이 정한 메타데이터
+	#    주소는 루트의 /.well-known/<타입>/jw... 다. 이 두 줄이 없으면 그 요청이 맨 끝
+	#    catch-all 을 타고 :8700(hosub-mcp)으로 가서, 커넥터가 엉뚱한 인증 서버를 만난다.
+	#
+	#    루트의 /.well-known/oauth-authorization-server (접미사 없는 것)는 손대지 않는다 —
+	#    그건 hosub 자신의 것이고 그대로 :8700 으로 가야 한다.
+	@jw_wellknown path /.well-known/oauth-authorization-server/jw /.well-known/openid-configuration/jw /.well-known/oauth-protected-resource/jw /.well-known/oauth-protected-resource/jw/*
+	handle @jw_wellknown {
+		reverse_proxy 127.0.0.1:8604
+	}
+
+	# 참고: /api/dash/* 는 **일부러 라우팅하지 않는다.** 대시보드용 내부 API 는
+	#       127.0.0.1:8604 에서만 보여야 하며, hosub 대시보드(:8701)가 서버 안에서
+	#       직접 호출한다. 여기에 경로를 추가하면 그 경계가 무너진다.
+
 	# 검열우회 VPN(sing-box) — **비밀 경로 하나만** 여기로 샌다.
 	#
 	# 중국처럼 WireGuard/Tailscale 이 막히는 망에서 쓰는 2차 수단이다. VLESS 를
