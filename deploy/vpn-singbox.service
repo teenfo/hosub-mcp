@@ -1,0 +1,55 @@
+# hosub 검열우회 VPN (sing-box) — 기존 Caddy 443 뒤에 숨는다.
+#
+# Tailscale exit node 가 1차 수단이고, 이건 **그게 막혔을 때의 대비책**이다.
+# WireGuard 핸드셰이크는 GFW 가 지문으로 식별해 차단·스로틀하는데, 여기는
+# VLESS 를 WebSocket 에 실어 Caddy 가 이미 쓰는 443/TLS 로 흘린다. 밖에서 보면
+# hosub.duckdns.org 에 대한 평범한 HTTPS 요청 하나다.
+#
+# 왜 이 구조인가:
+#   - **공유기를 못 건드린다.** iptime 에 열린 건 80/443 뿐이고(docs/SETUP.md 부록 B.2)
+#     사용자가 중국에 있어 포트포워딩을 추가할 수 없다. 443 재활용이 유일한 길.
+#   - **인증서를 새로 안 받는다.** TLS 는 Caddy 가 끝내고 여기로는 평문 WS 만 온다.
+#     그래서 이 프로세스는 루프백(127.0.0.1:8605)만 듣는다 — 직접 노출 0.
+#   - Caddy 는 비밀 경로(@vpn)로 온 것만 여기로 보낸다. 경로를 모르면 이 서비스가
+#     존재하는지조차 알 수 없다(다른 경로는 기존 대시보드/MCP 로 정상 응답).
+#
+# 설치: deploy/vpn-singbox-install.sh 가 이 파일을 복사·활성화한다.
+#       (config 는 /etc/hosub-vpn/singbox.json — 커밋하지 않는 비밀)
+
+[Unit]
+Description=hosub VPN (sing-box, Caddy 443 뒤 VLESS+WebSocket)
+Documentation=https://github.com/teenfo/hosub-mcp/blob/main/docs/VPN.md
+After=network-online.target caddy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hosub-vpn
+Group=hosub-vpn
+ExecStart=/usr/bin/sing-box run -c /etc/hosub-vpn/singbox.json
+Restart=on-failure
+RestartSec=5
+
+# 하드닝 — 루프백만 듣는 프록시라 커널·파일시스템 권한이 필요 없다.
+# TUN 을 안 쓰므로 NET_ADMIN 도 불필요하다(있으면 사고 반경만 커진다).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# AF_NETLINK 을 뺐다가 기동 실패하는 사고가 흔하다 — sing-box 는 리눅스에서
+# 기본 인터페이스·라우트 변화를 netlink 으로 본다.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/hosub-vpn
+
+[Install]
+WantedBy=multi-user.target

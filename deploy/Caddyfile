@@ -55,6 +55,27 @@ hosub.duckdns.org {
 		}
 	}
 
+	# 검열우회 VPN(sing-box) — **비밀 경로 하나만** 여기로 샌다.
+	#
+	# 중국처럼 WireGuard/Tailscale 이 막히는 망에서 쓰는 2차 수단이다. VLESS 를
+	# WebSocket 에 실어 이 443/TLS 로 흘리면 밖에서는 이 사이트에 대한 평범한
+	# HTTPS 요청 하나로 보인다. 공유기에 새 포트를 열 수 없어서(80/443만 열림,
+	# 사용자가 중국에 있어 iptime 관리자에 못 닿음) 443 공유가 유일한 길이었다.
+	#
+	# 경로를 이 파일에 박지 않는다 — 커밋되는 파일이라 비밀이 깃에 남는다.
+	# 값은 systemd 드롭인(/etc/systemd/system/caddy.service.d/hosub-vpn.conf)이
+	# 환경변수로 주입한다. ⚠️ 그래서 반영은 reload 가 아니라 **restart** 여야 한다.
+	#
+	# 미설치 상태에서도 안전하다: 환경변수가 없으면 아무도 안 부르는 기본 경로가
+	# 되고, 그 경로는 8605 가 안 떠 있어 502 만 낸다(다른 경로는 정상 서비스).
+	#
+	# ⚠️ @dash 보다 **위**에 있어야 한다. handle 은 위에서부터 배타적으로 걸리므로
+	#    비밀 경로가 /api/* 같은 모양이면 아래에 둘 때 대시보드가 먼저 채간다.
+	@vpn path {$HOSUB_VPN_PATH:/__vpn-not-configured}
+	handle @vpn {
+		reverse_proxy 127.0.0.1:8605
+	}
+
 	@dash path / /login /logout /favicon.ico /api/* /static/*
 	handle @dash {
 		reverse_proxy 127.0.0.1:8701
