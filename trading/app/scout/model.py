@@ -50,7 +50,12 @@ SOURCES = (VOLUME, GAINERS, PRESURGE, NIGHTLY, NEWS, MANUAL, FLOW)
 #             문서(scout-engine.md)는 처음부터 이 하드 룰을 명시했는데
 #             **강제하는 코드가 없었다** — flow 편입(2026-08-03)에서 이
 #             메커니즘을 만들며 함께 성문화한다.
-OBSERVE_ONLY = frozenset({FLOW, PRESURGE})
+#   gainers·volume  4주 기여도 측정(2026-08-25, measurement.md)에서 익일
+#             초과수익이 **유의하게 음**(gainers −0.98% t=−5.76 · volume
+#             −0.82% t=−3.28, 본페로니 통과) — 해로운 소스가 매매 승격을
+#             밀고 있었다. 사용자 승인(2026-08-25)으로 관측 전용 강등.
+#             해제 조건: 이후 4주 재측정에서 0 이상 회복 + 사용자 결정.
+OBSERVE_ONLY = frozenset({FLOW, PRESURGE, GAINERS, VOLUME})
 
 # 소스 그룹 — **같은 정보를 세 번 세지 않기 위한** 구분이다.
 # active·gainer·presurge 는 같은 팩터(오늘의 가격·거래량 모멘텀)의 세 가지 뷰다.

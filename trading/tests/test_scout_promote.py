@@ -25,11 +25,21 @@ LONG_AGO = NOW - timedelta(days=4)
 
 
 def _c(code="000001", score=0.9, price=10_000, groups=1, **kw):
-    return Candidate(code=code, name=kw.pop("name", f"종목{code}"), score=score,
-                     price=price,
-                     sources=kw.pop("sources", ["volume"]),
-                     by_group=kw.pop("by_group", {"intraday": score}) if groups == 1
-                     else {"intraday": score / 2, "news": score / 2})
+    # 기본 소스는 '검증 소스'(nightly)여야 한다 — 종전 기본이던 volume 은
+    # 2026-08-25 기여도 판정(유의 음)으로 관측 전용(OBSERVE_ONLY)이 되어,
+    # 그대로 두면 게이트를 검증하는 모든 테스트가 하드 룰에 먼저 걸린다.
+    # nightly 는 낡은 가격 소스라 실측 시세(quote)를 기본으로 채운다 —
+    # 신선도 게이트 자체를 검증하는 테스트는 quote 를 명시적으로 비운다.
+    c = Candidate(code=code, name=kw.pop("name", f"종목{code}"), score=score,
+                  price=price,
+                  sources=kw.pop("sources", ["nightly"]),
+                  by_group=kw.pop("by_group", {"intraday": score}) if groups == 1
+                  else {"intraday": score / 2, "news": score / 2})
+    if "quote" in kw:
+        c.quote = kw.pop("quote")
+    elif price and price > 0:
+        c.quote = {"price": price}
+    return c
 
 
 def _cur(tier=None, since=None, protected=(), names=None, held=(),
@@ -136,7 +146,8 @@ def test_다른_소스가_함께_가리키면_매매_승격을_막지_않는다(
     """차단 조건은 '관측 전용 소스 **단독**' 이다 — 검증된 경로가 함께 가리키면
     그쪽이 근거가 되므로 종전과 같이 게이트로 판정한다."""
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
-    c = _c(price=12_000, sources=["flow", "volume"])
+    # 2026-08-25 이후 volume 도 관측 전용이라 '검증 소스' 예시는 nightly 다.
+    c = _c(price=12_000, sources=["flow", "nightly"])
     assert [r["action"] for r in _by(_plan([c], cur), "promote_trade")] \
         == ["promote_trade"]
 
@@ -560,3 +571,35 @@ def test_no_trade_핀도_수집전용_신규_편입은_된다():
     """관측·신호는 계속 쌓인다 — 매매만 금지."""
     rows = _plan([_c(score=0.5)], _cur(), no_trade=["000001"])
     assert [r["to_tier"] for r in rows] == [COLLECT]
+
+
+# --- 장중 소스 관측 전용 강등 (2026-08-25 기여도 판정 — 유의 음) ---
+
+def test_gainers_volume_단독_지목은_매매_승격이_안_된다():
+    """4주 실측: gainers −0.98%(t=−5.76)·volume −0.82%(t=−3.28) — 해로운
+    소스가 매매 승격을 밀지 못하게 OBSERVE_ONLY 로 강등(사용자 승인)."""
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    for srcs in (["gainers"], ["volume"], ["gainers", "volume", "presurge"]):
+        rows = _plan([_c(sources=srcs)], cur)
+        assert _by(rows, "promote_trade") == [], srcs
+
+
+def test_검증_소스가_함께_가리키면_승격은_된다():
+    cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
+    rows = _plan([_c(sources=["volume", "nightly"])], cur)
+    assert _by(rows, "promote_trade") != []
+
+
+def test_관측전용_소스만_남은_매매_tier_는_수집전용으로_내린다():
+    cur = _cur(tier={"000001": TRADE}, since={"000001": LONG_AGO})
+    rows = _plan([_c(sources=["gainers"])], cur)
+    demote = _by(rows, "demote")
+    assert demote and demote[0]["to_tier"] == COLLECT
+    assert "관측 전용" in demote[0]["reason"]
+
+
+def test_관측전용_강등도_보유_중이면_내리지_않는다():
+    cur = _cur(tier={"000001": TRADE}, since={"000001": LONG_AGO},
+               held=["000001"])
+    rows = _plan([_c(sources=["gainers"])], cur)
+    assert all("관측 전용" not in r.get("reason", "") for r in _by(rows, "demote"))
