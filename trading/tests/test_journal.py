@@ -44,10 +44,18 @@ def test_signals_isolated_by_day(db):
 
 
 def test_prune_signals(db):
+    """컷오프 기준 시각을 **주입**한다 — 벽시계로 두면 픽스처의 고정 날짜가
+    시간이 흐르며 경계를 넘어 테스트가 저절로 깨진다(실측: 8/25 통과 →
+    9/27 실패, 2026-07-27 행이 30일 밖으로 밀렸다)."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    now = _dt(2026, 7, 28, 18, 0, tzinfo=ZoneInfo("Asia/Seoul"))
     journal.record_signal("2020-01-01", _rec())
     journal.record_signal("2026-07-27", _rec(symbol="000660"))
-    assert journal.prune_signals(keep_days=30) == 1
+    assert journal.prune_signals(keep_days=30, now=now) == 1
     assert journal.signals_on("2020-01-01") == []
+    assert journal.signals_on("2026-07-27")          # 최근 행은 남는다
 
 
 # --- 사유 라벨 ---
