@@ -128,12 +128,18 @@ def test_관측_전용_소스_단독이면_매매_tier_에_못_올라간다():
     assert _by(_plan([c], cur), "promote_trade") == []
 
 
-def test_presurge_단독도_매매_tier_에_못_올라간다():
-    """설계·문서는 처음부터 presurge 를 max_tier=collect 로 명시했는데
-    강제하는 코드가 없었다 — flow 편입에서 메커니즘을 만들며 성문화했다."""
+def test_presurge_단독은_이제_매매_tier_로_올라간다():
+    """2026-09-27 사용자 승인으로 OBSERVE_ONLY 에서 해제됐다.
+
+    근거는 flow 가 요구받았던 것과 같은 두 관문: 기여도 4주 익일 초과
+    +0.13%(t=+3.52, 본페로니) + 랭킹 하네스 전 손절폭 양수(+0.056~
+    +0.065R, 6,613쌍). 이 테스트는 **해제가 유지되고 있는가**를 지키고,
+    복원 시(4주 재판정 음수) 함께 되돌린다.
+    """
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
     c = _c(price=12_000, sources=["presurge"])
-    assert _by(_plan([c], cur), "promote_trade") == []
+    assert [r["action"] for r in _by(_plan([c], cur), "promote_trade")] \
+        == ["promote_trade"]
 
 
 def test_관측_전용_소스도_수집전용_편입은_된다():
@@ -579,7 +585,7 @@ def test_gainers_volume_단독_지목은_매매_승격이_안_된다():
     """4주 실측: gainers −0.98%(t=−5.76)·volume −0.82%(t=−3.28) — 해로운
     소스가 매매 승격을 밀지 못하게 OBSERVE_ONLY 로 강등(사용자 승인)."""
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
-    for srcs in (["gainers"], ["volume"], ["gainers", "volume", "presurge"]):
+    for srcs in (["gainers"], ["volume"], ["gainers", "volume"]):
         rows = _plan([_c(sources=srcs)], cur)
         assert _by(rows, "promote_trade") == [], srcs
 
