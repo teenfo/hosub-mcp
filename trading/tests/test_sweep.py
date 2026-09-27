@@ -61,3 +61,28 @@ def test_rsi_dip_signal_and_filters():
         prev = c
     df2 = pd.DataFrame(rows2, index=pd.date_range("2026-07-20 09:00", periods=len(closes2), freq="1min"))
     assert rules.rsi_dip(df2, cfg) is None
+
+
+def test_스윕은_롱_전용을_재생_단계에_넘긴다(tmp_path, monkeypatch):
+    """사후 필터가 아니라 재생 단계에서 방향을 제한해야 한다.
+
+    runner 는 '동시 1포지션' 이라, 양방향으로 재생한 뒤 롱만 고르면 숏이
+    자리를 점유해 같은 날 롱 기회를 밀어낸다 — 집계에서만 빠질 뿐 실전
+    (long_only=true)과 다른 세계를 측정한다(외부 리뷰 지적, 확인 2026-09-27).
+    이 테스트는 runner 호출에 sides=("long",) 가 실리는지를 붙잡아 둔다.
+    """
+    monkeypatch.setattr(sweep, "OUT_FILE", tmp_path / "rule_sweep.json")
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    monkeypatch.setattr("app.data.store.load_bars",
+                        lambda s, tf, limit=5000: _trend_df())
+    seen = []
+    real_run = sweep.runner.run
+
+    def _spy(sym, df, cfg, sides=None):
+        seen.append(sides)
+        return real_run(sym, df, cfg, sides=sides)
+
+    monkeypatch.setattr(sweep.runner, "run", _spy)
+    sweep.run_sweep()
+    assert seen, "runner 가 호출되지 않았다"
+    assert all(s == ("long",) for s in seen), f"sides 미전달 호출 존재: {set(seen)}"

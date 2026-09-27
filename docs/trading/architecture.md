@@ -1,6 +1,7 @@
 # 트레이딩 시스템 아키텍처
 
-> 반자동 한국주식 트레이딩 시스템(키움 REST/WS, 실계좌)의 구조 문서.
+> 한국주식 트레이딩 시스템(키움 REST/WS, 실계좌·모의 전환 가능)의 구조 문서.
+> 발주 방식은 `risk.auto_approve` 로 정한다 — **false = 승인형 반자동**(모든 주문이 승인대기에서 사람 승인 후 발주), **true = 전체 자동**(게이트를 통과한 신호가 승인 없이 발주). 런타임 오버라이드(`data/risk.json`)로 바뀌므로 **현재 값은 문서가 아니라 매매 데스크 상태 카드의 운용 모드 배지(계좌 환경 × 발주 방식)가 정본**이다.
 > 코드: `trading/`(백엔드, systemd `trading.service`, :8600) + `src/dashboard.py`(프록시)
 > + UI(`static/pages/trading.js`=매매 데스크 · `scout.js`=발굴 엔진 · `backtest.js`=성과·백테스트,
 > 공용 헬퍼 `tradelib.js`). 스키마·규칙·경로가 바뀌면 이 문서와 Notion
@@ -22,7 +23,7 @@
    signals/engine.run_once(장중) ── rules.REGISTRY 평가 ──> 신호
       │   게이트: 잔고동기화 → 일일가드 → 국면(인버스) → 롱전용 → 리스크사이징
       ▼
-   trade/orders(승인대기 큐) ──[사용자 승인]──> 키움 발주(증거금 자동조정) ──> trade/ledger
+   trade/orders(승인대기 큐) ──[사용자 승인 | auto_approve]──> 키움 발주(증거금 자동조정) ──> trade/ledger
       │                                                    │
       └── TTL 만료/거부                    trade/desk(2초) ─┴─ 손절 자동청산 · 목표 승인제
                                                            │
