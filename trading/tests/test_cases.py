@@ -7,8 +7,18 @@ import json
 
 import pytest
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from app import settings
 from app.research import cases
+
+
+# 픽스처는 2026-08-0x 로 케이스를 심는다. stats() 의 30일 창을 벽시계로 두면
+# 시간이 흐르며 그 날짜가 창 밖으로 밀려 표본이 0 이 된다(실측 2026-09-27:
+# 4건 동시 실패). 기준 시각을 고정해 주입한다 — 창 동작 자체는 stats(days=)
+# 인자로 따로 검증할 것.
+NOW = datetime(2026, 8, 5, 18, 0, tzinfo=ZoneInfo("Asia/Seoul"))
 
 
 def _bars(prices):
@@ -153,7 +163,7 @@ def test_누적_요약(db):
          "exit_reason": "timeout"},                             # 닿았는데 미청산
         {**_case("d", "2026-08-03"), "mae_over_stop": 1.4},     # 관통
     ])
-    s = cases.stats()
+    s = cases.stats(now=NOW)
     assert s["n"] == 4
     assert s["never_up"] == 1
     assert s["target_reached"] == 1 and s["target_exited"] == 0
@@ -163,7 +173,7 @@ def test_누적_요약(db):
 def test_미측정_케이스는_요약에서_빠진다(db):
     """분봉이 없다고 케이스를 버리지는 않지만, 측정치 평균에 섞지도 않는다."""
     cases.save([_case("a", "2026-08-03"), _case("b", "2026-08-03", bars=0)])
-    assert cases.stats()["n"] == 1
+    assert cases.stats(now=NOW)["n"] == 1
 
 
 def test_봉이_1개면_측정치가_없고_못_간_건으로_세지_않는다(db):
@@ -171,7 +181,7 @@ def test_봉이_1개면_측정치가_없고_못_간_건으로_세지_않는다(d
     `bars > 0` 으로 거르고 NULL 을 0 으로 바꾸면 **'한 번도 유리하게 못 갔다'**
     로 세어 버린다 — 실측 소급 적재에서 진짜 14건이 18건으로 부풀었다."""
     cases.save([_case("a", "2026-08-03"), _case("b", "2026-08-03", bars=1)])
-    s = cases.stats()
+    s = cases.stats(now=NOW)
     assert s["n"] == 1                 # 측정된 것만 표본이다
     assert s["never_up"] == 0          # NULL 을 0 으로 세지 않는다
     assert cases.coverage() == {
@@ -187,13 +197,13 @@ def test_비율의_분모를_함께_돌려준다(db):
         {**_case("b", "2026-08-03"), "mfe_over_target": None},
         {**_case("c", "2026-08-03"), "mae_over_stop": None},
     ])
-    s = cases.stats()
+    s = cases.stats(now=NOW)
     assert s["n"] == 3
     assert s["target_reached_of"] == 2 and s["stop_breached_of"] == 2
 
 
 def test_케이스가_없으면_빈_요약(db):
-    assert cases.stats() == {"n": 0}
+    assert cases.stats(now=NOW) == {"n": 0}
 
 
 def test_커버리지는_미측정_건을_센다(db):

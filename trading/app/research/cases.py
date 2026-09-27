@@ -268,7 +268,7 @@ def build_day(day: str, now: datetime | None = None) -> int:
 # --------------------------------------------------------------------------
 # 조회 — 일지 프롬프트에 주입할 선례
 # --------------------------------------------------------------------------
-def stats(days: int = 30) -> dict:
+def stats(days: int = 30, now: datetime | None = None) -> dict:
     """케이스 원장 요약 — 이번 세션이 일회성 스크립트로 냈던 값들.
 
     **`bars > 0` 이 아니라 `mfe_pct IS NOT NULL` 로 거른다.** 봉이 1개뿐인
@@ -285,7 +285,12 @@ def stats(days: int = 30) -> dict:
     # 날짜로 자른다 — 종전 `LIMIT days*60` 은 행수 컷이라 하루 60건이 넘으면
     # 최근이 잘리고 표본이 적으면 옛날 케이스가 섞였다. 일지가 이 값을
     # "[누적 n건]" 사실로 매일 싣는데 시간 경계가 거짓이었다(감사 2026-08-01).
-    cutoff = (datetime.now(KST).date() - timedelta(days=days)).isoformat()
+    # `now` 는 테스트가 시각을 주입하기 위한 것이다(기본값은 현재 시각 —
+    # 운영 동작 불변). 벽시계로 두면 고정 날짜 픽스처가 시간이 흐르며
+    # 컷오프 밖으로 밀려 표본이 0 이 된다 — 실측 2026-09-27: 8/25 까지
+    # 통과하던 이 파일 테스트 4건이 2026-08-03 데이터가 30일 밖으로
+    # 나가면서 한꺼번에 깨졌다. **날짜를 쓰는 함수는 now 를 받게 할 것.**
+    cutoff = ((now or datetime.now(KST)).date() - timedelta(days=days)).isoformat()
     with _conn() as conn:
         rows = [dict(r) for r in conn.execute(
             "SELECT * FROM cases WHERE mfe_pct IS NOT NULL AND d >= ? "
