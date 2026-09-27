@@ -70,10 +70,16 @@ def _run_sweep() -> dict:
         trades = []
         for sym, df in dfs.items():
             try:
-                trades.extend(runner.run(sym, df, cfg).trades)
+                # **롱 전용을 재생 단계에 넘긴다**(사후 필터 금지).
+                # 종전에는 양방향으로 재생한 뒤 롱만 골라 채점했는데, runner 는
+                # '동시 1포지션' 이라 숏이 자리를 점유해 같은 날 롱 기회를
+                # 밀어냈다 — 집계에서만 빠질 뿐 **실전(long_only=true)과 다른
+                # 세계를 측정**한 것이다(외부 리뷰 지적, 확인 2026-09-27).
+                # rule_sweep.avg_r 을 근거로 쓴 과거 판단(8/28 다이버전스 등)은
+                # 이 오염 위에 있었다 — 전후 차이는 measurement.md 에 기록.
+                trades.extend(runner.run(sym, df, cfg, sides=("long",)).trades)
             except Exception:  # noqa: BLE001 - 종목 하나의 오류가 스윕을 막지 않게
                 log.exception("스윕 오류 %s/%s", name, sym)
-        # 실전은 롱 전용이므로 롱 방향 성적만 채점
         closed = [t for t in trades if t.exit is not None and t.side == "long"]
         if not closed:
             results[name] = {"trades": 0}
