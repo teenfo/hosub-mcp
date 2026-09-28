@@ -15,6 +15,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import settings
+from . import exit_policy
 from ..data import store
 
 KST = ZoneInfo("Asia/Seoul")
@@ -465,14 +466,7 @@ def monitor(price_of) -> int:
 def max_hold_min(rule: str) -> int:
     """그 규칙의 최대 보유 시간(분). 0 이면 시간 손절 없음.
     규칙별 설정이 전역 기본값(rules.max_hold_min)을 덮어쓴다."""
-    cfg = settings.RULES
-    r = cfg.get(rule)
-    v = r.get("max_hold_min") if isinstance(r, dict) and "max_hold_min" in r \
-        else cfg.get("max_hold_min", 0)
-    try:
-        return max(0, int(v or 0))
-    except (TypeError, ValueError):
-        return 0
+    return exit_policy.max_hold_min(rule, settings.RULES or {})
 
 
 def hold_since(row) -> str:
@@ -504,49 +498,9 @@ def held_minutes(opened: str, now: datetime | None = None) -> float | None:
     return (now - t).total_seconds() / 60
 
 
-def refit_lines(side: str, model_entry: float, entry: float, stop: float,
-                target: float, lo: float, hi: float) -> tuple[float, float] | None:
-    """체결가가 확정된 뒤 손절·목표를 **실측 진입가 기준**으로 다시 본다.
-
-    신호 단계의 손절폭 대역 검사(`rules.evaluate_all`)는 모델 진입가로 한다.
-    체결가는 그 뒤에 정해지고, 슬리피지가 폭을 대역 밖으로 밀어낼 수 있다.
-    **진입 전이라면 폐기했을 폭을 진입 후에는 아무도 다시 보지 않는다.**
-
-    실측 2026-07-27~31: 107건 중 17건이 체결 후 1.0~2.5% 밖이었고, 슬리피지가
-    폭을 최대 0.94%p 밀어냈다. 대역의 양쪽 끝은 각각 "비용을 못 이긴다"와
-    "목표가 하루 변동폭 밖이다" 를 뜻하므로, 밖으로 나간 폭은 그대로 두면
-    진입 시점에 이미 결론이 난 거래가 된다.
-
-    대역 **안이면 손절선을 그대로 둔다** — 대개 구조적 수준(레인지 저점·스윙
-    저점)이고 옮기면 근거가 사라진다. 밖일 때만 가장 가까운 경계로 당기고,
-    목표는 원래 설계한 손익비 R 을 유지하도록 다시 만든다.
-
-    반환: 새 (손절선, 목표가). 손댈 필요가 없으면 None.
-    """
-    if not (lo or hi):
-        return None
-    if not (model_entry and entry and stop) or entry <= 0 or model_entry <= 0:
-        return None
-    long = side == "long"
-    # 체결가가 이미 손절선을 넘어 버렸다면 옮기지 않는다. 손절선을 다시 그으면
-    # '즉시 청산될 자리' 가 '한 번 더 잃을 자리' 로 바뀐다 — 실거래에 닿는
-    # 판단은 보수적인 쪽으로 둔다.
-    if (long and entry <= stop) or (not long and entry >= stop):
-        return None
-    width = round(abs(entry - stop) / entry * 100, 4)
-    if (not lo or width >= lo) and (not hi or width <= hi):
-        return None
-    want = min(max(width, lo or width), hi or width)
-    # 원 설계의 손익비. 목표가 없거나 손절폭이 0이면 R 을 복원할 수 없다 —
-    # 그때는 목표를 건드리지 않는다(폭만 고친다).
-    base = abs(model_entry - stop)
-    r = abs(target - model_entry) / base if base > 0 and target else None
-    new_stop = entry * (1 - want / 100) if long else entry * (1 + want / 100)
-    new_target = target
-    if r is not None:
-        new_target = (entry * (1 + want * r / 100) if long
-                      else entry * (1 - want * r / 100))
-    return round(new_stop, 2), round(float(new_target), 2)
+# 체결 후 재검증 공식은 실전·백테스트 공용 모듈로 옮겼다(2026-09-28) — 이 이름은
+# 호출부·테스트 호환을 위해 남긴다. 근거·실측은 exit_policy.refit_lines docstring.
+refit_lines = exit_policy.refit_lines
 
 
 def _apply_refit(conn, row, entry: float) -> bool:
@@ -618,10 +572,8 @@ def set_lines(pos_id: str, stop: float | None, target: float | None,
         # 깎았다. 시계를 늘릴 근거는 "이익을 확정했다" 이지 "잠깐 올랐다" 가 아니다.
         prev_stop = row["stop_live"] if row["stop_live"] is not None else row["stop"]
         entry = float(row["entry"] or 0)
-        in_profit = stop is not None and entry > 0 and (
-            float(stop) > entry if row["side"] == "long" else float(stop) < entry)
-        moved = ts if (stop is not None and float(stop) != float(prev_stop)
-                       and in_profit) else row["stop_moved"]
+        moved = ts if (stop is not None and exit_policy.stop_moved_in_profit(
+            row["side"], entry, float(prev_stop), float(stop))) else row["stop_moved"]
         conn.execute(
             "UPDATE positions SET stop_live=?, target_live=?, lines_updated=?, "
             "stop_moved=? WHERE id=?", (stop, target, ts, moved, pos_id))
@@ -649,10 +601,7 @@ def due_exits(price_of, now: datetime | None = None) -> list[dict]:
         if p is None:
             continue
         stop, target = effective_lines(row)
-        if row["side"] == "long":
-            reason = "stop" if p <= stop else ("target" if p >= target else None)
-        else:
-            reason = "stop" if p >= stop else ("target" if p <= target else None)
+        reason = exit_policy.line_hit(row["side"], p, p, stop, target)
         px = None
         if reason:
             px = float(stop if reason == "stop" else target)

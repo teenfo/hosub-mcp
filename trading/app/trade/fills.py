@@ -22,6 +22,7 @@
        놓친 청산    (계좌 0 + 매도 체결 존재 → fills 가격으로 청산 기록)
        수동 매매    (주문번호가 원장에 없는 체결 → rule='external' 포지션.
                      손절·목표 없음 — **감시·기록만 하고 자동 청산하지 않는다**)
+       잔량 고아    (계좌 보유 > 원장 오픈 합 → rule='residual' 포지션, 2026-09-28)
   ③ reconcile_executions — 기존 멱등 대사(실체결가·실비용 확정). ②가 붙인
        exit_ord_no 도 같은 사이클에 확정된다
   ④ store_daily      — 증권사 계산 실현손익(ka10074, 순액) 저장.
@@ -209,15 +210,23 @@ def broker_realized_today(now: datetime | None = None,
 # 원장 정렬 — 사실(fills)에 맞춰 positions 를 고친다
 # --------------------------------------------------------------------------
 def sync_from_fills(day: str | None = None, holdings: dict[str, int] | None = None,
-                    now: datetime | None = None) -> dict:
-    """반환: {"ghost": n, "missed_exit": n, "external": n, "external_closed": n}."""
+                    now: datetime | None = None,
+                    holding_info: dict[str, dict] | None = None,
+                    exit_grace: set[str] | None = None) -> dict:
+    """반환: {"ghost", "missed_exit", "external", "external_closed",
+    "residual", "residual_cleared"} 건수.
+
+    holding_info: {종목: {"avg_price", "name"}} — 잔량 편입(④)의 진입가·이름.
+    exit_grace: 방금 청산이 나간 종목 — ④ 판정에서 뺀다(orders.recent_exit_symbols).
+    """
     from . import ledger
 
     day = day or datetime.now(KST).date().isoformat()
     now = now or datetime.now(KST)
     fills = today_fills(day)
     fill_ords = {f["ord_no"] for f in fills if f["ord_no"]}
-    out = {"ghost": 0, "missed_exit": 0, "external": 0, "external_closed": 0}
+    out = {"ghost": 0, "missed_exit": 0, "external": 0, "external_closed": 0,
+           "residual": 0, "residual_cleared": 0}
 
     with ledger._conn() as conn:
         open_rows = [dict(r) for r in conn.execute(
@@ -318,6 +327,82 @@ def sync_from_fills(day: str | None = None, holdings: dict[str, int] | None = No
                      round((krw / (b_avg * bq) * 100) if b_avg * bq else 0.0, 4),
                      fee, tax, pid))
                 out["external_closed"] += 1
+
+    if holdings is not None:
+        r = adopt_residuals(holdings, now, holding_info or {}, exit_grace or set())
+        out["residual"], out["residual_cleared"] = r["adopted"], r["cleared"]
+    return out
+
+
+RESIDUAL_RULE = "residual"
+
+
+def adopt_residuals(holdings: dict[str, int], now: datetime,
+                    holding_info: dict[str, dict], exit_grace: set[str]) -> dict:
+    """④ 원장 없는 보유(잔량 고아)를 `rule='residual'` 포지션으로 편입한다.
+
+    실사고 2026-09-28(mock): 시장가 청산이 일부만 체결됐는데 원장은 접수만 보고
+    닫혔다(KCC건설 680주 중 18주 체결 등). 잔량의 매수 주문번호는 원장이
+    **알고 있으므로** ③ 외부 매매 판정에 안 걸리고, 계좌엔 있는데 원장엔 없는
+    보유가 2주 넘게 쌓여 자산의 98%를 묶었다 — 신규 매수 전부 증거금 부족.
+
+    판정: 계좌 보유 − 같은 집행 종목의 오픈 포지션 합(잔량 행 제외) > 0.
+    편입 행은 손절·목표가 없다 — 외부 포지션과 같이 **데스크 자동 청산 대상이
+    아니고**, 화면에 보여 사람이 청산 버튼을 누를 수 있다. 단 마감 정리(eod)와
+    손실 전량 정리(loss_flat)는 오픈 포지션 전부를 닫으므로 이것도 닫힌다 —
+    '오버나이트 없음' 설계 전제 그대로다(외부 포지션과 같은 취급).
+
+    잔량이 사라지면(사람이 HTS 로 팔았거나 다른 경로로 정리) void 로 정리한다 —
+    실현손익의 원본은 broker_daily 이고, 이 행은 '보이게 하는' 장치다.
+    끄려면 config execution.residual_adopt: false.
+    """
+    from . import ledger
+
+    out = {"adopted": 0, "cleared": 0}
+    if not settings.CONFIG.get("execution", {}).get("residual_adopt", True):
+        return out
+    with ledger._conn() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM positions WHERE status='open'")]
+        managed: dict[str, int] = {}
+        residual_rows: dict[str, dict] = {}
+        for p in rows:
+            sym = ledger.executed_symbol(p)
+            if p.get("rule") == RESIDUAL_RULE:
+                residual_rows[sym] = p
+            else:
+                managed[sym] = managed.get(sym, 0) + int(p.get("qty") or 0)
+        for sym in sorted(set(holdings) | set(residual_rows)):
+            if sym in exit_grace:
+                continue                 # 방금 판 종목 — 잔고 반영 전일 수 있다
+            extra = int(holdings.get(sym, 0) or 0) - managed.get(sym, 0)
+            row = residual_rows.get(sym)
+            if extra > 0 and row is None:
+                info = holding_info.get(sym) or {}
+                avg = float(info.get("avg_price") or 0)
+                pid = f"res{now.strftime('%Y%m%d%H%M')}{sym}"
+                conn.execute(
+                    "INSERT OR IGNORE INTO positions (id, opened, symbol, name, rule,"
+                    " side, qty, model_entry, entry, stop, target, status, ord_no,"
+                    " fill_confirmed, slippage_pct, env)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (pid, now.isoformat(timespec="seconds"), sym,
+                     info.get("name") or sym, RESIDUAL_RULE, "long", extra,
+                     avg, avg, None, None, "open", None, 1, 0.0,
+                     settings.KIWOOM_ENV))
+                out["adopted"] += 1
+                log.warning("원장 없는 보유 편입(residual): %s %s %d주 @ %.0f — "
+                            "자동 청산 없음, 마감 정리 대상", info.get("name") or sym,
+                            sym, extra, avg)
+            elif extra > 0 and int(row["qty"] or 0) != extra:
+                conn.execute("UPDATE positions SET qty=? WHERE id=?", (extra, row["id"]))
+            elif extra <= 0 and row is not None:
+                conn.execute(
+                    "UPDATE positions SET status='void', closed=?,"
+                    " exit_reason='residual_cleared' WHERE id=?",
+                    (now.isoformat(timespec="seconds"), row["id"]))
+                out["cleared"] += 1
+                log.info("잔량 해소 확인(residual void): %s %s", row.get("name"), sym)
     return out
 
 

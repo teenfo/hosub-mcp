@@ -133,6 +133,7 @@ def test_장중_관측_표본_부족이면_중립_None(monkeypatch):
 
 
 def test_장중_관측은_config_로_끈다(monkeypatch):
+    """끈 동안은 '중립' 이 아니라 None — 못 잰 것을 중립으로 세지 않는다."""
     monkeypatch.setitem(settings.CONFIG, "regime_gate",
                         {"use_open_gap": True, "open_gap_th": 0.5,
                          "observe_intraday": False})
@@ -141,4 +142,15 @@ def test_장중_관측은_config_로_끈다(monkeypatch):
     eng = SignalEngine()
     monkeypatch.setattr(eng, "_today_df", lambda s: (_bar_df(100.0, 99.0), None))
     gap, ib, med = eng._gap_and_drift()
-    assert (ib, med) == ("중립", None)
+    assert (ib, med) == (None, None)
+
+
+def test_장중_관측은_기본값이_꺼짐이다(monkeypatch):
+    """폐기(2026-09-28) — 키가 없으면 켜지지 않는다(config·코드 기본값 동기)."""
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        {"use_open_gap": True, "open_gap_th": 0.5})
+    monkeypatch.setattr(settings, "WATCHLIST",
+                        {f"00000{i}": f"S{i}" for i in range(5)})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_today_df", lambda s: (_bar_df(100.0, 99.0), None))
+    assert eng._gap_and_drift()[1:] == (None, None)

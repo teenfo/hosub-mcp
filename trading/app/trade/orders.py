@@ -171,15 +171,52 @@ def accepted(result) -> bool:
 # 그쪽의 제1 목적은 확실한 탈출이다.
 MANUAL_EXIT_DEFAULTS = {"type": "best", "fallback_sec": 10}
 
+# 자동 청산(손절·목표·timeout·eod·loss_flat) 시장가의 **미체결 잔량 재발주** 대기.
+# 실측 2026-09-28(mock): 시장가 청산이 일부만 체결되고(KCC건설 680주 중 18주,
+# 진양폴리 1,844주 중 70주) 원장은 '접수'만 보고 닫혀, 잔량이 계좌에 남았다.
+# 9/1~9/14 에 쌓인 잔량 5종목이 자산의 98%(3,779만원)를 묶어 9/22 이후 모든
+# 신규 매수가 `RC4025 매수증거금 부족` 으로 거부됐다. 종전에는 잔량 폴백이
+# 수동(최유리) 청산에만 있었다. 0 이면 끈다(config execution.exit_residual_sec).
+EXIT_RESIDUAL_SEC = 20
+
 
 def _manual_exit_cfg() -> dict:
     cfg = settings.CONFIG.get("execution", {}).get("manual_exit", {}) or {}
     return MANUAL_EXIT_DEFAULTS | cfg
 
 
+async def _cap_by_holdings(client, pos: dict, exec_symbol: str, rem: int) -> int:
+    """잔량 재발주 수량을 **계좌 보유 − 같은 종목의 다른 오픈 포지션**으로 자른다.
+
+    잔량 계산의 근거인 WS 체결 수신(exec_fills)을 놓치면 rem 이 부풀고, 같은
+    종목의 다른 포지션 몫까지 팔 수 있다. 계좌 조회는 잔량이 있을 때만 부른다
+    (부분 체결 때만 — API 예산 영향 사실상 0). 조회 실패면 종전대로 rem 을
+    그대로 쓴다 — 브로커가 '매도가능수량 부족' 으로 자가 제한한다.
+    """
+    from ..kiwoom.account import parse_balance
+    from . import ledger
+
+    try:
+        data = parse_balance(await client.balance())
+    except Exception:  # noqa: BLE001 - 조회 실패는 '모름' — 종전 동작 유지
+        return rem
+    if not data.get("ok"):
+        return rem
+    held = sum(int(h.get("qty") or 0) for h in data.get("holdings") or []
+               if str(h.get("code")) == exec_symbol)
+    others = sum(int(p.get("qty") or 0)
+                 for p in ledger.positions(status="open", limit=200)
+                 if p.get("id") != pos.get("id")
+                 and ledger.executed_symbol(p) == exec_symbol)
+    return max(0, min(rem, held - others))
+
+
 async def _best_exit_fallback(pos: dict, exec_symbol: str, ord_no: str,
                               qty: int, wait_sec: float) -> None:
-    """최유리지정가 청산의 미체결 잔량 폴백 — 취소 후 시장가로 던진다.
+    """청산 미체결 잔량 폴백 — 취소 후 시장가로 던진다.
+
+    수동(최유리지정가) 청산과 자동(시장가) 청산 모두 쓴다(자동은 2026-09-28
+    부터 — EXIT_RESIDUAL_SEC 주석의 잔량 고아 사고).
 
     잔량 계산은 WS 체결 수신(exec_fills)이 근거라 지연이 있을 수 있다.
     취소가 이미 전량 체결로 거부되면 정상이고, 지연 탓에 과매도 재발주가
@@ -200,6 +237,9 @@ async def _best_exit_fallback(pos: dict, exec_symbol: str, ord_no: str,
                         exc_info=True)
         await asyncio.sleep(1.0)           # 취소 반영·직전 체결 수신 유예
         rem = qty - ledger.filled_qty(ord_no)
+        if rem <= 0:
+            return
+        rem = await _cap_by_holdings(client, pos, exec_symbol, rem)
         if rem <= 0:
             return
         result = await client.order("sell", exec_symbol, rem, price=0)
@@ -282,8 +322,13 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
         _audit(conn, order_id, f"exit_{reason}", detail)
     if status == "sent":
         ledger.close_position(pos["id"], float(exit_px), reason, ord_no=exit_ord_no)
-        fb = float(mcfg.get("fallback_sec", 10) or 0)
-        if use_best and exit_ord_no and fb > 0:
+        if use_best:
+            fb = float(mcfg.get("fallback_sec", 10) or 0)
+        else:
+            # 자동(시장가) 청산도 잔량을 확인한다 — 위 EXIT_RESIDUAL_SEC 주석
+            fb = float(settings.CONFIG.get("execution", {}).get(
+                "exit_residual_sec", EXIT_RESIDUAL_SEC) or 0)
+        if exit_ord_no and fb > 0:
             asyncio.create_task(_best_exit_fallback(
                 pos, exec_symbol, exit_ord_no, int(pos["qty"]), fb))
     else:
@@ -292,6 +337,20 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
     msg = result.get("return_msg") if isinstance(result, dict) else None
     return {"ok": status == "sent", "status": status, "result": result,
             "message": msg or detail[:200]}
+
+
+def recent_exit_symbols(minutes: float = 3.0) -> set[str]:
+    """최근 N분 안에 청산(매도)이 나간 집행 종목 — 잔량 편입 판정의 유예용.
+
+    원장은 청산 '접수' 시점에 닫히고 계좌 잔고는 체결 뒤에 줄어든다. 그 사이
+    잔고만 보면 방금 판 종목이 '원장 없는 보유' 로 보인다.
+    """
+    since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT exec_symbol FROM orders WHERE kind='exit'"
+            " AND status='sent' AND created>=?", (since,)).fetchall()
+    return {str(r[0]) for r in rows if r[0]}
 
 
 def expire_stale() -> int:

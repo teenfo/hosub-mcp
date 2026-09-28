@@ -1,19 +1,25 @@
 """신호 취합 — "서로 다른 정보원이 같은 종목을 가리켰는가".
 
-## 그룹 내 max, 그룹 간 합
+## 그룹 내 max, 그룹 간에도 max (2026-09-28 합산 폐지)
 
 ```
-total(code) = Σ_groups  max_{s ∈ group} effective(s)
+total(code) = max_{groups} max_{s ∈ group} effective(s)
 ```
 
-단순 합산이 아닌 이유가 이 파일의 핵심이다. `volume`·`gainers`·`presurge` 는
-같은 팩터(오늘의 가격·거래량 모멘텀)의 **세 가지 뷰**다 — `filter_candidates`
-와 `filter_gainers` 는 실제로 **둘 다 `change_pct` 로 정렬한다.** 더하면
-이벤트 스터디가 잡아낸 바로 그 베타 노출을 3배로 증폭한다. 그룹 안에서는
-가장 센 것 하나만 세고, 그룹이 다를 때만 더한다.
+단순 합산이 아닌 이유: `volume`·`gainers`·`presurge` 는 같은 팩터(오늘의
+가격·거래량 모멘텀)의 **세 가지 뷰**다 — `filter_candidates` 와
+`filter_gainers` 는 실제로 **둘 다 `change_pct` 로 정렬한다.** 더하면 이벤트
+스터디가 잡아낸 바로 그 베타 노출을 3배로 증폭한다. 그래서 그룹 안에서는
+가장 센 것 하나만 센다.
 
-**서로 다른 정보원이 같은 종목을 가리킬 때만 점수가 오른다** — 이것이
-"정보 취합" 의 정직한 구현이다.
+**그룹 간 합도 폐지했다(사용자 결정 2026-09-28, 측정 원장 9/22 절).** 원래
+"서로 다른 정보원이 같은 종목을 가리키면 점수가 오른다" 는 합의 가설로 그룹
+간에는 더했다. 사전 확정 기준(2그룹+ n≥150 이고 차이 t≥2)으로 8주 재확인한
+결과 **n=172, t=−0.43 — 합의는 익일 수익과 무관**했다(부호까지 음). 그런데
+합산은 다중 소스 종목을 상위로 올려 상한 경쟁·강등 순서에서 자리를 먼저
+차지하게 했다 — 1.5단계에서 폐기한 '점수로 매매를 여는' 구조의 잔재다.
+합의 수(`group_count`)는 화면 표시용으로만 남는다. 되돌리기는 `aggregate` 의
+한 줄(max → sum).
 
 ## 가중치를 학습하지 않는다
 
@@ -132,8 +138,9 @@ def aggregate(signals: list[Signal], now: datetime | None = None) -> list[Candid
         # 그룹 내 max — 같은 팩터를 두 번 세지 않는다
         c.by_group[g] = max(c.by_group.get(g, 0.0), WEIGHT * eff)
     for c in by_code.values():
-        c.score = round(sum(v for g, v in c.by_group.items()
-                            if g not in UNSCORED), 4)
+        # 그룹 간 max — 합의 가설 기각(2026-09-22 측정, 모듈 docstring)
+        c.score = round(max((v for g, v in c.by_group.items()
+                             if g not in UNSCORED), default=0.0), 4)
         c.sources.sort()
         c.signals.sort(key=lambda s: (s.source, s.observed_at))
     return sorted(by_code.values(), key=lambda c: (-c.score, c.code))
@@ -142,6 +149,7 @@ def aggregate(signals: list[Signal], now: datetime | None = None) -> list[Candid
 def max_possible() -> float:
     """이론상 최대 점수 — 화면의 임계선을 비율로 그릴 때 쓴다.
 
-    점수에 안 들어가는 그룹은 빼야 화면의 비율이 실제와 맞는다.
+    그룹 간 max 라 소스 하나의 최대 세기(1.0 × WEIGHT)가 곧 상한이다
+    (합산 시절에는 점수 그룹 수 × WEIGHT 였다).
     """
-    return float(len(set(GROUPS) - UNSCORED)) * WEIGHT
+    return WEIGHT if set(GROUPS) - UNSCORED else 0.0
