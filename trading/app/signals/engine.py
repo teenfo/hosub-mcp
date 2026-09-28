@@ -48,7 +48,7 @@ class SignalEngine:
         self.gap_bias = "중립"         # 당일 시가 갭 방향
         self.night_bias = "중립"       # 야간 리포트(미국장 등) 익일 편향
         self.regime = "중립"           # 유효 국면 = base + 시가갭 + 야간리포트 결합
-        self.intraday_bias = "중립"    # 장중 방향 관측(판정 미사용 — 원장 적재만)
+        self.intraday_bias: str | None = None   # 장중 방향 관측 — 2026-09-28 폐기(기본 끔)
         # 분봉 백필 라운드로빈 — 한 사이클에 감시목록 전체를 부르지 않는다
         self._backfill_cursor = 0
         self._backfill_held: set[str] = set()
@@ -105,8 +105,12 @@ class SignalEngine:
             return b, round(med, 3)
 
         gap = _bias(gaps)[0] if gate.get("use_open_gap", True) else "중립"
-        if not gate.get("observe_intraday", True):
-            return gap, "중립", None
+        # 관측 폐기(사용자 결정 2026-09-28, 측정 원장 9/1 절 ③): 반사실 표본 0 +
+        # 전환일 90%(±0.5% 단일 임계의 경계 진동) — 사전 규칙대로 폐기. 끈 동안은
+        # '중립' 이 아니라 **None** 으로 남긴다(못 잰 것을 중립으로 세지 않는다).
+        # 재도입은 히스테리시스 설계로 새 사전 등록이어야 한다.
+        if not gate.get("observe_intraday", False):
+            return gap, None, None
         drift_bias, drift_med = _bias(moves)
         return gap, drift_bias, drift_med
 
