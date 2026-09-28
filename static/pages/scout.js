@@ -882,12 +882,15 @@ export default {
         "<th>정보원 기여</th><th class='text-end'>합의</th>" +
         "<th class='text-end'>현재가</th><th>현재 tier</th>",
         cands.map((c, i) => {
-          const width = Math.max(2, Math.round((c.score / (maxScore || 4)) * 100));
+          const width = Math.max(2, Math.round((c.score / (maxScore || 1)) * 100));
+          // 점수는 그룹 간 max(2026-09-28 합산 폐지) — 막대 길이는 점수, 조각은
+          // 그룹별 기여의 비율이다. 조각을 max 기준으로 그리면 다중 그룹이 100%를 넘는다.
+          const groupSum = Object.values(c.by_group || {}).reduce((a, b) => a + b, 0) || 1;
           const bar = el("div", { class: "progress", style: "height:.7rem;min-width:120px" },
             Object.entries(c.by_group || {}).map(([g, v]) => el("div", {
               class: "progress-bar " + (g === "news" ? "bg-success" : g === "daily" ? "bg-primary"
                      : g === "human" ? "bg-dark" : "bg-info"),
-              style: `width:${Math.round((v / (maxScore || 4)) * 100)}%`,
+              style: `width:${Math.round((v / groupSum) * Math.min(100, (c.score / (maxScore || 1)) * 100))}%`,
               title: `${GROUP_KO[g] || g} ${v.toFixed(3)}`,
             })));
           return el("tr", {}, [

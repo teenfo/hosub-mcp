@@ -39,15 +39,19 @@ def test_intraday_sources_do_not_stack():
     assert got[0].group_count == 1
 
 
-def test_distinct_groups_add_up():
-    """서로 다른 정보원이 같은 종목을 가리킬 때만 점수가 오른다."""
+def test_그룹_간에도_합하지_않고_max_다():
+    """합의 가설 기각(2026-09-22, n=172 t=−0.43) → 그룹 간 합 폐지(2026-09-28).
+
+    합산 시절에는 2.0 이었다. 합의는 익일 수익과 무관한데 다중 소스 종목을
+    상위로 올려 상한 경쟁에서 자리를 먼저 차지하게 했다 — 부활 방지 테스트.
+    """
     got = scoring.aggregate([
         _s(source=model.VOLUME, strength=0.9),
         _s(source=model.NIGHTLY, strength=0.6),
         _s(source=model.NEWS, strength=0.5),
     ], NOW)
-    assert got[0].score == pytest.approx(2.0)
-    assert got[0].group_count == 3
+    assert got[0].score == pytest.approx(0.9)
+    assert got[0].group_count == 3, "합의 수는 화면 표시용으로 남는다"
 
 
 def test_group_count_is_the_readable_number():
@@ -149,10 +153,9 @@ def test_weights_are_flat():
     assert same == [pytest.approx(0.5)] * len(scored)
 
 
-def test_max_possible_is_group_count():
-    """점수에 안 들어가는 그룹은 빼야 화면의 임계선 비율이 실제와 맞는다."""
-    assert scoring.max_possible() == float(len(set(model.GROUPS) - scoring.UNSCORED))
-    assert scoring.max_possible() == 4.0    # intraday·daily·news·flow (human 제외)
+def test_max_possible_은_소스_하나의_최대_세기다():
+    """그룹 간 max 라 상한은 WEIGHT(1.0) — 합산 시절의 그룹 수(4.0)가 아니다."""
+    assert scoring.max_possible() == pytest.approx(scoring.WEIGHT)
 
 
 # --- ⑤ 부가 정보 ---
