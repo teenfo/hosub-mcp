@@ -8,9 +8,10 @@ from __future__ import annotations
 import os
 
 from .audit import AuditLog
+from .jobs import JobManager
 from .oauth import OAuthStore
 from .registry import Registry
-from .runner import SubprocessRunner
+from .runner import SubprocessRunner, current_rev
 from .server import build_app
 
 _MIN_TOKEN_LEN = 32
@@ -47,6 +48,9 @@ def create_app():
     registry = Registry.load(registry_path, strict=strict)
     audit = AuditLog(db_path)
     runner = SubprocessRunner()
+    # 런스테이트: deploy/update.sh 가 재시작 판단(기동 커밋·실행 중 잡)에 읽는다.
+    runstate = os.environ.get("HOSUB_RUNSTATE_MCP", "data/runstate-mcp.json")
+    jobs = JobManager(runner, audit, state_path=runstate, rev=current_rev())
     oauth_store = OAuthStore(oauth_db)
 
     return build_app(
@@ -56,6 +60,7 @@ def create_app():
         mcp_token=token,
         dash_password=dash_password,
         session_secret=session_secret,
+        jobs=jobs,
         allowed_hosts=allowed_hosts,
         oauth_store=oauth_store,
         public_url=public_url,

@@ -14,6 +14,14 @@ from ..policy import check_confirm
 
 _MAX_TIMEOUT = 3600
 _SYNC_OUTPUT_MAX = 16384
+# 승인 요청에 붙이는 안내 — 읽기만 할 거면 승인 없는 전용 도구가 있다는 것을 알려
+# 세션이 confirm=true 를 습관적으로 붙이지 않게 한다.
+_READONLY_HINT = (
+    "읽기 전용 점검이면 승인 없이 쓰는 전용 도구를 쓰세요: "
+    "unit_status(유닛 상태·결과), unit_logs(journalctl), stat_path(존재·크기·mtime·서버 시각), "
+    "sqlite_query(SELECT 전용), read_file, list_directory, get_system_status(df/free/uptime). "
+    "30분 넘는 작업은 background 잡 대신 run_unit(서비스 수명과 분리)을 쓰세요."
+)
 
 
 def _build_argv(command: str, use_sudo: bool) -> list[str]:
@@ -57,6 +65,7 @@ def register(mcp: FastMCP, ctx: AppContext) -> None:
                 risk="high",
                 outcome="approval_required",
             )
+            denial["hint"] = _READONLY_HINT
             return denial
 
         argv = _build_argv(command, use_sudo)

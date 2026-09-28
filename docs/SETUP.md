@@ -281,12 +281,27 @@ OTP/SSO) 병행을 권장**한다.
 
 | 트리거 | 재시작 대상 | 게이트웨이에 영향 |
 |---|---|---|
-| `hosub-mcp-update.timer` (5분) | `hosub-mcp` 만 | ❌ 없음 |
+| `hosub-mcp-update.timer` (5분) | 바뀐 경로에 따라 `hosub-mcp`+`hosub-dash` / `hosub-dash` 만 / **없음** (아래 표) | ❌ 없음 |
 | `deploy_service("dash")` | `hosub-dash` | ❌ 없음 (코드는 pull 됨 — 아래 참고) |
 | `deploy_service("tnm")` | `tnm` | ❌ 없음 (동상) |
 | `deploy_service("trading")` | `trading` | ❌ 없음 (다른 클론) |
 | `deploy_service("llm-gateway")` | 게이트웨이 컨테이너만 | ✅ 이때만 |
 | `systemctl reload llm-gateway` | 게이트웨이 컨테이너만 | ✅ 이때만 |
+
+`update.sh` 의 재시작 판정 (기준 커밋 = 각 프로세스가 `data/runstate-*.json` 에 적은
+**기동 시점 커밋**, 없으면 이번 pull 직전 HEAD):
+
+| 바뀐 경로 | 재시작 |
+|---|---|
+| `trading/` `tnm/` `docs/` `tests/` `scripts/` `llm-gateway/` `*.md` | 없음 (pull 만) |
+| `static/` `src/dashboard.py` `src/asgi_dash.py` | `hosub-dash` 만 |
+| 그 외 (`src/` `requirements.txt` `config/` `deploy/` 및 모르는 경로) | `hosub-mcp` + `hosub-dash` |
+
+실행 중인 잡(`active_jobs`)이 있으면 그 프로세스의 재시작을 다음 주기로 미룬다.
+최대 `HOSUB_UPDATE_MAX_DEFER_SEC`(기본 7200초)가 지나면 강행하고, 죽은 잡은
+재시작 뒤 `get_job_status` 에서 `lost_on_restart` 로 보인다.
+기준이 기동 커밋이므로 `deploy_service("dash"/"tnm")` 가 먼저 pull 해 버려도
+필요한 MCP 재시작을 놓치지 않는다.
 
 `dash`·`tnm` 배포는 `/opt/hosub-mcp` 에서 `git pull` 하므로 **게이트웨이 코드도
 디스크에는 내려온다.** 컨테이너는 옛 이미지로 계속 도는데, 이건 의도된 동작이다

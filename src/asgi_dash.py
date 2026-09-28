@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 
 from .audit import AuditLog
+from .jobs import JobManager
 from .registry import Registry
-from .runner import SubprocessRunner
+from .runner import SubprocessRunner, current_rev
 from .server import build_dash_app
 
 
@@ -37,6 +38,9 @@ def create_app():
     registry = Registry.load(registry_path, strict=strict)
     audit = AuditLog(db_path)
     runner = SubprocessRunner()
+    # 런스테이트: deploy/update.sh 가 재시작 판단(기동 커밋·실행 중 잡)에 읽는다.
+    runstate = os.environ.get("HOSUB_RUNSTATE_DASH", "data/runstate-dash.json")
+    jobs = JobManager(runner, audit, state_path=runstate, rev=current_rev())
 
     return build_dash_app(
         registry=registry,
@@ -44,6 +48,7 @@ def create_app():
         audit=audit,
         dash_password=dash_password,
         session_secret=session_secret,
+        jobs=jobs,
     )
 
 

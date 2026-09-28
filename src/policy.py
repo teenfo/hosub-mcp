@@ -31,6 +31,11 @@ TOOL_RISK: dict[str, Risk] = {
     "llm_job": Risk.LOW,
     "llm_generate": Risk.LOW,
     "llm_model_requests": Risk.LOW,
+    # 읽기 전용 운영 점검 (셸 미경유·sudo 없음 — src/tools/readonly.py)
+    "unit_status": Risk.LOW,
+    "unit_logs": Risk.LOW,
+    "stat_path": Risk.LOW,
+    "sqlite_query": Risk.LOW,
     # 상태 변경 (confirm 필요)
     "restart_service": Risk.MEDIUM,
     "run_backup": Risk.MEDIUM,
@@ -39,6 +44,7 @@ TOOL_RISK: dict[str, Risk] = {
     "deploy_service": Risk.HIGH,
     "run_script": Risk.HIGH,
     "run_command": Risk.HIGH,
+    "run_unit": Risk.HIGH,
     "write_file": Risk.HIGH,
 }
 

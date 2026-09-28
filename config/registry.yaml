@@ -14,7 +14,7 @@
 services:
   trading:
     unit: trading.service
-    description: "반자동 트레이딩 대시보드 (키움 REST API, 127.0.0.1:8600)"
+    description: "트레이딩 서비스 (키움 REST API, 127.0.0.1:8600)"
     deploy:
       workdir: /opt/hosub-trading
       steps:
@@ -22,6 +22,13 @@ services:
         - ["trading/.venv/bin/pip", "install", "-q", "-r", "trading/requirements.txt"]
       restart_after: true
       timeout_seconds: 600
+      # 배포 금지 시간창 (Asia/Seoul). 이 안에서는 deploy_service 가 거부한다
+      # (사용자가 명시적으로 원하면 force=true). 재시작이 장중 매매·야간 배치
+      # (EOD 백테스트 리포트)를 끊은 사고가 두 번 있었다(rc=-15).
+      # 자정을 넘는 창은 두 개로 나눠 적는다.
+      blackout:
+        - {days: mon-fri, from: "08:50", to: "15:40"}
+        - {days: mon-fri, from: "17:25", to: "20:00"}
   dash:
     unit: hosub-dash.service
     description: "hosub 대시보드 (웹 UI·트레이딩 프록시, 127.0.0.1:8701 — MCP 와 분리)"

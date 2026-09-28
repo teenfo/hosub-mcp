@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
@@ -19,7 +20,12 @@ _CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _ALLOWED_TOP_KEYS = {"services", "scripts", "backup_script"}
 _ALLOWED_SERVICE_KEYS = {"unit", "description", "deploy", "container"}
 _ALLOWED_SCRIPT_KEYS = {"path", "description", "timeout_seconds"}
-_ALLOWED_DEPLOY_KEYS = {"workdir", "steps", "restart_after", "timeout_seconds"}
+_ALLOWED_DEPLOY_KEYS = {"workdir", "steps", "restart_after", "timeout_seconds", "blackout"}
+_ALLOWED_BLACKOUT_KEYS = {"days", "from", "to"}
+_HHMM_RE = re.compile(r"^([01][0-9]|2[0-3]):([0-5][0-9])$")
+_DAY_NAMES = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+# 한국은 서머타임이 없으므로 고정 +09:00 이면 충분하다(tzdata 의존 없음).
+KST = timezone(timedelta(hours=9))
 
 
 class RegistryError(ValueError):
@@ -35,11 +41,34 @@ class ScriptEntry:
 
 
 @dataclass(frozen=True)
+class BlackoutWindow:
+    """배포 금지 시간창 (Asia/Seoul). days: 0=월 … 6=일, 분 단위 [start, end)."""
+
+    days: frozenset[int]
+    start: int
+    end: int
+    label: str
+
+    def contains(self, now: datetime) -> bool:
+        local = now.astimezone(KST)
+        minute = local.hour * 60 + local.minute
+        return local.weekday() in self.days and self.start <= minute < self.end
+
+
+@dataclass(frozen=True)
 class DeploySpec:
     workdir: str | None
     steps: tuple[tuple[str, ...], ...]
     restart_after: bool
     timeout_seconds: int
+    blackout: tuple[BlackoutWindow, ...] = ()
+
+    def active_blackout(self, now: datetime | None = None) -> BlackoutWindow | None:
+        now = now or datetime.now(KST)
+        for w in self.blackout:
+            if w.contains(now):
+                return w
+        return None
 
 
 @dataclass(frozen=True)
@@ -191,7 +220,72 @@ class Registry:
             steps=tuple(steps),
             restart_after=bool(node.get("restart_after", False)),
             timeout_seconds=int(node.get("timeout_seconds", 900)),
+            blackout=Registry._parse_blackout(service_name, node.get("blackout")),
         )
+
+    @staticmethod
+    def _parse_days(service_name: str, raw) -> frozenset[int]:
+        """'mon-fri', 'sat,sun', 'mon', 'daily' → 요일 번호 집합."""
+        if not isinstance(raw, str) or not raw.strip():
+            raise RegistryError(f"서비스 '{service_name}' blackout.days 는 문자열이어야 함")
+        text = raw.strip().lower()
+        if text in ("daily", "all", "*"):
+            return frozenset(range(7))
+        out: set[int] = set()
+        for part in text.split(","):
+            part = part.strip()
+            if "-" in part:
+                a, _, b = part.partition("-")
+                if a not in _DAY_NAMES or b not in _DAY_NAMES:
+                    raise RegistryError(f"서비스 '{service_name}' blackout.days 오류: {raw!r}")
+                i, j = _DAY_NAMES.index(a), _DAY_NAMES.index(b)
+                if i > j:
+                    raise RegistryError(f"서비스 '{service_name}' blackout.days 범위가 거꾸로임: {raw!r}")
+                out.update(range(i, j + 1))
+            elif part in _DAY_NAMES:
+                out.add(_DAY_NAMES.index(part))
+            else:
+                raise RegistryError(f"서비스 '{service_name}' blackout.days 오류: {raw!r}")
+        return frozenset(out)
+
+    @staticmethod
+    def _parse_blackout(service_name: str, node) -> tuple[BlackoutWindow, ...]:
+        if node is None:
+            return ()
+        if not isinstance(node, list):
+            raise RegistryError(f"서비스 '{service_name}' deploy.blackout 은 리스트여야 함")
+        out: list[BlackoutWindow] = []
+        for i, w in enumerate(node):
+            if not isinstance(w, dict):
+                raise RegistryError(f"서비스 '{service_name}' blackout[{i}] 는 매핑이어야 함")
+            unknown = set(w) - _ALLOWED_BLACKOUT_KEYS
+            if unknown:
+                raise RegistryError(
+                    f"서비스 '{service_name}' blackout[{i}] 알 수 없는 키: {sorted(unknown)}"
+                )
+            mins = []
+            for key in ("from", "to"):
+                m = _HHMM_RE.match(str(w.get(key, "")))
+                if not m:
+                    raise RegistryError(
+                        f"서비스 '{service_name}' blackout[{i}].{key} 는 \"HH:MM\" 이어야 함"
+                    )
+                mins.append(int(m.group(1)) * 60 + int(m.group(2)))
+            if mins[0] >= mins[1]:
+                # 자정을 넘는 창은 두 개로 나눠 선언한다(요일 해석이 모호해지므로).
+                raise RegistryError(
+                    f"서비스 '{service_name}' blackout[{i}] from < to 여야 함 "
+                    "(자정을 넘으면 두 창으로 나눌 것)"
+                )
+            out.append(
+                BlackoutWindow(
+                    days=Registry._parse_days(service_name, w.get("days")),
+                    start=mins[0],
+                    end=mins[1],
+                    label=f"{w.get('days')} {w.get('from')}~{w.get('to')} KST",
+                )
+            )
+        return tuple(out)
 
     @staticmethod
     def _parse_scripts(node: dict, *, strict: bool) -> dict[str, ScriptEntry]:

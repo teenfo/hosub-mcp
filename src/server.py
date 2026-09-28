@@ -24,8 +24,9 @@ from .jobs import JobManager
 from .oauth import OAuthStore
 from .registry import Registry
 from .runner import CommandRunner
-from .tools import control, files, llm as llm_tools, scripts, shell, system
+from .tools import control, files, llm as llm_tools, readonly, scripts, shell, system
 from .tools import jobs as jobs_tools
+from .tools import units
 
 SERVER_NAME = "hosub-mcp"
 
@@ -56,6 +57,8 @@ def build_mcp(
     control.register(mcp, ctx)
     scripts.register(mcp, ctx)
     shell.register(mcp, ctx)
+    readonly.register(mcp, ctx)
+    units.register(mcp, ctx)
     files.register(mcp, ctx)
     jobs_tools.register(mcp, ctx)
     llm_tools.register(mcp, ctx)

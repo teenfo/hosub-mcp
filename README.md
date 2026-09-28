@@ -14,7 +14,7 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
 - **SQLite 감사 로그**: 모든 도구 호출과 잡 종결을 기록
 - **모니터링 대시보드**: 같은 프로세스에 마운트, 별도 비밀번호 로그인(조회 전용)
 
-## 도구 (19종)
+## 도구 (24종)
 
 | 도구 | 위험도 | 설명 |
 |---|---|---|
@@ -23,11 +23,15 @@ Cloudflare Tunnel 로 공인 인터넷에 노출한다. 조회 전용 웹 대시
 | `read_service_logs` | Low | 등록 서비스의 journald 로그 |
 | `get_job_status` / `list_jobs` | Low | 백그라운드 잡 조회 |
 | `read_file` / `list_directory` | Low | 파일 읽기 / 디렉터리 목록 |
+| `unit_status` / `unit_logs` | Low | 아무 systemd 유닛(transient 포함)의 상태·결과 / journald 로그 — 셸 미경유 |
+| `stat_path` | Low | 파일 존재·크기·mtime(KST) + 서버 현재 시각 |
+| `sqlite_query` | Low | SQLite **읽기 전용** 조회 (허용 루트 `/data/trading` 안, SELECT/WITH 만) |
 | `restart_service` | Medium | 등록 서비스 재시작 |
 | `run_backup` | Medium | 레지스트리 지정 백업 스크립트 실행 |
-| `deploy_service` | High | 등록 서비스 배포(git pull+빌드+재시작) |
+| `deploy_service` | High | 등록 서비스 배포(git pull+빌드+재시작). 레지스트리 `blackout` 창 안에서는 거부(`force=true` 로 강행) |
 | `run_script` | High | 화이트리스트 스크립트만 실행 |
 | `run_command` | High | **임의 셸 명령** (서버 전체 제어) |
+| `run_unit` | High | 장기 작업을 systemd transient 유닛(`mcp-<name>`)으로 — MCP 재시작과 무관하게 끝까지 돈다 |
 | `write_file` | High | **임의 파일 쓰기** (서버 전체 제어) |
 | `llm_list_roles` / `llm_status` | Low | 쓸 수 있는 LLM 역할·모델, 백엔드/대기열 상태 |
 | `llm_generate` / `llm_job` | Low | 맥의 LLM 실행(게이트웨이 경유) / pending 결과 수령 |
@@ -163,7 +167,7 @@ curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8700/mcp
 
 - **설치·연동 전체 절차**: [`docs/SETUP.md`](docs/SETUP.md) (로컬 Claude Code 기준 상세 가이드)
 - **최초 설치**: `sudo bash deploy/bootstrap.sh` — 전용 유저·venv·의존성·.env(시크릿 자동 발급)·systemd 유닛을 한 번에 준비
-- **자동 배포 (pull 기반, 권장)**: `hosub-mcp-update.timer` 가 5분마다 추적 브랜치(`HOSUB_MCP_BRANCH`, 기본 `main`)를 폴링 → 변경 시 `git pull` + `pip install` + 서비스 재시작. **코드를 머지하면 서버가 자동으로 최신화**된다(NAT 뒤 홈서버에 적합, SSH 개방 불필요).
+- **자동 배포 (pull 기반, 권장)**: `hosub-mcp-update.timer` 가 5분마다 추적 브랜치(`HOSUB_MCP_BRANCH`, 기본 `main`)를 폴링 → `git pull` 후 **바뀐 경로에 따라서만** 재시작한다(`trading/`·`tnm/`·`docs/` 등만 바뀌면 재시작 없음, `static/` 은 대시보드만). 실행 중 잡이 있으면 최대 2시간까지 재시작을 미룬다. **코드를 머지하면 서버가 자동으로 최신화**된다(NAT 뒤 홈서버에 적합, SSH 개방 불필요). 규칙은 `deploy/update.sh` 머리말 참고.
   - 즉시 반영: `sudo -u hosub /opt/hosub-mcp/deploy/update.sh`
   - 로그: `journalctl -u hosub-mcp-update.service`
 > 참고: 과거 대안이던 GitHub Actions push 배포(`appleboy/ssh-action`)는 NAT 뒤 홈서버로 SSH 인바운드가 필요해 이 환경에 맞지 않아 제거했다. pull 방식(위)이 유일한 자동 배포 경로다. 굳이 push 배포를 원하면 22번 포트 개방(또는 cloudflared access) + 시크릿 설정이 필요하다.
@@ -214,5 +218,7 @@ main 머지 ──5분──▶ 서버 자동 배포(pull)
 - `confirm=true` 는 서버가 실제 사용자 동의를 검증할 수 없는 **advisory** 방식이다
   (단일 사용자 개인 서버 전제). 추후 승인 nonce 로 강화 가능.
 - 전용 유저 실행(root 금지), 강한 토큰, Cloudflare Access 병행을 강하게 권고한다.
-- 잡 상태는 인메모리라 재시작 시 소실된다 — 영구 기록은 감사 DB 가 담당한다.
+- 잡은 MCP 프로세스의 자식이라 재시작 시 함께 죽는다. 목록은 `data/runstate-mcp.json`
+  으로 남아, 재시작 뒤 `get_job_status` 가 그 잡을 `lost_on_restart` 로 알려 준다.
+  30분 넘는 작업은 `run_unit` 으로 서비스 수명과 분리할 것.
 - MCP SDK v2 GA 시 `FastMCP`→`MCPServer` 소규모 마이그레이션이 필요하다.

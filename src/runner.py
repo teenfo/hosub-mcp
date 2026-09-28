@@ -108,3 +108,22 @@ class SubprocessRunner:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
             proc.kill()
+
+
+def current_rev(cwd: str | None = None) -> str | None:
+    """작업 트리의 HEAD 커밋. 기동 시점의 코드 버전을 런스테이트에 남기는 용도.
+
+    git 이 없거나 저장소가 아니면 None — update.sh 는 그때 보수적으로 판단한다.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    rev = out.stdout.strip()
+    return rev if out.returncode == 0 and len(rev) == 40 else None

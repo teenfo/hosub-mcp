@@ -91,7 +91,9 @@ async def test_mcp_session(server):
             await session.initialize()
             tools = await session.list_tools()
             names = {t.name for t in tools.tools}
-            assert len(names) == 19
+            assert len(names) == 24
+            assert {"unit_status", "unit_logs", "stat_path", "sqlite_query",
+                    "run_unit"} <= names
             assert {"run_command", "write_file", "get_system_status",
                     "llm_model_requests", "llm_decide_model", "llm_job"} <= names
 
