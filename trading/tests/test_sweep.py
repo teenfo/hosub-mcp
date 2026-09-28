@@ -31,6 +31,8 @@ def test_run_sweep_writes_scorecard(tmp_path, monkeypatch):
     assert set(out["rules"]) == set(rules.REGISTRY)
     for st in out["rules"].values():
         assert "trades" in st
+        # 실전 청산 공식 재생 결과가 나란히 실린다(2026-09-28) — 최상위는 legacy 유지
+        assert "trades" in st["live"]
     # 파일 영속화 + latest 로 재조회
     assert sweep.latest()["run_ts"] == out["run_ts"]
 

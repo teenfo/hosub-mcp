@@ -48,9 +48,31 @@ async def run_offloaded() -> dict:
         running = False
 
 
+def _score(closed: list, costs: dict, risk_pct: float) -> dict:
+    if not closed:
+        return {"trades": 0}
+    rs = [t.r_multiple(costs) for t in closed]
+    accs = [t.account_pct(costs, risk_pct) for t in closed]
+    wins = sum(1 for r in rs if r > 0)
+    mix: dict[str, int] = {}
+    for t in closed:
+        mix[t.exit_reason] = mix.get(t.exit_reason, 0) + 1
+    return {
+        "trades": len(closed),
+        "win_rate": round(100 * wins / len(closed), 1),
+        "avg_r": round(sum(rs) / len(rs), 2),
+        "account_pct": round(sum(accs), 2),
+        "exits": mix,
+    }
+
+
 def _run_sweep() -> dict:
     from ..data import store
     from ..signals.rules import REGISTRY
+    from ..trade import exit_policy
+
+    # 실전 청산 공식 스냅샷(2026-09-28) — 규칙마다 같은 값으로 재생한다
+    live_params = exit_policy.Params.from_settings()
 
     risk_pct = settings.RISK.get("risk_per_trade_pct", 0.8)
     costs = settings.COSTS
@@ -67,7 +89,7 @@ def _run_sweep() -> dict:
         rule_cfg = dict(settings.RULES.get(name, {}))
         rule_cfg["enabled"] = True
         cfg = {name: rule_cfg, "max_stop_pct": max_stop}
-        trades = []
+        trades, live_trades = [], []
         for sym, df in dfs.items():
             try:
                 # **롱 전용을 재생 단계에 넘긴다**(사후 필터 금지).
@@ -78,21 +100,18 @@ def _run_sweep() -> dict:
                 # rule_sweep.avg_r 을 근거로 쓴 과거 판단(8/28 다이버전스 등)은
                 # 이 오염 위에 있었다 — 전후 차이는 measurement.md 에 기록.
                 trades.extend(runner.run(sym, df, cfg, sides=("long",)).trades)
+                # 실전 청산 공식(추종·익절 상한·시간 손절·15:20 정리·재검증)으로
+                # 한 번 더 — 최상위 값(legacy)은 과거 성적표와의 비교 가능성 때문에
+                # 그대로 두고 `live` 키에 나란히 싣는다(2026-09-28).
+                live_trades.extend(runner.run(
+                    sym, df, cfg, sides=("long",), exit_model="live",
+                    exit_params=live_params).trades)
             except Exception:  # noqa: BLE001 - 종목 하나의 오류가 스윕을 막지 않게
                 log.exception("스윕 오류 %s/%s", name, sym)
         closed = [t for t in trades if t.exit is not None and t.side == "long"]
-        if not closed:
-            results[name] = {"trades": 0}
-            continue
-        rs = [t.r_multiple(costs) for t in closed]
-        accs = [t.account_pct(costs, risk_pct) for t in closed]
-        wins = sum(1 for r in rs if r > 0)
-        results[name] = {
-            "trades": len(closed),
-            "win_rate": round(100 * wins / len(closed), 1),
-            "avg_r": round(sum(rs) / len(rs), 2),
-            "account_pct": round(sum(accs), 2),
-        }
+        results[name] = _score(closed, costs, risk_pct)
+        results[name]["live"] = _score(
+            [t for t in live_trades if t.exit is not None], costs, risk_pct)
     out = {"run_ts": datetime.now(KST).isoformat(timespec="seconds"),
            "symbols": len(dfs), "side": "long", "rules": results}
     OUT_FILE.write_text(json.dumps(out, ensure_ascii=False))

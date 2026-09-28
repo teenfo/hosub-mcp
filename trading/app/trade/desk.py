@@ -49,7 +49,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .. import settings
-from . import ledger
+from . import exit_policy, ledger
 
 log = logging.getLogger(__name__)
 KST = ZoneInfo("Asia/Seoul")
@@ -298,32 +298,15 @@ def update_lines(pos: dict, price: float) -> tuple[float | None, float | None] |
     if entry <= 0 or price <= 0:
         return None
 
-    at, lock = _num("tighten_at"), _num("lock_gain_pct") / 100.0
-    cap_pct = _num("max_gain_pct") / 100.0
-    tgt = bool(cfg().get("trail_target", False))
     cur_stop, cur_target = ledger.effective_lines(pos)
-    if pos["side"] == "long":
-        s_gap, t_gap = entry - stop0, target0 - entry
-        cand = price - s_gap if s_gap > 0 else cur_stop
-        if t_gap > 0 and lock > 0 and price >= entry + t_gap * at:
-            cand = max(cand, entry + (price - entry) * lock)   # 상승분의 x% 확정
-        new_stop = max(cur_stop, cand)
-        new_target = (max(cur_target, price + t_gap)
-                      if (tgt and t_gap > 0) else cur_target)
-        if cap_pct > 0:
-            new_target = min(new_target, entry * (1 + cap_pct))
-    else:
-        s_gap, t_gap = stop0 - entry, entry - target0
-        cand = price + s_gap if s_gap > 0 else cur_stop
-        if t_gap > 0 and lock > 0 and price <= entry - t_gap * at:
-            cand = min(cand, entry - (entry - price) * lock)
-        new_stop = min(cur_stop, cand)
-        new_target = (min(cur_target, price - t_gap)
-                      if (tgt and t_gap > 0) else cur_target)
-        if cap_pct > 0:
-            new_target = max(new_target, entry * (1 - cap_pct))
-
-    new_stop, new_target = round(new_stop, 2), round(new_target, 2)
+    # 공식은 실전·백테스트 공용(exit_policy.trail_lines, 2026-09-28) — 여기서는
+    # 설정만 모아 넘긴다. 규칙 설명은 위 docstring 그대로다.
+    params = exit_policy.Params(
+        tighten_at=_num("tighten_at"), lock_gain_pct=_num("lock_gain_pct"),
+        trail_target=bool(cfg().get("trail_target", False)),
+        max_gain_pct=_num("max_gain_pct"))
+    new_stop, new_target = exit_policy.trail_lines(
+        pos["side"], entry, stop0, target0, cur_stop, cur_target, price, params)
     if (new_stop, new_target) == (round(cur_stop, 2), round(cur_target, 2)):
         return None                      # 초 단위 루프다 — 안 바뀌면 쓰지 않는다
     # 원본과 같은 값은 `live` 로 쓰지 않는다(None = 원본 사용). 같은 값을 써두면
@@ -366,10 +349,7 @@ async def _judge_one(pos: dict, px: float, now: datetime,
                 "name": pos.get("name"), "stop": lines[0], "target": lines[1]}
 
     stop, target = ledger.effective_lines(pos)
-    if pos["side"] == "long":
-        reason = "stop" if px <= stop else ("target" if px >= target else None)
-    else:
-        reason = "stop" if px >= stop else ("target" if px <= target else None)
+    reason = exit_policy.line_hit(pos["side"], px, px, stop, target)
     if not reason:
         return
 
