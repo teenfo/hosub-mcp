@@ -131,14 +131,17 @@ def test_stale_price_still_blocks_promotion():
 
 
 def test_intraday_candidate_still_promotes_without_a_quote():
-    """장중 소스는 스캔 응답의 현재가를 싣는다 — 추가 호출을 요구하지 않는다."""
-    assert len(_trade(_plan([_c(["volume"], price=10_000)]))) == 1
+    """장중 소스는 스캔 응답의 현재가를 싣는다 — 추가 호출을 요구하지 않는다.
+
+    2026-08-25 이후 장중 소스 단독은 관측 전용이라, '신선한 가격(장중 소스)
+    + 매매 근거(검증 소스)' 조합이 이 경로의 살아 있는 형태다."""
+    assert len(_trade(_plan([_c(["volume", "nightly"], price=10_000)]))) == 1
 
 
 # --- ④ 관측값은 기록만 된다 ---
 
 def test_quote_fields_are_recorded_on_the_decision():
-    rows = _plan([_c(["volume"], quote={"price": 10_000, "change_pct": -3.19,
+    rows = _plan([_c(["volume", "nightly"], quote={"price": 10_000, "change_pct": -3.19,
                                         "cntr_str": 118.53})])
     d = _trade(rows)[0]
     assert d["change_pct"] == -3.19 and d["cntr_str"] == 118.53
@@ -165,7 +168,7 @@ def test_change_pct_does_not_change_the_decision():
 
 def test_decision_without_a_quote_carries_no_observation_fields():
     """실측이 없으면 빈 값을 지어내지 않는다 — 0 과 '모름' 은 다르다."""
-    d = _plan([_c(["volume"])])[0]
+    d = _plan([_c(["volume", "nightly"])])[0]
     assert "change_pct" not in d and "cntr_str" not in d
 
 
@@ -233,7 +236,7 @@ def test_스프레드는_판단을_바꾸지_않는다():
 
 
 def test_스프레드가_결정에_기록된다():
-    rows = _plan([_c(["volume"], quote={"price": 10_000, "spread_pct": 0.237})])
+    rows = _plan([_c(["volume", "nightly"], quote={"price": 10_000, "spread_pct": 0.237})])
     assert _trade(rows)[0]["spread_pct"] == 0.237
 
 

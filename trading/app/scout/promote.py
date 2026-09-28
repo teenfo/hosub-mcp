@@ -311,6 +311,20 @@ def plan(cands: list[Candidate], cur: Current, now: datetime | None = None,
                 "score": by_code[code].score if code in by_code else 0.0,
                 "sources": list(by_code[code].sources) if code in by_code else [],
                 "reason": "사용자 지정 매매 금지(no_trade) — 수집전용 고정"})
+    # 관측 전용 소스만이 지탱하는 매매 tier 잔류분도 내린다 — gainers·volume
+    # 이 관측 전용으로 강등(2026-08-25, 유의 음 실측)되기 **전에** 올라온
+    # 종목이 그 소스들만으로 매매 자리에 남는 것을 막는 안전망. 다른(검증)
+    # 소스가 함께 가리키면 유지, 보유 중이면 내리지 않는다(held 규약).
+    for code, tier in sorted(cur.tier.items()):
+        if tier != TRADE or code in cur.held or code in cur.protected:
+            continue
+        c = by_code.get(code)
+        if c and c.sources and set(c.sources) <= OBSERVE_ONLY:
+            out.append({
+                "code": code, "name": cur.names.get(code, code),
+                "action": "demote", "from_tier": TRADE, "to_tier": COLLECT,
+                "score": c.score, "sources": list(c.sources),
+                "reason": "관측 전용 소스만 지목(max_tier=collect) — 수집전용 강등"})
     for code, tier in cur.tier.items():
         if tier == NONE or code in cur.protected:
             continue

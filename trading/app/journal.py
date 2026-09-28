@@ -130,9 +130,16 @@ def last_signal_at(since_days: int = 7) -> dict[str, datetime]:
     return out
 
 
-def prune_signals(keep_days: int = 180) -> int:
-    """오래된 신호 기록 정리(디스크 방어). 반환: 삭제 행 수."""
-    cutoff = (datetime.now(KST).date() - timedelta(days=keep_days)).isoformat()
+def prune_signals(keep_days: int = 180, now: datetime | None = None) -> int:
+    """오래된 신호 기록 정리(디스크 방어). 반환: 삭제 행 수.
+
+    `now` 는 **테스트가 시각을 주입**하기 위한 것이다(기본값은 현재 시각이라
+    운영 동작은 불변). 벽시계에 의존하면 고정 날짜로 심은 픽스처가 시간이
+    흐르며 컷오프를 넘어가 테스트가 저절로 깨진다 — 실제로 2026-08-25 통과
+    하던 이 테스트가 9/27 에 깨졌고, 같은 계열 함정이 8/03(entry_window_note)
+    에 이어 두 번째다. **날짜를 쓰는 함수는 now 를 받게 할 것.**
+    """
+    cutoff = ((now or datetime.now(KST)).date() - timedelta(days=keep_days)).isoformat()
     with _conn() as conn:
         return conn.execute("DELETE FROM signal_log WHERE day<?", (cutoff,)).rowcount
 

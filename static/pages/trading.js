@@ -365,7 +365,31 @@ export default {
     const gearBtn = el("button", {
       class: "btn btn-sm btn-link p-0 text-secondary", title: "매매 설정",
     }, el("i", { class: "bi bi-gear-fill" }));
+    // 운용 모드 배지 — **계좌 환경 × 발주 방식을 한 자리에 크게.** 문서는
+    // "사용자 승인 반자동"이라 적었는데 실제는 auto_approve=true(전체 자동)
+    // 였고, 계좌도 8/6 부터 모의였다 — 둘 다 화면 어디에도 크게 드러나지
+    // 않았다(외부 리뷰 §10.2 지적, 2026-09-27). 특히 '실계좌 · 전체 자동'
+    // 이 조용히 켜져 있는 상태를 없애는 것이 목적이라 그 조합만 빨강이다.
+    const modeBadge = el("span", { class: "badge ms-2", style: "font-size:.8rem" }, "…");
+    statusHeader.firstElementChild?.appendChild(modeBadge);
     statusHeader.appendChild(gearBtn);
+    const renderMode = (env, auto) => {
+      const real = env === "real";
+      const [tone, text, tip] = real && auto
+        ? ["danger", "🔴 실계좌 · 전체 자동 발주",
+           "실제 돈으로, 사람 승인 없이 신호가 곧바로 발주됩니다"]
+        : real
+        ? ["primary", "실계좌 · 승인형 반자동",
+           "실제 돈 — 모든 주문은 승인대기에서 사람이 승인해야 나갑니다"]
+        : auto
+        ? ["warning", "모의 · 전체 자동",
+           "모의투자 계좌 — 신호가 승인 없이 자동 발주됩니다(실손익 아님)"]
+        : ["secondary", "모의 · 승인형",
+           "모의투자 계좌 — 승인대기에서 사람이 승인해야 발주됩니다"];
+      modeBadge.className = `badge ms-2 text-bg-${tone}`;
+      modeBadge.textContent = text;
+      modeBadge.title = tip;
+    };
 
     // --- 키움 API 자격 (시크릿은 서버가 원문을 돌려주지 않음 — 변경 시에만 입력) ---
     const envSel = el("select", { class: "form-select form-select-sm" }, [
@@ -955,6 +979,7 @@ export default {
         }
         return;
       }
+      renderMode(s.env, !!(s.risk || {}).auto_approve);
       deskState = s.desk || {};
       renderDesk(s.desk);
       let a = null;
