@@ -9,7 +9,7 @@ import logging
 import sys
 
 JOBS = ("report", "sweep", "study", "rank", "news", "trailing", "timeofday",
-        "flowsignal", "vpingate")
+        "flowsignal", "vpingate", "portfolio")
 
 
 def main(argv: list[str]) -> int:
@@ -50,6 +50,10 @@ def main(argv: list[str]) -> int:
         from ..research import vpingate
 
         result = vpingate.run_once()
+    elif job == "portfolio":
+        from .portfolio import run_once as portfolio_run
+
+        result = portfolio_run()
     else:
         from .sweep import run_sweep
 
