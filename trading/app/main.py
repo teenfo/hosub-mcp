@@ -407,6 +407,14 @@ async def _holdings_map() -> dict[str, int] | None:
     return out
 
 
+def _holding_info() -> dict[str, dict]:
+    """{종목: {avg_price, name}} — `_holdings_map` 이 방금 채운 계좌 캐시에서 읽는다
+    (새 호출 없음). 잔량 편입(fills.adopt_residuals)의 진입가·이름용."""
+    data = _account_cache.get("data") or {}
+    return {str(h.get("code")): {"avg_price": h.get("avg_price"), "name": h.get("name")}
+            for h in data.get("holdings") or []}
+
+
 _fills_at = {"mono": 0.0}
 
 
@@ -437,7 +445,10 @@ async def _fills_sync(force: bool = False) -> dict | None:
     holdings = await _holdings_map()
     got: dict = {}
     try:
-        got = fills.sync_from_fills(day, holdings)
+        from .trade import orders
+        got = fills.sync_from_fills(day, holdings,
+                                    holding_info=_holding_info(),
+                                    exit_grace=orders.recent_exit_symbols())
     except Exception:  # noqa: BLE001
         log.exception("실거래 원장 정렬 오류")
     try:
