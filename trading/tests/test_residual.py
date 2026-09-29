@@ -161,6 +161,7 @@ async def test_자동_손절도_잔량_폴백을_건다(env, monkeypatch):
         scheduled.append((sym, ord_no, qty, wait))
 
     monkeypatch.setattr(orders, "_best_exit_fallback", _fb)
+    monkeypatch.setattr(orders, "_in_closing_auction", lambda now=None: False)  # 벽시계 무관
     monkeypatch.setitem(settings.CONFIG, "execution",
                         dict(settings.CONFIG.get("execution", {}),
                              exit_residual_sec=20))
@@ -222,3 +223,46 @@ def test_최근_청산_종목_조회(env):
              "자동청산(stop)", 5_600, 5_500, 5_800, 10, "021320", "sell", 10,
              "sent", "{}", "exit", "p1", 5_500))
     assert orders.recent_exit_symbols(3) == {"021320"}
+
+
+# --------------------------------------------------------------------------
+# 마감 동시호가 (실측 2026-09-29)
+# --------------------------------------------------------------------------
+def test_동시호가_구간_판정():
+    d = datetime(2026, 9, 29, tzinfo=KST)
+    assert orders._in_closing_auction(d.replace(hour=15, minute=20)) is True
+    assert orders._in_closing_auction(d.replace(hour=15, minute=29, second=59)) is True
+    assert orders._in_closing_auction(d.replace(hour=15, minute=19)) is False
+    assert orders._in_closing_auction(d.replace(hour=15, minute=30)) is False
+
+
+async def test_동시호가_중_청산은_잔량_폴백을_걸지_않는다(env, monkeypatch):
+    """15:20 마감 정리는 15:30 단일가에 체결된다 — 20초 뒤 취소·재발주는 순서만 잃는다."""
+    _open()
+    _install(monkeypatch, _Spy())
+    scheduled = []
+
+    async def _fb(*a):
+        scheduled.append(a)
+
+    monkeypatch.setattr(orders, "_best_exit_fallback", _fb)
+    monkeypatch.setattr(orders, "_in_closing_auction", lambda now=None: True)
+    res = await orders.execute_exit(ledger.positions("open")[0], "eod", 5_500)
+    assert res["ok"] is True and scheduled == []
+
+
+def test_동시호가_뒤에는_편입_유예가_15시19분부터다(env):
+    """15:20 에 판 종목은 15:30 체결까지 잔고가 그대로다 — 3분 유예로는 모자라다."""
+    from datetime import UTC
+    sent = datetime(2026, 9, 29, 15, 20, 20, tzinfo=KST)
+    with orders._conn() as conn:
+        conn.execute(
+            f"INSERT INTO orders ({orders._ENTRY_COLS}) VALUES "
+            "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("o1", sent.astimezone(UTC).isoformat(), sent.isoformat(), "021320",
+             "long", "residual", "자동청산(eod)", 5_600, 0, 0, 10, "021320", "sell",
+             10, "sent", "{}", "exit", "p1", 5_500))
+    at_1528 = datetime(2026, 9, 29, 15, 28, tzinfo=KST).astimezone(UTC)
+    at_1100 = datetime(2026, 9, 30, 11, 0, tzinfo=KST).astimezone(UTC)   # 다음 날 장중
+    assert orders.recent_exit_symbols(3, now=at_1528) == {"021320"}
+    assert orders.recent_exit_symbols(3, now=at_1100) == set()
