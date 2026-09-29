@@ -13,6 +13,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .. import settings
 from ..signals.rules import Signal
@@ -179,6 +180,18 @@ MANUAL_EXIT_DEFAULTS = {"type": "best", "fallback_sec": 10}
 # 수동(최유리) 청산에만 있었다. 0 이면 끈다(config execution.exit_residual_sec).
 EXIT_RESIDUAL_SEC = 20
 
+# 장마감 동시호가(단일가) 구간. 이 안에서 낸 시장가는 **15:30 에 한꺼번에** 체결된다
+# — 20초 뒤 '미체결' 로 보이는 것이 정상이다. 실측 2026-09-29: 15:20 마감 정리
+# 5건이 20초 뒤 잔량 폴백에 **취소 → 같은 수량 재발주** 됐다(체결은 15:30 에 재발주분
+# 으로 한 번만 — 중복 매도는 없었다). 재발주는 호가 대기열 순서만 잃는다. 이 구간의
+# 잔량은 폴백이 아니라 다음 날 잔량 편입(fills.adopt_residuals)이 드러낸다.
+CLOSING_AUCTION = ("15:20", "15:30")
+
+
+def _in_closing_auction(now: datetime | None = None) -> bool:
+    t = (now or datetime.now(ZoneInfo("Asia/Seoul"))).strftime("%H:%M")
+    return CLOSING_AUCTION[0] <= t < CLOSING_AUCTION[1]
+
 
 def _manual_exit_cfg() -> dict:
     cfg = settings.CONFIG.get("execution", {}).get("manual_exit", {}) or {}
@@ -258,7 +271,7 @@ async def _best_exit_fallback(pos: dict, exec_symbol: str, ord_no: str,
                     "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (uuid.uuid4().hex[:12], now.isoformat(), now.isoformat(),
                      pos["symbol"], pos["side"], pos["rule"],
-                     f"최유리 잔량 시장가 폴백(ord={fb_ord})",
+                     f"청산 잔량 시장가 재발주(ord={fb_ord})",
                      pos["entry"], pos["stop"], pos["target"], rem,
                      exec_symbol, "sell", rem, "sent",
                      json.dumps(result, ensure_ascii=False)[:2000],
@@ -328,6 +341,10 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
             # 자동(시장가) 청산도 잔량을 확인한다 — 위 EXIT_RESIDUAL_SEC 주석
             fb = float(settings.CONFIG.get("execution", {}).get(
                 "exit_residual_sec", EXIT_RESIDUAL_SEC) or 0)
+        if fb > 0 and _in_closing_auction():
+            log.info("동시호가 구간 청산 %s — 잔량 폴백 생략(15:30 단일가 체결)",
+                     pos.get("symbol"))
+            fb = 0
         if exit_ord_no and fb > 0:
             asyncio.create_task(_best_exit_fallback(
                 pos, exec_symbol, exit_ord_no, int(pos["qty"]), fb))
@@ -339,13 +356,23 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
             "message": msg or detail[:200]}
 
 
-def recent_exit_symbols(minutes: float = 3.0) -> set[str]:
+def recent_exit_symbols(minutes: float = 3.0, now: datetime | None = None) -> set[str]:
     """최근 N분 안에 청산(매도)이 나간 집행 종목 — 잔량 편입 판정의 유예용.
 
     원장은 청산 '접수' 시점에 닫히고 계좌 잔고는 체결 뒤에 줄어든다. 그 사이
     잔고만 보면 방금 판 종목이 '원장 없는 보유' 로 보인다.
+
+    **마감 동시호가 뒤(15:20~15:45)는 유예를 15:19 부터로 넓힌다** — 그 구간 주문은
+    15:30 에야 체결되므로 3분 유예로는 모자라다. 실측 2026-09-29: 15:20 에 판 5종목이
+    3분 뒤 잔고 그대로라 residual 로 다시 편입됐다가 15:30 체결 후 닫혀, 같은 매도가
+    원장에 두 번(eod·fills_sync) 기록됐다.
     """
-    since = (datetime.now(UTC) - timedelta(minutes=minutes)).isoformat()
+    now = now or datetime.now(UTC)
+    kst = now.astimezone(ZoneInfo("Asia/Seoul"))
+    if "15:20" <= kst.strftime("%H:%M") < "15:45":
+        start = kst.replace(hour=15, minute=19, second=0, microsecond=0)
+        minutes = max(minutes, (kst - start).total_seconds() / 60)
+    since = (now - timedelta(minutes=minutes)).isoformat()
     with _conn() as conn:
         rows = conn.execute(
             "SELECT DISTINCT exec_symbol FROM orders WHERE kind='exit'"
