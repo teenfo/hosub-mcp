@@ -202,10 +202,20 @@ def market_returns(since: str = "") -> dict[str, float]:
     같은 정의).
 
     since: 'YYYY-MM-DD' 이후만. 전 구간 스캔을 피하려고 호출자가 좁힌다.
+
+    ## 날짜는 `substr(ts, 1, 10)` — SQLite `date()` 를 쓰지 않는다 (2026-09-29 발견)
+
+    일봉 ts 는 `2026-09-28T00:00:00+09:00` 처럼 **KST 오프셋을 달고** 저장된다.
+    SQLite `date(ts)` 는 오프셋을 UTC 로 환산해 `2026-09-27` 을 돌려준다 — 모든
+    날짜가 **하루 앞당겨졌다.** 그 결과 국면 적중률은 '오늘 판정 vs **다음 거래일**
+    수익률' 로 채점됐고(월~목), 금요일은 키가 토요일이 되어 통째로 빠졌다(7/27~9/28
+    49일 중 14일 누락). 9/29 국면 40일 판정 준비 중 금요일만 비는 패턴으로 발견.
+    같은 함수를 쓰는 뉴스 영향 측정(`research/newsimpact`)의 시장 초과수익도
+    하루 어긋난 시장값을 뺐다 — measurement.md 9/29 절.
     """
     sql = (
         "SELECT d, AVG(ret) AS m FROM ("
-        "  SELECT date(ts) AS d,"
+        "  SELECT substr(ts, 1, 10) AS d,"
         "         (close / LAG(close) OVER (PARTITION BY symbol ORDER BY ts) - 1)"
         "         * 100 AS ret"
         "    FROM bars WHERE tf='1d'"
