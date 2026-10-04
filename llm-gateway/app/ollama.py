@@ -91,8 +91,16 @@ class OllamaClient:
         }
         if system:
             payload["system"] = system
-        if options:
-            payload["options"] = options
+        # think 는 Ollama 에서 options 가 아니라 최상위 필드다. 역할 options 에 적어 두면
+        # (예: coach_feedback 의 qwen3.5 에 think: false) 여기서 꺼내 올린다 — qwen3 이후
+        # hybrid thinking 모델은 기본이 생각 켜짐이라, 끄지 않으면 짧은 답에도 수천 토큰을
+        # 생각에 쓴다(2026-10-04 실측: 같은 코칭 프롬프트 29초 → 373초).
+        opts = dict(options or {})
+        think = opts.pop("think", None)
+        if think is not None:
+            payload["think"] = bool(think)
+        if opts:
+            payload["options"] = opts
 
         owns = client is None
         client = client or httpx.AsyncClient(timeout=timeout)
