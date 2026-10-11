@@ -147,3 +147,8 @@ hosub.duckdns.org {
 	# @blocked not remote_ip 1.2.3.4 5.6.7.0/24
 	# respond @blocked "forbidden" 403
 }
+
+# 사이트별 설정 — 파일 하나에 사이트 하나. llmcc(LLM ControlCenter)가 첫 항목이다.
+# 각 사이트 파일은 그 서비스 쪽에서 /etc/caddy/conf.d/<이름>.caddy 로 설치한다.
+# 폴더가 비어 있어도 오류가 나지 않는다.
+import /etc/caddy/conf.d/*.caddy
