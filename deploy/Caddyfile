@@ -55,6 +55,40 @@ hosub.duckdns.org {
 		}
 	}
 
+	# jw-mcp 라우팅 (서버에 먼저 들어가 있던 것을 저장소로 옮김, 2026-10-11).
+	#
+	# 위치: '@dash path / /login ...' 줄보다 앞. handle_path /llm/* 를 @dash 앞에 두는
+	#       것과 같은 관례다. 맨 끝의 catch-all handle(:8700)보다는 반드시 앞에 있어야 한다.
+	#
+	# ⚠️ handle_path 가 아니라 handle 을 쓴다. 프리픽스를 벗기지 않고 그대로 넘겨야
+	#    앱이 만드는 절대 URL(issuer·redirect·Set-Cookie Path)이 공개 주소와 일치한다.
+
+	# 1) 서비스 본문 — MCP·OAuth·계정 화면이 전부 /jw 아래에 있다.
+	@jw path /jw /jw/*
+	handle @jw {
+		reverse_proxy 127.0.0.1:8604 {
+			# 클라이언트가 보낸 XFF 를 신뢰하지 않는다(로그 위조 방지).
+			header_up X-Forwarded-For {remote_host}
+		}
+	}
+
+	# 2) OAuth 디스커버리 정본 경로.
+	#
+	#    issuer 가 https://hosub.duckdns.org/jw 이므로 RFC 8414/9728 이 정한 메타데이터
+	#    주소는 루트의 /.well-known/<타입>/jw... 다. 이 두 줄이 없으면 그 요청이 맨 끝
+	#    catch-all 을 타고 :8700(hosub-mcp)으로 가서, 커넥터가 엉뚱한 인증 서버를 만난다.
+	#
+	#    루트의 /.well-known/oauth-authorization-server (접미사 없는 것)는 손대지 않는다 —
+	#    그건 hosub 자신의 것이고 그대로 :8700 으로 가야 한다.
+	@jw_wellknown path /.well-known/oauth-authorization-server/jw /.well-known/openid-configuration/jw /.well-known/oauth-protected-resource/jw /.well-known/oauth-protected-resource/jw/*
+	handle @jw_wellknown {
+		reverse_proxy 127.0.0.1:8604
+	}
+
+	# 참고: /api/dash/* 는 **일부러 라우팅하지 않는다.** 대시보드용 내부 API 는
+	#       127.0.0.1:8604 에서만 보여야 하며, hosub 대시보드(:8701)가 서버 안에서
+	#       직접 호출한다. 여기에 경로를 추가하면 그 경계가 무너진다.
+
 	# 검열우회 VPN(sing-box) — **비밀 경로 하나만** 여기로 샌다.
 	#
 	# 중국처럼 WireGuard/Tailscale 이 막히는 망에서 쓰는 2차 수단이다. VLESS 를
@@ -74,6 +108,21 @@ hosub.duckdns.org {
 	@vpn path {$HOSUB_VPN_PATH:/__vpn-not-configured}
 	handle @vpn {
 		reverse_proxy 127.0.0.1:8605
+	}
+
+	# loop8 이미지 — roxlogy 게시물·공동구매 등에 쓰는 정적 이미지 (2026-10-11).
+	#
+	# /data/loop8/img 의 파일을 https://hosub.duckdns.org/loop8/<파일명> 으로 낸다.
+	# 파일은 teenfo/loop8 의 content/hosub-img/ 에서 /data/loop8/sync.sh 가 복사한다
+	# (읽기 전용 deploy key, sparse checkout).
+	# 폴더 목록은 내지 않는다(browse 없음) — 파일명을 알아야 열린다.
+	# 파일명에 내용 해시를 넣어 덮어쓰지 않으므로 캐시를 길게 둔다.
+	# ⚠️ @dash 보다 위에 있어야 한다.
+	handle_path /loop8/* {
+		root * /data/loop8/img
+		header Cache-Control "public, max-age=31536000, immutable"
+		header X-Content-Type-Options nosniff
+		file_server
 	}
 
 	@dash path / /login /logout /favicon.ico /api/* /static/*
