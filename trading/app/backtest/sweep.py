@@ -85,11 +85,13 @@ def _run_sweep() -> dict:
         if len(df) >= 200:
             dfs[sym] = df
     results: dict = {}
+    cfgs: dict[str, dict] = {}
     for name in REGISTRY:
         rule_cfg = dict(settings.RULES.get(name, {}))
         rule_cfg["enabled"] = True
         cfg = {name: rule_cfg, "max_stop_pct": max_stop}
-        trades, live_trades = [], []
+        cfgs[name] = cfg
+        trades = []
         for sym, df in dfs.items():
             try:
                 # **롱 전용을 재생 단계에 넘긴다**(사후 필터 금지).
@@ -100,20 +102,35 @@ def _run_sweep() -> dict:
                 # rule_sweep.avg_r 을 근거로 쓴 과거 판단(8/28 다이버전스 등)은
                 # 이 오염 위에 있었다 — 전후 차이는 measurement.md 에 기록.
                 trades.extend(runner.run(sym, df, cfg, sides=("long",)).trades)
-                # 실전 청산 공식(추종·익절 상한·시간 손절·15:20 정리·재검증)으로
-                # 한 번 더 — 최상위 값(legacy)은 과거 성적표와의 비교 가능성 때문에
-                # 그대로 두고 `live` 키에 나란히 싣는다(2026-09-28).
-                live_trades.extend(runner.run(
-                    sym, df, cfg, sides=("long",), exit_model="live",
-                    exit_params=live_params).trades)
             except Exception:  # noqa: BLE001 - 종목 하나의 오류가 스윕을 막지 않게
                 log.exception("스윕 오류 %s/%s", name, sym)
         closed = [t for t in trades if t.exit is not None and t.side == "long"]
         results[name] = _score(closed, costs, risk_pct)
+        log.info("스윕 legacy %s: %d건", name, results[name]["trades"])
+    out = {"run_ts": datetime.now(KST).isoformat(timespec="seconds"),
+           "symbols": len(dfs), "side": "long", "rules": results,
+           "live_status": "running"}
+    # ① legacy 성적표를 **먼저 영속한다.** live 재생이 시간 상한에 잘려도 주간
+    #    성적표는 남는다. 실사고 2026-10-03·10·17·24: 9/28 에 live 재생을 같은
+    #    루프에 붙여 작업이 두 배가 됐는데 상한(3600초)은 그대로라, 4주 연속 정확히
+    #    10:00 에 잘려 **legacy 까지 통째로 0** 이 됐다(7/30 추종 스윕과 같은 실수).
+    OUT_FILE.write_text(json.dumps(out, ensure_ascii=False))
+    # ② 실전 청산 공식(추종·익절 상한·시간 손절·15:20 정리·재검증)으로 한 번 더 —
+    #    최상위 값(legacy)은 과거 성적표와의 비교 가능성 때문에 그대로 두고 `live`
+    #    키에 나란히 싣는다(2026-09-28).
+    for name, cfg in cfgs.items():
+        live_trades = []
+        for sym, df in dfs.items():
+            try:
+                live_trades.extend(runner.run(
+                    sym, df, cfg, sides=("long",), exit_model="live",
+                    exit_params=live_params).trades)
+            except Exception:  # noqa: BLE001
+                log.exception("스윕(live) 오류 %s/%s", name, sym)
         results[name]["live"] = _score(
             [t for t in live_trades if t.exit is not None], costs, risk_pct)
-    out = {"run_ts": datetime.now(KST).isoformat(timespec="seconds"),
-           "symbols": len(dfs), "side": "long", "rules": results}
+        log.info("스윕 live %s: %d건", name, results[name]["live"]["trades"])
+    out["live_status"] = "done"
     OUT_FILE.write_text(json.dumps(out, ensure_ascii=False))
     log.info("주간 기법 스윕 완료: %d종목 × %d규칙", len(dfs), len(results))
     return out

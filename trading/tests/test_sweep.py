@@ -80,11 +80,46 @@ def test_스윕은_롱_전용을_재생_단계에_넘긴다(tmp_path, monkeypatc
     seen = []
     real_run = sweep.runner.run
 
-    def _spy(sym, df, cfg, sides=None):
+    def _spy(sym, df, cfg, sides=None, **kw):
         seen.append(sides)
-        return real_run(sym, df, cfg, sides=sides)
+        return real_run(sym, df, cfg, sides=sides, **kw)
 
     monkeypatch.setattr(sweep.runner, "run", _spy)
     sweep.run_sweep()
     assert seen, "runner 가 호출되지 않았다"
     assert all(s == ("long",) for s in seen), f"sides 미전달 호출 존재: {set(seen)}"
+
+
+def test_legacy_성적표는_live_재생_전에_먼저_저장된다(tmp_path, monkeypatch):
+    """live 재생이 시간 상한에 잘려도 legacy 성적표는 남아야 한다.
+
+    실사고 2026-10-03~24: live 재생을 같은 루프에 붙여 작업이 두 배가 됐고 상한은
+    그대로라, 토요일마다 10:00 에 잘려 legacy 까지 통째로 0 이었다.
+    """
+    out_file = tmp_path / "rule_sweep.json"
+    monkeypatch.setattr(sweep, "OUT_FILE", out_file)
+    monkeypatch.setattr(settings, "WATCHLIST", {"005930": "삼성전자"})
+    monkeypatch.setattr("app.data.store.load_bars",
+                        lambda s, tf, limit=5000: _trend_df())
+    snapshots = []
+    real_run = sweep.runner.run
+
+    def _spy(sym, df, cfg, sides=None, **kw):
+        if kw.get("exit_model") == "live":
+            snapshots.append(sweep.latest())       # live 단계 진입 시점의 파일
+        return real_run(sym, df, cfg, sides=sides, **kw)
+
+    monkeypatch.setattr(sweep.runner, "run", _spy)
+    out = sweep.run_sweep()
+    assert snapshots, "live 재생이 호출되지 않았다"
+    first = snapshots[0]
+    assert first.get("live_status") == "running"
+    assert set(first["rules"]) == set(rules.REGISTRY), "legacy 전 규칙이 먼저 저장돼야 한다"
+    assert out["live_status"] == "done" and sweep.latest()["live_status"] == "done"
+
+
+def test_스윕_시간_상한은_기본값보다_넉넉하다():
+    """legacy + live 2회 재생 — 기본 상한(3600초)이면 잘린다(2026-10-03~24 실측)."""
+    from app.backtest import offload
+
+    assert offload.timeout_for("sweep") >= 2 * offload.DEFAULT_TIMEOUT
