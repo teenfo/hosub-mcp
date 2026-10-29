@@ -125,6 +125,26 @@ hosub.duckdns.org {
 		file_server
 	}
 
+	# roxlogy 행사 사진 앨범 (2026-10-29, roxlogy 저장소 ops/hosub-album).
+	#
+	# /data/roxlogy/album/<키>/{o,w,t}/<이름>.jpg · manifest.json 을
+	# https://hosub.duckdns.org/roxlogy/album/<키>/… 로 낸다. 키는 행사마다 추측할 수 없는 24바이트 무작위 값이고
+	# 폴더 목록은 내지 않는다(browse 없음) — 주소는 Roxlogy 가 참가자 + 설문 완료한 사람에게만 준다.
+	# ?dl=1 이면 내려받기(Content-Disposition: attachment). manifest.json 은 캐시하지 않는다(사진이 계속 늘어난다).
+	# 검색 엔진에 실리지 않게 noindex. ⚠️ @dash 보다 위에 있어야 한다.
+	handle_path /roxlogy/album/* {
+		root * /data/roxlogy/album
+		@manifest path */manifest.json
+		header @manifest Cache-Control "no-cache"
+		@img not path */manifest.json
+		header @img Cache-Control "public, max-age=86400"
+		@dl query dl=1
+		header @dl Content-Disposition "attachment"
+		header X-Content-Type-Options nosniff
+		header X-Robots-Tag "noindex, nofollow"
+		file_server
+	}
+
 	@dash path / /login /logout /favicon.ico /api/* /static/*
 	handle @dash {
 		reverse_proxy 127.0.0.1:8701
