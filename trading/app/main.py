@@ -207,6 +207,7 @@ async def _ledger_loop() -> None:
     eod_done = ""
     flat_done = ""      # 손실 정리선으로 접은 날 — 하루 한 번만 돈다
     post_sync_done = ""  # 마감 후 체결 동기화(15:31~) — 하루 한 번
+    residual_tries: dict = {}  # 잔량 장중 매도 시도 {(날짜, 종목): [시각…]}
     while True:  # noqa: PLR1702 - 청산 감시 루프
         try:
             cfg = settings.CONFIG.get("execution", {})
@@ -262,6 +263,25 @@ async def _ledger_loop() -> None:
                             await asyncio.to_thread(orders.propose_exit, ex,
                                                     ex["reason"], ex["exit_px"])
                             log.info("청산 승인 대기 %s (%s)", ex["symbol"], ex["reason"])
+                    # 잔량(residual) 장중 매도 — 마감 동시호가에서 일부만 체결돼 몇 주씩
+                    # 남던 문제(2026-09-30~10-26)의 처리. 종목당 하루 max_tries 회,
+                    # gap_min 간격. 부분 체결분은 다음 동기화에서 다시 residual 이 된다.
+                    from .trade import fills as _fills
+                    open_rows = await asyncio.to_thread(ledger.positions, "open", 200)
+                    for pos in _fills.residual_sell_due(
+                            open_rows, now, residual_tries, cfg.get("residual_sell"),
+                            eod_at=str(cfg.get("eod_flat_at", "15:20"))):
+                        key = (now.date().isoformat(), ledger.executed_symbol(pos))
+                        residual_tries.setdefault(key, []).append(now)
+                        px = _price_of(pos["symbol"]) or pos["entry"]
+                        r = await orders.execute_exit(pos, "residual", px)
+                        log.warning("잔량 장중 매도 %s %s %s주 (%d/%s회): %s",
+                                    pos.get("name"), pos.get("symbol"), pos.get("qty"),
+                                    len(residual_tries[key]),
+                                    (cfg.get("residual_sell") or {}).get("max_tries", 3),
+                                    r.get("status"))
+                    for k in [k for k in residual_tries if k[0] != now.date().isoformat()]:
+                        del residual_tries[k]          # 어제 기록은 버린다
                     # 손실 정리선 — 실현 + 평가가 정리선을 넘으면 보유분을 접는다.
                     # 신규 진입 차단(가드)은 앞을 막을 뿐 이미 벌어진 손실을 끊지
                     # 못한다. 실측 2026-07-30: 한도 1.5% 인 날 계좌 -4.26%.

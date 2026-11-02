@@ -38,7 +38,7 @@
 import hashlib
 import logging
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from .. import settings
@@ -335,6 +335,50 @@ def sync_from_fills(day: str | None = None, holdings: dict[str, int] | None = No
 
 
 RESIDUAL_RULE = "residual"
+
+# 잔량 장중 매도(사용자 결정 2026-11-02). 종전에는 residual 이 **마감 정리(15:20
+# 동시호가)** 에서만 팔렸다 — 실측 9/30~10/26: 모의 단일가가 KCC건설 3,745주를 하루
+# 100~250주씩만 소화해 4주가 지나도 1,292주가 남았다. 연속매매 구간에 먼저 내고,
+# 마감 정리는 마지막 안전망으로 둔다. at 을 "" 로 두면 끈다(종전 동작).
+RESIDUAL_SELL_DEFAULTS = {"at": "09:05", "max_tries": 3, "gap_min": 10}
+
+
+def residual_sell_due(rows: list[dict], now: datetime,
+                      tries: dict[tuple[str, str], list[datetime]],
+                      cfg: dict | None = None, eod_at: str = "15:20") -> list[dict]:
+    """지금 장중 매도를 낼 residual 포지션 — 순수 판정(발주·기록은 호출자).
+
+    tries: {(날짜, 집행 종목): [시도 시각…]} — 호출자가 들고 있는 하루 상태.
+    **종목 단위**로 센다 — 부분 체결 잔량은 다음 동기화에서 새 residual 행(새 id)으로
+    다시 편입되므로 행 단위로 세면 같은 종목을 무한히 다시 판다.
+    시장가 개장 직후(09:00~)의 호가 공백을 피해 `at` 부터, 마감 정리 시각 전까지만.
+    """
+    from . import ledger
+
+    c = RESIDUAL_SELL_DEFAULTS | (cfg or {})
+    at = str(c.get("at") or "")
+    if not at:
+        return []
+    hhmm = now.strftime("%H:%M")
+    if not (at <= hhmm < (eod_at or "15:20")):
+        return []
+    try:
+        max_tries = int(c.get("max_tries", 3))
+        gap = timedelta(minutes=float(c.get("gap_min", 10)))
+    except (TypeError, ValueError):
+        return []
+    day = now.date().isoformat()
+    out: list[dict] = []
+    for p in rows:
+        if p.get("rule") != RESIDUAL_RULE or p.get("exit_pending"):
+            continue
+        hist = tries.get((day, ledger.executed_symbol(p)), [])
+        if len(hist) >= max_tries:
+            continue
+        if hist and now - hist[-1] < gap:
+            continue
+        out.append(p)
+    return out
 
 
 def adopt_residuals(holdings: dict[str, int], now: datetime,
