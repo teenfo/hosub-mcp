@@ -115,36 +115,34 @@ def test_unknown_price_is_treated_as_untradable():
 
 
 def test_관측_전용_소스_단독이면_매매_tier_에_못_올라간다():
-    """max_tier=collect 하드 룰 (flow, 2026-08-03 편입).
+    """max_tier=collect 하드 룰 — presurge 복원(2026-11-02, 사용자 결정).
 
-    하네스 통과는 편입 근거이지 실거래 근거가 아니다 — 효과 크기가 작고
-    (+0.05R/건) 표본이 99일 하락 편중이라, 4주 실측 + 사용자 결정 전에는
-    이 소스 단독 지목으로 매매 tier 에 올라가면 안 된다. 실측 시세가 있어
-    다른 게이트를 전부 통과해도 마찬가지다.
+    9/27 해제 후 단독 승격 0건(TTL 180초 < 체류 15분 < probation)으로 해제가
+    무효였고, 해제 근거(8/25 t=+3.52)는 일 군집 t 로 유의하지 않았다. 실측
+    시세가 있어 다른 게이트를 전부 통과해도 단독 지목으로는 올라가지 않는다.
     """
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
-    c = _c(price=12_000, sources=["flow"], by_group={"flow": 0.9})
+    c = _c(price=12_000, sources=["presurge"])
     c.quote = {"price": 12_000}          # 게이트 부족이 아니라 하드 룰임을 못박는다
     assert _by(_plan([c], cur), "promote_trade") == []
 
 
-def test_presurge_단독은_이제_매매_tier_로_올라간다():
-    """2026-09-27 사용자 승인으로 OBSERVE_ONLY 에서 해제됐다.
+def test_flow_단독은_이제_매매_tier_로_올라간다():
+    """2026-11-02 사용자 결정으로 OBSERVE_ONLY 에서 해제됐다.
 
-    근거는 flow 가 요구받았던 것과 같은 두 관문: 기여도 4주 익일 초과
-    +0.13%(t=+3.52, 본페로니) + 랭킹 하네스 전 손절폭 양수(+0.056~
-    +0.065R, 6,613쌍). 이 테스트는 **해제가 유지되고 있는가**를 지키고,
-    복원 시(4주 재판정 음수) 함께 되돌린다.
+    사전 기준(대조군 대비 브래킷 R 전 손절폭 양수)을 8/31·10/26 두 번 문면
+    통과, 10/26 에는 기여도 부호도 일치. 이 테스트는 **해제가 유지되고 있는가**
+    를 지키고, 복원 시(11/30경 사후 재판정 음수) 함께 되돌린다.
     """
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
-    c = _c(price=12_000, sources=["presurge"])
+    c = _c(price=12_000, sources=["flow"], by_group={"flow": 0.9})
     assert [r["action"] for r in _by(_plan([c], cur), "promote_trade")] \
         == ["promote_trade"]
 
 
 def test_관측_전용_소스도_수집전용_편입은_된다():
     """max_tier=collect 의 'collect' 쪽 — 편입 자체를 막으면 관측이 안 쌓인다."""
-    rows = _plan([_c(score=0.5, sources=["flow"], by_group={"flow": 0.5})], _cur())
+    rows = _plan([_c(score=0.5, sources=["presurge"])], _cur())
     assert [r["to_tier"] for r in rows] == [COLLECT]
 
 
@@ -153,7 +151,7 @@ def test_다른_소스가_함께_가리키면_매매_승격을_막지_않는다(
     그쪽이 근거가 되므로 종전과 같이 게이트로 판정한다."""
     cur = _cur(tier={"000001": COLLECT}, since={"000001": LONG_AGO})
     # 2026-08-25 이후 volume 도 관측 전용이라 '검증 소스' 예시는 nightly 다.
-    c = _c(price=12_000, sources=["flow", "nightly"])
+    c = _c(price=12_000, sources=["presurge", "nightly"])
     assert [r["action"] for r in _by(_plan([c], cur), "promote_trade")] \
         == ["promote_trade"]
 
