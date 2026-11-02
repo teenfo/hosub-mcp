@@ -67,7 +67,14 @@ def _conn() -> sqlite3.Connection:
                      # 일주일간 모의 거래가 실계좌 이력과 무표식으로 섞였다 —
                      # 측정 표본을 env 로 자를 수 있어야 판정이 오염되지 않는다.
                      # 과거 행 백필은 서버에서 1회성 SQL(8/6 10:40 경계).
-                     ("env", "TEXT")):
+                     ("env", "TEXT"),
+                     # 청산 주문이 **실제로 판 수량**(NULL = 전량). 실사고 2026-09-29~
+                     # 10-26: 마감 단일가 시장가가 하루 100~250주씩만 체결됐는데
+                     # 원장은 접수 시점에 전량으로 닫고 다음 날 잔량을 다시 편입해,
+                     # KCC건설 하나에 장부상 42,349주 '매도' vs 실제 2,453주가 됐다.
+                     # qty(의도·진입 수량)는 그대로 두고 손익만 이 수량으로 낸다 —
+                     # 같은 날 재발주 체결이 뒤이어 와도 다시 늘릴 수 있게.
+                     ("exit_qty", "INTEGER")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -183,7 +190,8 @@ def _substituted(row, code: str) -> bool:
     return bool(code) and code != str(row["symbol"])
 
 
-def reconcile_executions(execs: list[dict]) -> dict:
+def reconcile_executions(execs: list[dict],
+                         exit_links: dict[str, str] | None = None) -> dict:
     """증권사 체결내역(ka10076)으로 원장의 추정값을 실측으로 확정한다.
 
     지금 원장의 진입·청산가는 주문체결 실시간을 못 받으면 **1분봉 종가 근사**다
@@ -207,8 +215,18 @@ def reconcile_executions(execs: list[dict]) -> dict:
     1,236(−94.0%). 손익은 원 종목 기준으로 이미 계산돼 있어 **숫자만 서로
     어긋난 채 남았다.** 그래서 체결 종목이 다르면 확정 표시와 비용만 채운다.
 
+    ## 청산은 포지션 단위로 합친다 (2026-11-02)
+
+    exit_links: {청산 주문번호: 포지션 id} — `orders.exit_order_links()`. 원 청산
+    주문(`exit_ord_no`)과 잔량 재발주 주문이 같은 포지션에 묶인다. 체결 합계가 포지션
+    수량보다 적으면 `exit_qty` 에 실제 판 수량을 남기고 손익은 그 수량으로 낸다
+    (`apply_actual_costs`). 체결이 **하나도 안 보이는** 청산은 건드리지 않는다 —
+    체결내역 조회(ka10076)가 한 페이지라 '안 보임' 을 '미체결' 로 읽으면 오판한다.
+
     반환: {entries, exits} — 각각 갱신한 포지션 수.
     """
+    links = exit_links or {}
+    exit_groups: dict[str, list[str]] = {}
     agg: dict[str, dict] = {}
     for e in execs:
         ord_no, qty = e.get("ord_no") or "", int(e.get("qty") or 0)
@@ -248,22 +266,47 @@ def reconcile_executions(execs: list[dict]) -> dict:
                 entries += 1
                 continue
             ex = conn.execute(
-                "SELECT * FROM positions WHERE exit_ord_no=? AND status='closed'",
+                "SELECT id FROM positions WHERE exit_ord_no=? AND status='closed'",
                 (ord_no,)).fetchone()
-            if ex:
-                if _substituted(ex, a["code"]):
-                    conn.execute(
-                        "UPDATE positions SET exit_fee_krw=?, tax_krw=?, "
-                        "exit_fill_confirmed=1 WHERE id=?",
-                        (a["fee"], a["tax"], ex["id"]))
-                    exits += 1
-                    continue
+            pid = ex["id"] if ex else links.get(ord_no)
+            if pid:
+                exit_groups.setdefault(pid, []).append(ord_no)
+        # 청산은 **포지션 단위로 합친다** — 원 청산 주문 + 잔량 재발주(orders.link_pos)
+        # 의 체결이 한 포지션의 매도다. 주문번호 하나만 보면 재발주분이 통째로
+        # 빠지고(실측 2026-09-29: 원 주문 취소 → 재발주분만 15:30 체결), 체결 수량이
+        # 포지션 수량보다 적으면 그만큼만 판 것이다(exit_qty).
+        for pid, ords in exit_groups.items():
+            ex = conn.execute(
+                "SELECT * FROM positions WHERE id=? AND status='closed'",
+                (pid,)).fetchone()
+            if ex is None:
+                continue
+            g = {"amt": 0.0, "qty": 0, "fee": 0.0, "tax": 0.0}
+            for o in ords:
+                for k in g:
+                    g[k] += agg[o][k]
+            code = agg[ords[0]]["code"]
+            if _substituted(ex, code):
                 conn.execute(
-                    "UPDATE positions SET exit=?, exit_fee_krw=?, tax_krw=?, "
+                    "UPDATE positions SET exit_fee_krw=?, tax_krw=?, "
                     "exit_fill_confirmed=1 WHERE id=?",
-                    (round(price, 2), a["fee"], a["tax"], ex["id"]),
-                )
+                    (g["fee"], g["tax"], ex["id"]))
                 exits += 1
+                continue
+            if g["qty"] <= 0:
+                continue
+            price = g["amt"] / g["qty"]
+            want = int(ex["qty"] or 0)
+            exit_qty = g["qty"] if 0 < g["qty"] < want else None
+            if exit_qty is not None and ex["exit_qty"] != exit_qty:
+                log.warning("부분 청산 체결 %s %s: 원장 %d주 중 %d주 — 잔량은 residual 로",
+                            ex["name"], ex["symbol"], want, exit_qty)
+            conn.execute(
+                "UPDATE positions SET exit=?, exit_fee_krw=?, tax_krw=?, "
+                "exit_fill_confirmed=1, exit_qty=? WHERE id=?",
+                (round(price, 2), g["fee"], g["tax"], exit_qty, ex["id"]),
+            )
+            exits += 1
     if entries or exits:
         apply_actual_costs()
     return {"entries": entries, "exits": exits}
@@ -281,10 +324,15 @@ def apply_actual_costs() -> int:
             "SELECT * FROM positions WHERE status='closed'"
             " AND fill_confirmed=1 AND exit_fill_confirmed=1").fetchall()
         for r in rows:
-            fee = (r["entry_fee_krw"] or 0) + (r["exit_fee_krw"] or 0)
-            krw = actual_pnl_krw(r["side"], r["entry"], r["exit"], r["qty"],
+            # 부분 청산이면 판 수량만큼만 실현이다 — 진입 비용도 그 비율만
+            # (나머지 수량은 residual 로 다시 편입돼 따로 실현된다).
+            qty = int(r["qty"] or 0)
+            sold = r["exit_qty"] if r["exit_qty"] is not None else qty
+            ratio = (sold / qty) if qty else 1.0
+            fee = (r["entry_fee_krw"] or 0) * ratio + (r["exit_fee_krw"] or 0)
+            krw = actual_pnl_krw(r["side"], r["entry"], r["exit"], sold,
                                  fee, r["tax_krw"] or 0)
-            cost_basis = (r["entry"] or 0) * (r["qty"] or 0)
+            cost_basis = (r["entry"] or 0) * sold
             pct = (krw / cost_basis * 100) if cost_basis else 0.0
             if (round(krw, 1), round(pct, 4)) == (r["pnl_krw"], r["pnl_pct"]):
                 continue

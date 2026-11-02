@@ -206,6 +206,7 @@ async def _ledger_loop() -> None:
 
     eod_done = ""
     flat_done = ""      # 손실 정리선으로 접은 날 — 하루 한 번만 돈다
+    post_sync_done = ""  # 마감 후 체결 동기화(15:31~) — 하루 한 번
     while True:  # noqa: PLR1702 - 청산 감시 루프
         try:
             cfg = settings.CONFIG.get("execution", {})
@@ -301,7 +302,14 @@ async def _ledger_loop() -> None:
                             log.info("마감 정리 %d/%d건 시장가 발주", n, len(left))
                         if n >= len(left):
                             eod_done = now.date().isoformat()
-                elif hhmm > "15:30" and eod_done != now.date().isoformat():
+                if hhmm >= "15:31" and post_sync_done != now.date().isoformat():
+                    # 마감 동시호가(15:20~15:30) 체결은 15:30 단일가에 한꺼번에 나서
+                    # 장중 동기화 창(~15:30:59)이 놓치기 쉽다 — 그러면 그날 청산의 실체결
+                    # 수량(exit_qty)이 영영 원장에 안 붙는다(ka10076 은 당일 범위).
+                    # 마감 뒤 한 번 강제 동기화한다(2026-11-02, API 3~4콜/일).
+                    post_sync_done = now.date().isoformat()
+                    await _fills_sync(force=True)
+                if hhmm > "15:30" and eod_done != now.date().isoformat():
                     # 여기까지 온 것은 장중 창에서 못 닫았다는 뜻이다. 거래소가
                     # 거부할 가능성이 높지만 시도는 남긴다 — 실패해도 원장은 열린
                     # 채로 남아 다음 날 데스크가 보고, 화면에 미청산으로 드러난다.
@@ -452,7 +460,8 @@ async def _fills_sync(force: bool = False) -> dict | None:
     except Exception:  # noqa: BLE001
         log.exception("실거래 원장 정렬 오류")
     try:
-        ledger.reconcile_executions(execs)
+        from .trade import orders as _orders
+        ledger.reconcile_executions(execs, exit_links=_orders.exit_order_links(day))
     except Exception:  # noqa: BLE001
         log.exception("체결 대사 오류")
     try:
