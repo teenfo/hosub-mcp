@@ -11,7 +11,7 @@ import math
 import re
 import sqlite3
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -378,6 +378,31 @@ def recent_exit_symbols(minutes: float = 3.0, now: datetime | None = None) -> se
             "SELECT DISTINCT exec_symbol FROM orders WHERE kind='exit'"
             " AND status='sent' AND created>=?", (since,)).fetchall()
     return {str(r[0]) for r in rows if r[0]}
+
+
+def exit_order_links(day: str | None = None) -> dict[str, str]:
+    """{청산 주문번호: 포지션 id} — 그날(KST) 나간 청산(매도) 주문 전부.
+
+    원 청산 주문은 positions.exit_ord_no 로도 찾을 수 있지만, **잔량 재발주**
+    (`_best_exit_fallback`)는 orders 에만 남는다(link_pos). reconcile 이 둘의 체결을
+    한 포지션의 매도로 합치려면 이 표가 필요하다(2026-11-02).
+    """
+    kst = ZoneInfo("Asia/Seoul")
+    d = date.fromisoformat(day) if day else datetime.now(kst).date()
+    start = datetime(d.year, d.month, d.day, tzinfo=kst).astimezone(UTC).isoformat()
+    out: dict[str, str] = {}
+    with _conn() as conn:
+        rows = conn.execute(
+            "SELECT link_pos, result FROM orders WHERE kind='exit' AND status='sent'"
+            " AND link_pos IS NOT NULL AND created >= ?", (start,)).fetchall()
+    for link, result in rows:
+        try:
+            ord_no = str((json.loads(result or "{}") or {}).get("ord_no") or "").strip()
+        except (TypeError, ValueError):
+            continue
+        if ord_no:
+            out[ord_no] = str(link)
+    return out
 
 
 def expire_stale() -> int:

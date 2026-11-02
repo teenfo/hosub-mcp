@@ -46,7 +46,8 @@ class SignalEngine:
         self.base_regime = "중립"      # 전일 breadth 기반 국면(야간 발굴)
         self._base_regime_at = 0.0
         self.gap_bias = "중립"         # 당일 시가 갭 방향
-        self.night_bias = "중립"       # 야간 리포트(미국장 등) 익일 편향
+        self.night_bias = "중립"       # 야간 리포트(미국장 등) 익일 편향 — 원시값
+        self.night_bias_used = False   # 합성에 썼는가(regime_gate.use_night_bias)
         self.regime = "중립"           # 유효 국면 = base + 시가갭 + 야간리포트 결합
         self.intraday_bias: str | None = None   # 장중 방향 관측 — 2026-09-28 폐기(기본 끔)
         # 분봉 백필 라운드로빈 — 한 사이클에 감시목록 전체를 부르지 않는다
@@ -119,10 +120,12 @@ class SignalEngine:
         return self._gap_and_drift()[0]
 
     def _read_night_bias(self) -> str:
-        """야간 리포트가 남긴 익일 시장 편향(오늘 날짜일 때만 반영)."""
-        gate = settings.CONFIG.get("regime_gate", {})
-        if not gate.get("use_night_bias", True):
-            return "중립"
+        """야간 리포트가 남긴 익일 시장 편향 — **원시값**(오늘 날짜일 때만).
+
+        `use_night_bias` 와 무관하게 읽는다. 합성에 쓸지는 `_effective_regime`
+        이 정한다 — 끈 동안에도 원장(regime_log)에는 원시값을 남겨야 대조군 비교가
+        이어진다(2026-11-02: 9/29 판정 '방향 건 날 10 < 40' 으로 끄기로 결정).
+        """
         try:
             d = json.loads(NIGHT_BIAS_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -137,7 +140,13 @@ class SignalEngine:
         야간리포트(미국장 반영)가 있으면 기준을 그 값으로 두고, 시가갭으로 ±1 보정."""
         base = self._base_regime()
         self.night_bias = self._read_night_bias()
-        anchor = self.night_bias if self.night_bias != "중립" else base
+        # 야간 리포트는 **판정에 쓰지 않는다**(사용자 결정 2026-11-02 — 9/29 판정:
+        # 방향 건 날 43일 중 10일, 기준 40일에 ~130거래일 더 필요). 원시값은 위에서
+        # 읽어 원장에 남기고, 합성에는 켜져 있을 때만 넣는다.
+        self.night_bias_used = bool(settings.CONFIG.get("regime_gate", {}).get(
+            "use_night_bias", False))
+        night = self.night_bias if self.night_bias_used else "중립"
+        anchor = night if night != "중립" else base
         self.gap_bias, self.intraday_bias, intraday_med = self._gap_and_drift()
         # 장중 방향(intraday)은 **합성에 넣지 않는다** — 관측 전용(2026-08-04
         # 사용자 승인). 게이트 입력 승격은 4주 반사실 평가 통과 후 별도 결정.
@@ -263,6 +272,7 @@ class SignalEngine:
                 "equity": self.equity, "halted": halted, "reason": why,
                 "regime": self.regime, "base_regime": self.base_regime,
                 "gap_bias": self.gap_bias, "night_bias": self.night_bias,
+                "night_bias_used": self.night_bias_used,
                 "intraday_bias": self.intraday_bias}
 
     def _today_df(self, symbol: str):

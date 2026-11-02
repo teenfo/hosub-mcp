@@ -266,3 +266,42 @@ def test_동시호가_뒤에는_편입_유예가_15시19분부터다(env):
     at_1100 = datetime(2026, 9, 30, 11, 0, tzinfo=KST).astimezone(UTC)   # 다음 날 장중
     assert orders.recent_exit_symbols(3, now=at_1528) == {"021320"}
     assert orders.recent_exit_symbols(3, now=at_1100) == set()
+
+
+# --------------------------------------------------------------------------
+# 잔량 장중 매도 (사용자 결정 2026-11-02)
+# --------------------------------------------------------------------------
+def _rows():
+    return [{"id": "r1", "symbol": "021320", "rule": "residual", "qty": 1292},
+            {"id": "p1", "symbol": "005930", "rule": "orb", "qty": 10},
+            {"id": "r2", "symbol": "064480", "rule": "residual", "qty": 1,
+             "exit_pending": 1}]
+
+
+def _at(hh, mm):
+    return datetime(2026, 11, 2, hh, mm, tzinfo=KST)
+
+
+def test_잔량_장중_매도는_residual_만_고른다():
+    got = fills.residual_sell_due(_rows(), _at(9, 10), {})
+    assert [p["id"] for p in got] == ["r1"], "다른 규칙·청산 대기 중인 행은 제외"
+
+
+def test_잔량_장중_매도는_시각_창_안에서만():
+    assert fills.residual_sell_due(_rows(), _at(9, 0), {}) == []      # 개장 직후 호가 공백
+    assert fills.residual_sell_due(_rows(), _at(15, 20), {}) == []    # 마감 정리 몫
+    assert fills.residual_sell_due(_rows(), _at(15, 19), {}) != []
+
+
+def test_잔량_장중_매도는_종목당_시도_상한과_간격을_지킨다():
+    """부분 체결 잔량은 새 residual 행(새 id)이 된다 — 종목 단위로 세야 무한 재매도가 없다."""
+    key = ("2026-11-02", "021320")
+    tries = {key: [_at(9, 5)]}
+    assert fills.residual_sell_due(_rows(), _at(9, 10), tries) == []    # 10분 간격 전
+    assert [p["id"] for p in fills.residual_sell_due(_rows(), _at(9, 16), tries)] == ["r1"]
+    tries = {key: [_at(9, 5), _at(9, 20), _at(9, 40)]}
+    assert fills.residual_sell_due(_rows(), _at(11, 0), tries) == []    # 하루 3회 소진
+
+
+def test_잔량_장중_매도는_설정으로_끈다():
+    assert fills.residual_sell_due(_rows(), _at(10, 0), {}, {"at": ""}) == []

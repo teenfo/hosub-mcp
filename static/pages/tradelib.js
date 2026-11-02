@@ -115,8 +115,13 @@ export function regimeBadge(d) {
   const r = d.regime;
   if (!r) return el("span");
   const tone = r === "강세" ? "danger" : r === "약세" ? "primary" : "secondary";
-  const title = `유효 국면 = 야간리포트 ${d.night_bias || "-"}(없으면 전일 breadth `
-    + `${d.base_regime || "-"}) 기준 + 시가갭 ${d.gap_bias || "-"} 보정`
+  // 야간리포트는 2026-11-02 부터 판정 미사용(night_bias_used=false) — 값은 병기만.
+  const nightUsed = d.night_bias_used !== false;
+  const title = (nightUsed
+      ? `유효 국면 = 야간리포트 ${d.night_bias || "-"}(없으면 전일 breadth `
+        + `${d.base_regime || "-"}) 기준 + 시가갭 ${d.gap_bias || "-"} 보정`
+      : `유효 국면 = 전일 breadth ${d.base_regime || "-"} 기준 + 시가갭 `
+        + `${d.gap_bias || "-"} 보정 · 야간리포트 ${d.night_bias || "-"}(판정 미사용)`)
     + (d.intraday_bias ? ` · 장중 관측 ${d.intraday_bias}(판정 미사용)` : "");
   return el("span", { class: `badge text-bg-${tone}`, title },
     `유효 국면 ${r}${r === "강세" ? " · 인버스 매수 보류" : " · 인버스 매수 허용"}`);

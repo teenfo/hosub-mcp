@@ -84,8 +84,11 @@ def _welch(a: list[float], b: list[float]) -> float | None:
 
 
 def evaluate(positions: list[dict], vpin_rows: list[dict],
-             top_pct: float = 20.0) -> dict:
-    """포지션 × 전일 VPIN 상위 여부 → 두 집단의 R 비교."""
+             top_pct: float = 20.0, collect: list | None = None) -> dict:
+    """포지션 × 전일 VPIN 상위 여부 → 두 집단의 R 비교.
+
+    collect: 주면 판정에 들어간 거래를 관측 단위로 담는다(judgments 스냅샷용).
+    """
     highs = high_sets(vpin_rows, top_pct)
     days = sorted(highs)
     obs_codes: dict[str, set[str]] = {}
@@ -110,6 +113,10 @@ def evaluate(positions: list[dict], vpin_rows: list[dict],
             continue
         is_hi = p["symbol"] in highs[days[i]]
         (hi if is_hi else rest).append(r)
+        if collect is not None:
+            collect.append({"id": p.get("id"), "symbol": p["symbol"], "day": day,
+                            "vpin_day": days[i], "r": round(r, 4), "high": is_hi,
+                            "env": p.get("env")})
         env = by_env.setdefault(str(p.get("env") or "real"), {"hi": [], "rest": []})
         env["hi" if is_hi else "rest"].append(r)
 
@@ -148,9 +155,16 @@ def run_once() -> dict:
         positions = [dict(r) for r in conn.execute(
             "SELECT * FROM positions WHERE status='closed'")]
     rows = store.vpin_rows(days=400)
-    main = evaluate(positions, rows, 20.0)
+    pairs: list[dict] = []
+    main = evaluate(positions, rows, 20.0, collect=pairs)
     main["sensitivity"] = {str(k): {kk: evaluate(positions, rows, k)[kk]
                                     for kk in ("high", "rest", "diff_r", "t")}
                            for k in (10.0, 30.0)}
     main["vpin_days"] = len({r["d"] for r in rows})
+    # 판정 입력 스냅샷 — 원장 보관 기간이 지나도 다시 계산할 수 있게(2026-11-02)
+    from . import judgments
+    judgments.save("vpingate", pairs, summary={k: v for k, v in main.items()
+                                               if k != "sensitivity"},
+                   criteria="전일 VPIN 상위 20% vs 나머지, 원본 손절 기준 R(±5 클립), "
+                            "양 집단 n≥30 이고 차이<0·Welch t≤−2.0 이면 통과(docstring)")
     return main

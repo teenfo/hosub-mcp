@@ -154,3 +154,34 @@ def test_장중_관측은_기본값이_꺼짐이다(monkeypatch):
     eng = SignalEngine()
     monkeypatch.setattr(eng, "_today_df", lambda s: (_bar_df(100.0, 99.0), None))
     assert eng._gap_and_drift()[1:] == (None, None)
+
+
+def test_야간리포트를_끄면_합성에서_빠지되_원시값은_원장에_남는다(monkeypatch):
+    """2026-11-02 사용자 결정 — 판정에는 안 쓰고, 대조군 비교용 이력은 계속 쌓는다."""
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        {"use_open_gap": True, "open_gap_th": 0.5,
+                         "use_night_bias": False})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_base_regime", lambda: "강세")
+    monkeypatch.setattr(eng, "_gap_and_drift", lambda: ("중립", None, None))
+    monkeypatch.setattr(eng, "_read_night_bias", lambda: "약세")
+    recorded = []
+    from app.data import regime_log
+    monkeypatch.setattr(regime_log, "record",
+                        lambda *a, **kw: recorded.append(a) or True)
+    assert eng._effective_regime() == "강세", "야간 약세가 합성에 들어가면 안 된다"
+    assert recorded and recorded[-1][0] == "약세", "원장에는 원시 야간값이 남아야 한다"
+    assert eng.night_bias_used is False
+    assert eng.day_guard_status()["night_bias_used"] is False
+
+
+def test_야간리포트_기본값은_꺼짐이다(monkeypatch):
+    """config·코드 기본값 동기(불변 조건 7) — 키가 없으면 켜지지 않는다."""
+    monkeypatch.setitem(settings.CONFIG, "regime_gate", {"use_open_gap": False})
+    eng = SignalEngine()
+    monkeypatch.setattr(eng, "_base_regime", lambda: "중립")
+    monkeypatch.setattr(eng, "_gap_and_drift", lambda: ("중립", None, None))
+    monkeypatch.setattr(eng, "_read_night_bias", lambda: "강세")
+    from app.data import regime_log
+    monkeypatch.setattr(regime_log, "record", lambda *a, **kw: True)
+    assert eng._effective_regime() == "중립"

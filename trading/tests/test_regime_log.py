@@ -179,8 +179,13 @@ def test_engine_records_on_regime_evaluation(monkeypatch, tmp_path):
     다른 데서 부르면 야간 리포트만 있고 대조군이 빈 레코드가 생긴다.
     """
     monkeypatch.setattr(regime_log, "DB_PATH", tmp_path / "r.db")
+    from app import settings
     from app.signals.engine import SignalEngine
 
+    # 야간 리포트를 합성에 쓰던 구성(2026-11-02 기본 끔)에서 기록 경로를 검증한다 —
+    # 끈 구성의 '원시값 적재' 는 test_regime_gate 가 따로 지킨다.
+    monkeypatch.setitem(settings.CONFIG, "regime_gate",
+                        dict(settings.CONFIG.get("regime_gate", {}), use_night_bias=True))
     e = SignalEngine()
     monkeypatch.setattr(e, "_base_regime", lambda: "약세")
     monkeypatch.setattr(e, "_gap_and_drift", lambda: ("중립", "약세", -0.8))
