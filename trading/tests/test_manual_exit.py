@@ -302,7 +302,8 @@ async def test_잔량_폴백은_취소_후_시장가로_던진다(env, monkeypat
     _install(monkeypatch, spy)
     with ledger._conn() as conn:                  # 부분 체결 3주 수신 시늉
         conn.execute("INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
-                     ("t", "O1", "005930", 10_050.0, 3, "체결", 0))
+                     (datetime.now(KST).isoformat(timespec="seconds"),   # 오늘 수신분
+                      "O1", "005930", 10_050.0, 3, "체결", 0))
     pos = ledger.positions(status="open")[0]
     await orders._best_exit_fallback(pos, "005930", "O1", 10, wait_sec=0)
     assert spy.cancels == ["O1"]
@@ -315,7 +316,8 @@ async def test_전량_체결이면_폴백은_아무것도_안_한다(env, monkey
     _install(monkeypatch, spy)
     with ledger._conn() as conn:
         conn.execute("INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
-                     ("t", "O1", "005930", 10_050.0, 5, "체결", 0))
+                     (datetime.now(KST).isoformat(timespec="seconds"),
+                      "O1", "005930", 10_050.0, 5, "체결", 0))
     pos = ledger.positions(status="open")[0]
     await orders._best_exit_fallback(pos, "005930", "O1", 5, wait_sec=0)
     assert spy.cancels == [] and spy.calls == []
