@@ -208,7 +208,8 @@ async def test_계좌조회_실패면_종전대로_잔량을_던진다(env, monk
     pos = ledger.positions("open")[0]
     with ledger._conn() as conn:
         conn.execute("INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
-                     ("t", "X1", "021320", 5_500.0, 3, "체결", 0))
+                     (datetime.now(KST).isoformat(timespec="seconds"),   # 오늘 수신분
+                      "X1", "021320", 5_500.0, 3, "체결", 0))
     await orders._best_exit_fallback(pos, "021320", "X1", 10, wait_sec=0)
     assert spy.calls[-1]["qty"] == 7
 

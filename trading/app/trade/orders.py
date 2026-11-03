@@ -405,6 +405,50 @@ def exit_order_links(day: str | None = None) -> dict[str, str]:
     return out
 
 
+def working_exit_symbols(day: str | None = None) -> set[str]:
+    """오늘 나간 청산 중 매도가 **아직 진행 중일 수 있는** 집행 종목 — 잔량 편입 유예용.
+
+    ## 왜 (실측 2026-11-03, mock)
+
+    KCC건설 잔량 674주 시장가 재발주가 09:06~09:19 에 걸쳐 조금씩 체결됐다(모의 시장가는
+    실제 체결량만큼만 소화한다). 3분 유예(`recent_exit_symbols`)가 지나자 **아직 팔리는
+    중인** 272주가 '원장 없는 보유' 로 보여 residual 로 다시 편입됐다. 그 행의 장중 매도는
+    `매도가능수량이 부족합니다` 로 거부됐고(주식이 살아 있는 주문에 묶여 있다), 매도가
+    끝나자 놓친 청산(②)이 그 행을 원 포지션의 주문번호로 닫아 원장이 둘로 갈라졌다.
+    살아 있는 매도에 묶인 주식은 고아가 아니다 — 주문이 끝날 때까지 편입하지 않는다.
+
+    ## 판정
+
+    오늘 닫힌 포지션 중 체결이 덜 확인된 것(exit_fill_confirmed 가 0 이거나 exit_qty 가
+    부분)에서, 그 포지션에 연결된 **마지막** 청산 주문(link_pos, 생성 시각순)이 'sent'
+    이면 살아 있다고 본다. 마지막 주문이 거부·오류면 살아 있는 매도가 없으므로 유예하지
+    않는다(남은 주식은 고아 — 편입해 판다). 브로커 쪽 취소처럼 원장이 모르는 종료는
+    그날 안에는 못 알아챈다 — 다음 날 09:00 첫 동기화에서 편입된다(날이 바뀌면 이 표에서
+    빠진다). API 호출 없음(원장 두 표만 읽는다).
+    """
+    from . import ledger
+
+    kst = ZoneInfo("Asia/Seoul")
+    d = date.fromisoformat(day) if day else datetime.now(kst).date()
+    start = datetime(d.year, d.month, d.day, tzinfo=kst).astimezone(UTC).isoformat()
+    with ledger._conn() as conn:
+        cands = {str(r["id"]): ledger.executed_symbol(r) for r in conn.execute(
+            "SELECT * FROM positions WHERE status='closed' AND substr(closed,1,10)=?"
+            " AND (COALESCE(exit_fill_confirmed, 0)=0 OR exit_qty IS NOT NULL)",
+            (d.isoformat(),))}
+    if not cands:
+        return set()
+    out: set[str] = set()
+    with _conn() as conn:
+        for pid, sym in cands.items():
+            last = conn.execute(
+                "SELECT status FROM orders WHERE kind='exit' AND link_pos=?"
+                " AND created >= ? ORDER BY created DESC LIMIT 1", (pid, start)).fetchone()
+            if last and last[0] == "sent":
+                out.add(sym)
+    return out
+
+
 def expire_stale() -> int:
     now = datetime.now(UTC).isoformat()
     with _conn() as conn:

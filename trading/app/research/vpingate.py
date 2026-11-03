@@ -33,7 +33,8 @@ from bisect import bisect_left
 from statistics import mean, variance
 
 MIN_PLAN_PCT = 0.3
-MAX_MOVE = 0.30
+MAX_MOVE = 0.30   # 원인은 '모의 체결가' 가 아니라 주문번호 날짜 충돌이었다(2026-11-03,
+                  # ledger._today — 해당 8건 전부). 사전 확정 기준이라 값은 그대로 둔다.
 R_CLIP = 5.0
 MIN_DAY_OBS = 20
 MIN_N = 30

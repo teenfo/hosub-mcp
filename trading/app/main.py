@@ -472,16 +472,26 @@ async def _fills_sync(force: bool = False) -> dict | None:
     fills.store_today(execs, day)
     holdings = await _holdings_map()
     got: dict = {}
+    links: dict[str, str] | None = None
     try:
         from .trade import orders
+        links = orders.exit_order_links(day)
+        grace = orders.recent_exit_symbols()
+        if settings.CONFIG.get("execution", {}).get("residual_adopt_wait_working", True):
+            # 살아 있는 청산 매도에 묶인 주식은 고아가 아니다 — 끝날 때까지 편입하지
+            # 않는다(실측 2026-11-03 KCC건설, orders.working_exit_symbols). 끄면 종전대로
+            # 3분 유예만 — 남은 주식이 다시 편입되고 장중 매도가 '매도가능수량 부족' 으로 거부된다.
+            grace |= orders.working_exit_symbols(day)
         got = fills.sync_from_fills(day, holdings,
                                     holding_info=_holding_info(),
-                                    exit_grace=orders.recent_exit_symbols())
+                                    exit_grace=grace, exit_links=links)
     except Exception:  # noqa: BLE001
         log.exception("실거래 원장 정렬 오류")
     try:
         from .trade import orders as _orders
-        ledger.reconcile_executions(execs, exit_links=_orders.exit_order_links(day))
+        ledger.reconcile_executions(
+            execs, day=day,
+            exit_links=links if links is not None else _orders.exit_order_links(day))
     except Exception:  # noqa: BLE001
         log.exception("체결 대사 오류")
     try:

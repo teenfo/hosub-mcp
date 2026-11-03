@@ -209,15 +209,36 @@ def broker_realized_today(now: datetime | None = None,
 # --------------------------------------------------------------------------
 # 원장 정렬 — 사실(fills)에 맞춰 positions 를 고친다
 # --------------------------------------------------------------------------
+def _exit_owners(day: str, exit_links: dict[str, str] | None) -> dict[str, str]:
+    """{매도 주문번호: 그 매도가 속한 포지션 id} — 그날 원장이 이미 아는 청산.
+
+    그날 닫힌 포지션의 exit_ord_no + 그날 나간 청산 주문 표(원 주문·잔량 재발주).
+    주문 표가 우선이다 — 발주 시점에 어느 포지션의 매도인지 적어 둔 원본이고,
+    exit_ord_no 는 ② 의 추정으로도 붙을 수 있다.
+    """
+    from . import ledger
+
+    with ledger._conn() as conn:
+        out = {str(r[1]): str(r[0]) for r in conn.execute(
+            "SELECT id, exit_ord_no FROM positions WHERE exit_ord_no IS NOT NULL"
+            " AND exit_ord_no != '' AND substr(closed,1,10)=?", (day,))}
+    out.update(exit_links or {})
+    return out
+
+
 def sync_from_fills(day: str | None = None, holdings: dict[str, int] | None = None,
                     now: datetime | None = None,
                     holding_info: dict[str, dict] | None = None,
-                    exit_grace: set[str] | None = None) -> dict:
+                    exit_grace: set[str] | None = None,
+                    exit_links: dict[str, str] | None = None) -> dict:
     """반환: {"ghost", "missed_exit", "external", "external_closed",
     "residual", "residual_cleared"} 건수.
 
     holding_info: {종목: {"avg_price", "name"}} — 잔량 편입(④)의 진입가·이름.
-    exit_grace: 방금 청산이 나간 종목 — ④ 판정에서 뺀다(orders.recent_exit_symbols).
+    exit_grace: 청산 매도가 아직 진행 중일 수 있는 종목 — ④ 판정에서 뺀다
+        (orders.recent_exit_symbols + orders.working_exit_symbols).
+    exit_links: {청산 주문번호: 포지션 id} — 그날 나간 청산 주문(orders.exit_order_links).
+        ② 가 다른 포지션의 매도를 가져가지 않게, ③ 이 재발주 매도를 외부로 읽지 않게.
     """
     from . import ledger
 
@@ -253,13 +274,20 @@ def sync_from_fills(day: str | None = None, holdings: dict[str, int] | None = No
 
     # ② 놓친 청산 — 계좌 보유 0 + 그 종목 매도 체결이 포지션 수량 이상.
     #    holdings 는 명시적 0 이어야 한다(조회 실패 None 이면 아무것도 안 한다).
+    #    **다른 포지션의 청산으로 이미 알려진 매도는 세지 않는다**(2026-11-03). 실측
+    #    (mock): KCC건설 잔량 674주 시장가가 09:06~09:19 에 조금씩 체결되는 사이 남은
+    #    주식이 잔량으로 다시 편입됐고, 매도가 끝나자 여기서 그 행을 **원 포지션의 재발주
+    #    주문번호로** 닫았다. 대사는 exit_ord_no 를 먼저 보므로 그 주문 674주 체결이
+    #    통째로 새 행(178주)에 붙고 원 포지션은 496주에서 멈췄다(비용 이중 계상).
     from . import ledger as _lg
     if holdings is not None:
+        owner = _exit_owners(day, exit_links)
         for p in [r for r in _lg.positions(status="open", limit=200)]:
             sym = _lg.executed_symbol(p)
             if holdings.get(sym, 0) != 0:
                 continue
-            sells = [f for f in fills if f["code"] == sym and f["side"] == "sell"]
+            sells = [f for f in fills if f["code"] == sym and f["side"] == "sell"
+                     and owner.get(f["ord_no"], p["id"]) == p["id"]]
             qty = sum(f["qty"] for f in sells)
             if qty < int(p.get("qty") or 0) or qty <= 0:
                 continue
@@ -274,13 +302,18 @@ def sync_from_fills(day: str | None = None, holdings: dict[str, int] | None = No
     # ③ 수동(외부) 매매 — 주문번호가 원장 어디에도 없는 체결.
     #    external 포지션 자신의 ord_no 는 제외한다 — 포함하면 다음 동기화에서
     #    그 매수 체결이 '알려진 것'으로 걸러져 왕복 매도를 영영 못 닫는다.
+    #    '알려진' 번호는 **그날** 것만이다 — 주문번호는 날마다 다시 매겨진다
+    #    (ledger._today). 전체 이력과 비교하면 오늘 수동 매수가 몇 주 전 포지션과 번호가
+    #    같다는 이유로 '알려진 것' 이 되어 외부 편입에서 빠진다. 재발주 매도(exit_links)도
+    #    원장이 아는 청산이다 — 같은 날 수동 매수와 엮여 왕복으로 읽히지 않게.
     with ledger._conn() as conn:
         known = {r[0] for r in conn.execute(
             "SELECT ord_no FROM positions WHERE ord_no IS NOT NULL"
-            " AND rule != 'external'")}
+            " AND rule != 'external' AND substr(opened,1,10)=?", (day,))}
         known |= {r[0] for r in conn.execute(
             "SELECT exit_ord_no FROM positions WHERE exit_ord_no IS NOT NULL"
-            " AND rule != 'external'")}
+            " AND rule != 'external' AND substr(closed,1,10)=?", (day,))}
+        known |= set(exit_links or {})
         ext = [f for f in fills if f["ord_no"] and f["ord_no"] not in known]
         by_code: dict[str, list[dict]] = {}
         for f in ext:

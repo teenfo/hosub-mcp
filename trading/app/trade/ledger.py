@@ -23,6 +23,21 @@ log = logging.getLogger(__name__)
 DB_PATH = Path(settings.DATA_DIR) / "trading.db"
 
 
+def _today() -> str:
+    """KST 오늘 — 주문번호 조회의 날짜 범위.
+
+    **주문번호는 날마다 다시 매겨진다.** 실측 2026-11-03(mock): 10/28 0036524~0069848,
+    10/29 0042002~0072233 — 날짜별 범위가 겹친다. 번호만으로 찾으면 오늘 체결이 몇 주
+    전 포지션에 붙는다. 실제로 청산 8건이 다른 날 **다른 종목** 체결가를 가져갔다
+    (0066703: 10/29 S-Oil 122,100 ↔ 10/30 HMM 22,950 이 서로 뒤바뀜, 0060513: 8/24
+    효성중공업 2,800,000 → 8/28 OCI 청산가). 측정에서 '모의 체결가 오염(|청산/진입−1|
+    >30%)' 으로 빼던 8건이 전부 이것이었다. 그래서 주문번호 조회는 모두 그날로 한정한다
+    — 포지션은 opened/closed, 체결 수신은 ts 의 KST 날짜(substr — date() 는 UTC 로
+    바꿔 하루 당긴다, 2026-10 market_returns 사고).
+    """
+    return datetime.now(KST).date().isoformat()
+
+
 def _conn() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -126,11 +141,13 @@ def record_fill(fill: dict) -> bool:
     ord_no = fill.get("ord_no") or ""
     price, qty = fill.get("price") or 0, fill.get("qty") or 0
     updated = False
+    today = _today()                     # 주문번호는 그날 안에서만 유일하다(_today)
     with _conn() as conn:
         row = None
         if ord_no:
             row = conn.execute(
-                "SELECT * FROM positions WHERE ord_no=? AND status='open'", (ord_no,)
+                "SELECT * FROM positions WHERE ord_no=? AND status='open'"
+                " AND substr(opened,1,10)=?", (ord_no, today)
             ).fetchone()
         if row and price > 0 and fill.get("symbol") == row["symbol"]:
             model = row["model_entry"] or price
@@ -146,10 +163,16 @@ def record_fill(fill: dict) -> bool:
             # 청산 체결 — 이론가로 적어 둔 손익을 실체결가로 정정한다.
             # (진입과 주문번호가 다르고 이미 status='closed' 라 위 조회에 걸리지 않는다)
             ex = conn.execute(
-                "SELECT * FROM positions WHERE exit_ord_no=? AND status='closed'",
-                (ord_no,)
+                "SELECT * FROM positions WHERE exit_ord_no=? AND status='closed'"
+                " AND substr(closed,1,10)=?", (ord_no, today)
             ).fetchone()
-            if ex and float(price) != (ex["exit"] or 0):
+            if ex and fill.get("symbol") and fill.get("symbol") != ex["symbol"]:
+                # 체결 종목이 포지션 기준 종목과 다르면(인버스 대체 등) 가격을 덮지 않는다
+                # — 진입 경로·reconcile 의 _substituted 와 같은 규칙. 예전에는 여기만
+                # 종목을 안 봐서 다른 종목 체결가가 청산가로 들어갔다(_today 의 8건).
+                conn.execute(
+                    "UPDATE positions SET exit_fill_confirmed=1 WHERE id=?", (ex["id"],))
+            elif ex and float(price) != (ex["exit"] or 0):
                 net = _net_pnl_pct(ex["side"], ex["entry"], float(price))
                 conn.execute(
                     "UPDATE positions SET exit=?, pnl_pct=?, pnl_krw=?, "
@@ -191,7 +214,8 @@ def _substituted(row, code: str) -> bool:
 
 
 def reconcile_executions(execs: list[dict],
-                         exit_links: dict[str, str] | None = None) -> dict:
+                         exit_links: dict[str, str] | None = None,
+                         day: str | None = None) -> dict:
     """증권사 체결내역(ka10076)으로 원장의 추정값을 실측으로 확정한다.
 
     지금 원장의 진입·청산가는 주문체결 실시간을 못 받으면 **1분봉 종가 근사**다
@@ -223,9 +247,18 @@ def reconcile_executions(execs: list[dict],
     (`apply_actual_costs`). 체결이 **하나도 안 보이는** 청산은 건드리지 않는다 —
     체결내역 조회(ka10076)가 한 페이지라 '안 보임' 을 '미체결' 로 읽으면 오판한다.
 
+    ## 그날 포지션에만 붙인다 (2026-11-03)
+
+    execs 는 그날(day, KST) 체결이다. 주문번호는 날마다 다시 매겨지므로(`_today`)
+    진입은 그날 연 포지션, 청산은 그날 닫은 포지션에서만 찾는다. 번호만 보던 때는
+    오늘 체결이 지난 포지션에 붙어 그 포지션의 비용·확정 표시를 덮고(실측 진입 6건·
+    청산 10건), 정작 오늘 포지션은 확정되지 않았다. 휴장일(10/5·10/9)에 직전 거래일
+    체결이 휴장일 날짜로 다시 들어온 것도 이제 어느 포지션에도 붙지 않는다.
+
     반환: {entries, exits} — 각각 갱신한 포지션 수.
     """
     links = exit_links or {}
+    day = day or _today()
     exit_groups: dict[str, list[str]] = {}
     agg: dict[str, dict] = {}
     for e in execs:
@@ -246,7 +279,8 @@ def reconcile_executions(execs: list[dict],
             if price <= 0:
                 continue
             row = conn.execute(
-                "SELECT * FROM positions WHERE ord_no=?", (ord_no,)).fetchone()
+                "SELECT * FROM positions WHERE ord_no=? AND substr(opened,1,10)=?",
+                (ord_no, day)).fetchone()
             if row:
                 if _substituted(row, a["code"]):
                     conn.execute(
@@ -266,8 +300,8 @@ def reconcile_executions(execs: list[dict],
                 entries += 1
                 continue
             ex = conn.execute(
-                "SELECT id FROM positions WHERE exit_ord_no=? AND status='closed'",
-                (ord_no,)).fetchone()
+                "SELECT id FROM positions WHERE exit_ord_no=? AND status='closed'"
+                " AND substr(closed,1,10)=?", (ord_no, day)).fetchone()
             pid = ex["id"] if ex else links.get(ord_no)
             if pid:
                 exit_groups.setdefault(pid, []).append(ord_no)
@@ -444,9 +478,10 @@ def fill_price_of(ord_no: str) -> float | None:
     if not ord_no:
         return None
     with _conn() as conn:
+        # 그날 수신분만 — 지난날 같은 번호의 체결가가 오늘 청산가가 되던 경로(_today)
         row = conn.execute(
             "SELECT price FROM exec_fills WHERE ord_no=? AND price>0 "
-            "ORDER BY ts DESC LIMIT 1", (ord_no,)
+            "AND substr(ts,1,10)=? ORDER BY ts DESC LIMIT 1", (ord_no, _today())
         ).fetchone()
     return float(row["price"]) if row else None
 
@@ -457,9 +492,12 @@ def filled_qty(ord_no: str) -> int:
     if not ord_no:
         return 0
     with _conn() as conn:
+        # 그날 수신분만 — 지난날 같은 번호의 체결이 섞이면 잔량을 작게 읽어
+        # 시장가 재발주를 건너뛰고 고아 잔량을 남긴다(_today)
         row = conn.execute(
             "SELECT COALESCE(SUM(qty), 0) FROM exec_fills"
-            " WHERE ord_no=? AND price>0", (ord_no,)).fetchone()
+            " WHERE ord_no=? AND price>0 AND substr(ts,1,10)=?",
+            (ord_no, _today())).fetchone()
     return int(row[0] or 0)
 
 
