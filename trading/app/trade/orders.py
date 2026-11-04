@@ -385,27 +385,23 @@ def exit_order_links(day: str | None = None) -> dict[str, str]:
 
     원 청산 주문은 positions.exit_ord_no 로도 찾을 수 있지만, **잔량 재발주**
     (`_best_exit_fallback`)는 orders 에만 남는다(link_pos). reconcile 이 둘의 체결을
-    한 포지션의 매도로 합치려면 이 표가 필요하다(2026-11-02).
+    한 포지션의 매도로 합치려면 이 표가 필요하다(2026-11-02). 구현은 대사의 기본값과
+    같은 `ledger.exit_links_from` 하나다.
     """
+    from . import ledger
+
     kst = ZoneInfo("Asia/Seoul")
     d = date.fromisoformat(day) if day else datetime.now(kst).date()
-    start = datetime(d.year, d.month, d.day, tzinfo=kst).astimezone(UTC).isoformat()
-    out: dict[str, str] = {}
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT link_pos, result FROM orders WHERE kind='exit' AND status='sent'"
-            " AND link_pos IS NOT NULL AND created >= ?", (start,)).fetchall()
-    for link, result in rows:
-        try:
-            ord_no = str((json.loads(result or "{}") or {}).get("ord_no") or "").strip()
-        except (TypeError, ValueError):
-            continue
-        if ord_no:
-            out[ord_no] = str(link)
-    return out
+        return ledger.exit_links_from(conn, d.isoformat())
 
 
-def working_exit_symbols(day: str | None = None) -> set[str]:
+# 살아 있는 청산 매도로 볼 상한(분). 실측 2026-11-03: KCC건설 674주 재발주가 13분에 걸쳐
+# 체결됐다 — 그 4배 여유. 넘으면 종전 동작(3분 유예만)으로 돌아갈 뿐이다.
+WORKING_EXIT_MAX_MIN = 60
+
+
+def working_exit_symbols(day: str | None = None, now: datetime | None = None) -> set[str]:
     """오늘 나간 청산 중 매도가 **아직 진행 중일 수 있는** 집행 종목 — 잔량 편입 유예용.
 
     ## 왜 (실측 2026-11-03, mock)
@@ -417,35 +413,70 @@ def working_exit_symbols(day: str | None = None) -> set[str]:
     끝나자 놓친 청산(②)이 그 행을 원 포지션의 주문번호로 닫아 원장이 둘로 갈라졌다.
     살아 있는 매도에 묶인 주식은 고아가 아니다 — 주문이 끝날 때까지 편입하지 않는다.
 
-    ## 판정
+    ## 판정 — **주문** 기준이다, 포지션 수량이 아니라 (2026-11-04 정정)
 
-    오늘 닫힌 포지션 중 체결이 덜 확인된 것(exit_fill_confirmed 가 0 이거나 exit_qty 가
-    부분)에서, 그 포지션에 연결된 **마지막** 청산 주문(link_pos, 생성 시각순)이 'sent'
-    이면 살아 있다고 본다. 마지막 주문이 거부·오류면 살아 있는 매도가 없으므로 유예하지
-    않는다(남은 주식은 고아 — 편입해 판다). 브로커 쪽 취소처럼 원장이 모르는 종료는
-    그날 안에는 못 알아챈다 — 다음 날 09:00 첫 동기화에서 편입된다(날이 바뀌면 이 표에서
-    빠진다). API 호출 없음(원장 두 표만 읽는다).
+    오늘 닫힌 포지션의 청산 사슬(link_pos, 생성 시각순)에서 **마지막** 주문이 'sent' 이고,
+    그 주문의 체결(broker_fills, 그날 그 주문번호의 누계)이 **그 주문 수량**보다 적고,
+    낸 지 `WORKING_EXIT_MAX_MIN` 분이 안 됐으면 살아 있다고 본다. 앞선 주문은 재발주 때
+    이미 취소됐다(`_best_exit_fallback` 이 취소 후에만 재발주한다). 포지션이 전량 확인된
+    청산(exit_fill_confirmed=1·exit_qty 없음)은 보지 않는다.
+
+    11/3 첫 판은 '포지션 수량보다 덜 팔렸나' 로 쟀다가 오탐을 냈다 — 실측 11/4 아이크래프트:
+    진입 주문이 아직 체결되는 중(누계 173주)에 목표가가 닿아 173주만 팔았고, 진입은 끝내
+    484주가 됐다. 매도 주문(173주)은 다 체결됐는데 '484 중 173' 이라 하루 종일 진행 중으로
+    읽혀 남은 311주가 편입·매도되지 못하고 밤을 넘겼다.
+
+    마지막 주문이 거부·오류면 살아 있는 매도가 없다(남은 주식은 고아 — 편입해 판다).
+    브로커 쪽 취소처럼 원장이 모르는 종료는 상한 시간이 지나면 풀린다 — 그때 아직
+    팔리는 중이었다면 종전 동작(재편입 → 장중 매도 '매도가능수량 부족' 거부 → 매도가
+    끝나면 잔량 해소 void)으로 돌아갈 뿐 손해는 없다. API 호출 없음(원장 표만 읽는다).
     """
     from . import ledger
 
     kst = ZoneInfo("Asia/Seoul")
     d = date.fromisoformat(day) if day else datetime.now(kst).date()
     start = datetime(d.year, d.month, d.day, tzinfo=kst).astimezone(UTC).isoformat()
-    with ledger._conn() as conn:
-        cands = {str(r["id"]): ledger.executed_symbol(r) for r in conn.execute(
-            "SELECT * FROM positions WHERE status='closed' AND substr(closed,1,10)=?"
-            " AND (COALESCE(exit_fill_confirmed, 0)=0 OR exit_qty IS NOT NULL)",
-            (d.isoformat(),))}
-    if not cands:
-        return set()
-    out: set[str] = set()
+    oldest = (now or datetime.now(UTC)) - timedelta(minutes=WORKING_EXIT_MAX_MIN)
     with _conn() as conn:
-        for pid, sym in cands.items():
-            last = conn.execute(
-                "SELECT status FROM orders WHERE kind='exit' AND link_pos=?"
-                " AND created >= ? ORDER BY created DESC LIMIT 1", (pid, start)).fetchone()
-            if last and last[0] == "sent":
-                out.add(sym)
+        rows = conn.execute(
+            "SELECT link_pos, exec_symbol, qty, status, result, created FROM orders"
+            " WHERE kind='exit' AND link_pos IS NOT NULL AND created >= ?"
+            " ORDER BY created", (start,)).fetchall()
+    last: dict[str, sqlite3.Row] = {}
+    for r in rows:
+        last[str(r["link_pos"])] = r          # 생성 시각순 — 마지막 것이 남는다
+    pending: dict[str, tuple[str, str, int]] = {}
+    for pid, r in last.items():
+        if r["status"] != "sent":
+            continue
+        try:
+            created = datetime.fromisoformat(r["created"])
+        except (TypeError, ValueError):
+            continue
+        if created < oldest:
+            continue
+        try:
+            ord_no = str((json.loads(r["result"] or "{}") or {}).get("ord_no") or "").strip()
+        except (TypeError, ValueError):
+            ord_no = ""
+        pending[pid] = (str(r["exec_symbol"] or ""), ord_no, int(r["qty"] or 0))
+    if not pending:
+        return set()
+    with ledger._conn() as conn:
+        open_chain = {str(r["id"]): ledger.executed_symbol(r) for r in conn.execute(
+            "SELECT * FROM positions WHERE status='closed' AND substr(closed,1,10)=?"
+            " AND NOT (COALESCE(exit_fill_confirmed, 0)=1 AND exit_qty IS NULL)",
+            (d.isoformat(),))}
+        try:
+            filled = {str(r[0]): int(r[1] or 0) for r in conn.execute(
+                "SELECT ord_no, SUM(qty) FROM broker_fills WHERE d=? AND side='sell'"
+                " GROUP BY ord_no", (d.isoformat(),))}
+        except sqlite3.OperationalError:       # 첫 동기화 전 — 체결을 아직 모른다
+            filled = {}
+    out: set[str] = set()
+    for pid, (sym, ord_no, qty) in pending.items():
+        if pid in open_chain and filled.get(ord_no, 0) < qty:
+            out.add(sym or open_chain[pid])
     return out
 
 

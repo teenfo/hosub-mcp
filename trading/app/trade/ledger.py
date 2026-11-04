@@ -8,6 +8,7 @@
 손익은 백테스터와 동일하게 '신호 종목의 역방향 수익률'로 근사 — 일관성 유지).
 장중 30초 주기로 손절/목표 터치를 확인하고, 장 마감에 미청산분을 종가로 정리한다.
 """
+import json
 import logging
 import sqlite3
 from datetime import UTC, datetime
@@ -36,6 +37,28 @@ def _today() -> str:
     바꿔 하루 당긴다, 2026-10 market_returns 사고).
     """
     return datetime.now(KST).date().isoformat()
+
+
+def exit_links_from(conn: sqlite3.Connection, day: str) -> dict[str, str]:
+    """{청산 주문번호: 포지션 id} — 그날(KST) 나간 청산 주문(원 주문·잔량 재발주) 전부.
+
+    orders 표를 주어진 연결로 읽는다(`orders.exit_order_links` 와 대사의 기본값이 같은
+    구현을 쓴다). orders.created 는 UTC ISO 라 KST 하루의 시작을 UTC 로 바꿔 자른다.
+    """
+    d = datetime.strptime(day, "%Y-%m-%d")
+    start = d.replace(tzinfo=KST).astimezone(UTC).isoformat()
+    out: dict[str, str] = {}
+    rows = conn.execute(
+        "SELECT link_pos, result FROM orders WHERE kind='exit' AND status='sent'"
+        " AND link_pos IS NOT NULL AND created >= ?", (start,)).fetchall()
+    for link, result in rows:
+        try:
+            ord_no = str((json.loads(result or "{}") or {}).get("ord_no") or "").strip()
+        except (TypeError, ValueError):
+            continue
+        if ord_no:
+            out[ord_no] = str(link)
+    return out
 
 
 def _conn() -> sqlite3.Connection:
@@ -255,10 +278,23 @@ def reconcile_executions(execs: list[dict],
     청산 10건), 정작 오늘 포지션은 확정되지 않았다. 휴장일(10/5·10/9)에 직전 거래일
     체결이 휴장일 날짜로 다시 들어온 것도 이제 어느 포지션에도 붙지 않는다.
 
+    ## exit_links 를 안 넘기면 같은 DB 의 주문 표에서 읽는다 (2026-11-04)
+
+    실측 15:49:55: 대시보드 '계좌 대조'(`/api/account/reconcile`)가 표 없이 대사를 돌려
+    재발주 체결이 빠졌고, 장중에 전량으로 맞춰 둔 판 수량이 GRT 1108→200주·OCI 54→7주로
+    되돌아갔다. 부르는 쪽이 잊어도 같은 답이 나오게 기본값을 표로 둔다(표가 없으면 빈 표 —
+    테스트·초기 DB).
+
     반환: {entries, exits} — 각각 갱신한 포지션 수.
     """
-    links = exit_links or {}
     day = day or _today()
+    if exit_links is None:
+        try:
+            with _conn() as conn:
+                exit_links = exit_links_from(conn, day)
+        except sqlite3.OperationalError:     # orders 표가 아직 없다
+            exit_links = {}
+    links = exit_links
     exit_groups: dict[str, list[str]] = {}
     agg: dict[str, dict] = {}
     for e in execs:
