@@ -39,14 +39,14 @@ def _residual(pid="res1", qty=674, entry=5_629.0):
                           "target": entry * 1.03}, fill=entry, ord_no=None)
 
 
-def _exit_order(oid, link, ord_no, status="sent", created=None):
+def _exit_order(oid, link, ord_no, status="sent", created=None, qty=674):
     created = created or datetime.now(UTC)
     with orders._conn() as conn:
         conn.execute(
             f"INSERT INTO orders ({orders._ENTRY_COLS}) VALUES "
             "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (oid, created.isoformat(), created.isoformat(), SYM, "long", "residual", "",
-             5_629, None, None, 674, SYM, "sell", 674, status,
+             5_629, None, None, qty, SYM, "sell", qty, status,
              json.dumps({"ord_no": ord_no, "return_code": 0}), "exit", link, 5_629))
 
 
@@ -72,6 +72,7 @@ def _sold_slowly(filled: int):
     _exit_order("o1", "res1", "B1", created=t0)
     _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=30))
     execs = [_sell("C1", filled)]
+    fills.store_today(execs, _today())       # 진행 판정은 REST 체결 누계(broker_fills)를 본다
     ledger.reconcile_executions(execs, exit_links=orders.exit_order_links())
     return execs
 
@@ -133,6 +134,68 @@ def test_어제_닫힌_청산은_진행_중으로_보지_않는다():
     with ledger._conn() as conn:
         conn.execute("UPDATE positions SET closed='2026-11-02T15:20:00+09:00' WHERE id='res1'")
     assert orders.working_exit_symbols() == set()
+
+
+def test_매도_주문이_다_체결됐으면_포지션보다_덜_팔았어도_진행_중이_아니다():
+    """실측 11/4 아이크래프트: 진입이 체결되는 중(누계 173주)에 목표가가 닿아 173주만
+    팔았고 진입은 끝내 484주. 매도 주문은 다 체결됐다 — 남은 311주는 고아라 편입해 판다."""
+    _residual(qty=484)
+    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    ledger.close_position("res1", 6_288.0, "target", ord_no="B1")
+    _exit_order("o1", "res1", "B1", created=t0, qty=173)                  # 체결 0 → 취소
+    _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=28), qty=173)
+    day = _today()
+    execs = [_sell("C1", 173, price=6_288.0)]
+    fills.store_today(execs, day)
+    ledger.reconcile_executions(execs, exit_links=orders.exit_order_links(day), day=day)
+    assert _row("res1")["exit_qty"] == 173
+    assert orders.working_exit_symbols(day) == set()
+    got = fills.sync_from_fills(day, holdings={SYM: 311},
+                                holding_info={SYM: {"avg_price": 6_266, "name": "아이크래프트"}},
+                                exit_grace=orders.working_exit_symbols(day),
+                                exit_links=orders.exit_order_links(day))
+    assert got["residual"] == 1
+    adopted = [p for p in ledger.positions(status="open") if p["symbol"] == SYM]
+    assert len(adopted) == 1 and adopted[0]["qty"] == 311
+
+
+def test_상한_시간이_지난_청산_주문은_진행_중으로_보지_않는다():
+    """원장이 모르는 종료(브로커 쪽 취소 등)에 하루 종일 묶이지 않게."""
+    _residual()
+    ledger.close_position("res1", 5_629.0, "residual", ord_no="B1")
+    old = datetime.now(UTC) - timedelta(minutes=orders.WORKING_EXIT_MAX_MIN + 5)
+    _exit_order("o1", "res1", "B1", created=old)
+    fills.store_today([_sell("B1", 100)], _today())
+    assert orders.working_exit_symbols() == set()
+    assert orders.working_exit_symbols(now=old + timedelta(minutes=1)) == {SYM}
+
+
+def test_표를_안_넘겨도_재발주_체결을_한_포지션으로_합친다():
+    """대시보드 '계좌 대조'(/api/account/reconcile)는 exit_links 없이 부른다."""
+    _residual()
+    t0 = datetime.now(UTC) - timedelta(minutes=5)
+    ledger.close_position("res1", 5_629.0, "stop", ord_no="B1")
+    _exit_order("o1", "res1", "B1", created=t0)
+    _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=30), qty=474)
+    ledger.reconcile_executions([_sell("B1", 200, price=5_300.0), _sell("C1", 474)])
+    r = _row("res1")
+    assert r["exit_qty"] is None
+    assert r["exit"] == pytest.approx((5_300 * 200 + 5_279 * 474) / 674, abs=0.01)
+
+
+def test_표_없이_다시_대사해도_판_수량이_되돌아가지_않는다():
+    """실측 11/4 15:49:55: 장중에 전량으로 맞춘 GRT 1108주·OCI 54주가 계좌 대조 한 번에
+    200주·7주로 되돌아갔다(재발주 체결이 빠짐)."""
+    _residual()
+    t0 = datetime.now(UTC) - timedelta(minutes=5)
+    ledger.close_position("res1", 5_629.0, "stop", ord_no="B1")
+    _exit_order("o1", "res1", "B1", created=t0)
+    _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=30), qty=474)
+    execs = [_sell("B1", 200, price=5_300.0), _sell("C1", 474)]
+    ledger.reconcile_executions(execs, exit_links=orders.exit_order_links())
+    assert _row("res1")["exit_qty"] is None
+    ledger.reconcile_executions(execs)                    # 계좌 대조 버튼 경로
+    assert _row("res1")["exit_qty"] is None
 
 
 def test_다른_포지션의_재발주_매도로_놓친_청산을_닫지_않는다():
