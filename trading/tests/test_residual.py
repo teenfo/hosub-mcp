@@ -214,6 +214,24 @@ async def test_계좌조회_실패면_종전대로_잔량을_던진다(env, monk
     assert spy.calls[-1]["qty"] == 7
 
 
+async def test_실시간_체결량은_누계라_재발주는_마지막_누계만큼만_뺀다(env, monkeypatch):
+    """실측 2026-11-05(mock) 아이크래프트: 1·2·47주가 누계로 왔는데 합(50)으로 읽어
+    재발주를 261주로 냈고 3주가 고아로 남았다. 맞는 재발주는 311 − 47 = 264주."""
+    _open(oid="p1", qty=311)
+    spy = _Spy(held=None)                       # 계좌 조회 실패 — 수량 자르기 없이 순수 계산
+    _install(monkeypatch, spy)
+    pos = ledger.positions("open")[0]
+    now = datetime.now(KST)
+    with ledger._conn() as conn:
+        for sec, cum in ((0, 1), (14, 2), (16, 47)):
+            conn.execute("INSERT INTO exec_fills VALUES (?,?,?,?,?,?,?)",
+                         ((now + timedelta(seconds=sec)).isoformat(timespec="seconds"),
+                          "X1", "021320", 6_291.0, cum, "체결", 0))
+    assert ledger.filled_qty("X1") == 47
+    await orders._best_exit_fallback(pos, "021320", "X1", 311, wait_sec=0)
+    assert spy.calls[-1]["qty"] == 264
+
+
 def test_최근_청산_종목_조회(env):
     now = datetime.now().astimezone()
     with orders._conn() as conn:
