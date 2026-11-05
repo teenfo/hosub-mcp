@@ -11,7 +11,7 @@
 import json
 import logging
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -43,14 +43,17 @@ def exit_links_from(conn: sqlite3.Connection, day: str) -> dict[str, str]:
     """{청산 주문번호: 포지션 id} — 그날(KST) 나간 청산 주문(원 주문·잔량 재발주) 전부.
 
     orders 표를 주어진 연결로 읽는다(`orders.exit_order_links` 와 대사의 기본값이 같은
-    구현을 쓴다). orders.created 는 UTC ISO 라 KST 하루의 시작을 UTC 로 바꿔 자른다.
+    구현을 쓴다). orders.created 는 UTC ISO 라 KST 하루의 시작·끝을 UTC 로 바꿔 자른다 —
+    끝도 자른다: 지난 날을 다시 대사할 때 그 뒤 날의 같은 번호(주문번호는 날마다 다시
+    매겨진다, `_today`)가 섞이지 않게(2026-11-06 소급 정정에서 확인).
     """
-    d = datetime.strptime(day, "%Y-%m-%d")
-    start = d.replace(tzinfo=KST).astimezone(UTC).isoformat()
+    d = datetime.strptime(day, "%Y-%m-%d").replace(tzinfo=KST)
+    start = d.astimezone(UTC).isoformat()
+    end = (d + timedelta(days=1)).astimezone(UTC).isoformat()
     out: dict[str, str] = {}
     rows = conn.execute(
         "SELECT link_pos, result FROM orders WHERE kind='exit' AND status='sent'"
-        " AND link_pos IS NOT NULL AND created >= ?", (start,)).fetchall()
+        " AND link_pos IS NOT NULL AND created >= ? AND created < ?", (start, end)).fetchall()
     for link, result in rows:
         try:
             ord_no = str((json.loads(result or "{}") or {}).get("ord_no") or "").strip()
