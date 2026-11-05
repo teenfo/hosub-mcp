@@ -523,15 +523,24 @@ def fill_price_of(ord_no: str) -> float | None:
 
 
 def filled_qty(ord_no: str) -> int:
-    """그 주문번호로 지금까지 수신한 체결 수량 합. 최유리지정가 청산의
-    미체결 잔량 판정용 — price>0 이 체결 행이다(접수 이벤트는 price 0)."""
+    """그 주문번호로 지금까지 수신한 체결 수량 — 청산 미체결 잔량 판정용.
+    price>0 이 체결 행이다(접수 이벤트는 price 0).
+
+    **누계의 최댓값이다, 합이 아니다** (2026-11-05). 실측(mock): 주문체결 실시간의
+    체결량(FID 911)은 누계로 온다 — 0022327 은 1·2·47주, 0022943 은 48·100·…·261주로
+    마지막 값이 증권사 체결(47·261주)과 같다(진입 쪽 `record_fill` 도 이미 누계로 qty 를
+    덮는다). 합으로 세던 종전 구현은 1+2+47=50 으로 읽어 시장가 재발주를 3주 적게(261)
+    냈고, 그 3주가 고아로 남아 10분 뒤 잔량 장중 매도로 다시 팔렸다(아이크래프트 11/5).
+    체결량이 낱건으로 오는 환경이라면 최댓값은 덜 센다 — 그때 재발주는 계좌 보유로
+    잘리므로(`orders._cap_by_holdings`) 과매도가 되지 않는다.
+    """
     if not ord_no:
         return 0
     with _conn() as conn:
         # 그날 수신분만 — 지난날 같은 번호의 체결이 섞이면 잔량을 작게 읽어
         # 시장가 재발주를 건너뛰고 고아 잔량을 남긴다(_today)
         row = conn.execute(
-            "SELECT COALESCE(SUM(qty), 0) FROM exec_fills"
+            "SELECT COALESCE(MAX(qty), 0) FROM exec_fills"
             " WHERE ord_no=? AND price>0 AND substr(ts,1,10)=?",
             (ord_no, _today())).fetchone()
     return int(row[0] or 0)
