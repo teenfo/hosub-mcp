@@ -31,6 +31,12 @@ def _today() -> str:
     return datetime.now(KST).date().isoformat()
 
 
+def _noon() -> datetime:
+    """그날(KST) 정오 — 주문 시각의 기준. '지금 − N분' 은 자정 직후에 전날로 넘어가
+    그날 주문 표에서 빠진다(실측 2026-11-06 00:4x 에 테스트가 깨졌다)."""
+    return datetime.now(KST).replace(hour=12, minute=0, second=0, microsecond=0).astimezone(UTC)
+
+
 def _residual(pid="res1", qty=674, entry=5_629.0):
     # 실제 편입 행은 손절·목표가 NULL 이지만 open_position 은 숫자를 요구한다 —
     # 여기서 재는 경로(편입·대사·놓친 청산)는 손절가를 보지 않는다.
@@ -67,7 +73,7 @@ def _row(pid):
 def _sold_slowly(filled: int):
     """09:05 원 주문 B1(체결 0) + 09:06 재발주 C1(filled 주 체결) 상태를 만든다."""
     _residual()
-    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    t0 = _noon() - timedelta(minutes=10)
     ledger.close_position("res1", 5_629.0, "residual", ord_no="B1")
     _exit_order("o1", "res1", "B1", created=t0)
     _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=30))
@@ -114,7 +120,7 @@ def test_마지막_청산_주문이_거부면_진행_중이_아니다():
     """살아 있는 매도가 없으니 남은 주식은 고아 — 편입해 판다."""
     _residual()
     ledger.close_position("res1", 5_629.0, "residual", ord_no="B1")
-    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    t0 = _noon() - timedelta(minutes=10)
     _exit_order("o1", "res1", "B1", created=t0)
     _exit_order("o2", "res1", "C1", status="rejected", created=t0 + timedelta(seconds=30))
     assert orders.working_exit_symbols() == set()
@@ -140,7 +146,7 @@ def test_매도_주문이_다_체결됐으면_포지션보다_덜_팔았어도_�
     """실측 11/4 아이크래프트: 진입이 체결되는 중(누계 173주)에 목표가가 닿아 173주만
     팔았고 진입은 끝내 484주. 매도 주문은 다 체결됐다 — 남은 311주는 고아라 편입해 판다."""
     _residual(qty=484)
-    t0 = datetime.now(UTC) - timedelta(minutes=10)
+    t0 = _noon() - timedelta(minutes=10)
     ledger.close_position("res1", 6_288.0, "target", ord_no="B1")
     _exit_order("o1", "res1", "B1", created=t0, qty=173)                  # 체결 0 → 취소
     _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=28), qty=173)
@@ -163,17 +169,18 @@ def test_상한_시간이_지난_청산_주문은_진행_중으로_보지_않는
     """원장이 모르는 종료(브로커 쪽 취소 등)에 하루 종일 묶이지 않게."""
     _residual()
     ledger.close_position("res1", 5_629.0, "residual", ord_no="B1")
-    old = datetime.now(UTC) - timedelta(minutes=orders.WORKING_EXIT_MAX_MIN + 5)
+    base = _noon()
+    old = base - timedelta(minutes=orders.WORKING_EXIT_MAX_MIN + 5)
     _exit_order("o1", "res1", "B1", created=old)
     fills.store_today([_sell("B1", 100)], _today())
-    assert orders.working_exit_symbols() == set()
+    assert orders.working_exit_symbols(now=base) == set()
     assert orders.working_exit_symbols(now=old + timedelta(minutes=1)) == {SYM}
 
 
 def test_표를_안_넘겨도_재발주_체결을_한_포지션으로_합친다():
     """대시보드 '계좌 대조'(/api/account/reconcile)는 exit_links 없이 부른다."""
     _residual()
-    t0 = datetime.now(UTC) - timedelta(minutes=5)
+    t0 = _noon() - timedelta(minutes=5)
     ledger.close_position("res1", 5_629.0, "stop", ord_no="B1")
     _exit_order("o1", "res1", "B1", created=t0)
     _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=30), qty=474)
@@ -187,7 +194,7 @@ def test_표_없이_다시_대사해도_판_수량이_되돌아가지_않는다(
     """실측 11/4 15:49:55: 장중에 전량으로 맞춘 GRT 1108주·OCI 54주가 계좌 대조 한 번에
     200주·7주로 되돌아갔다(재발주 체결이 빠짐)."""
     _residual()
-    t0 = datetime.now(UTC) - timedelta(minutes=5)
+    t0 = _noon() - timedelta(minutes=5)
     ledger.close_position("res1", 5_629.0, "stop", ord_no="B1")
     _exit_order("o1", "res1", "B1", created=t0)
     _exit_order("o2", "res1", "C1", created=t0 + timedelta(seconds=30), qty=474)

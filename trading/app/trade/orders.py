@@ -280,6 +280,79 @@ async def _best_exit_fallback(pos: dict, exec_symbol: str, ord_no: str,
         log.exception("최유리 청산 폴백 오류 %s", exec_symbol)
 
 
+def _entry_unfilled(pos: dict, day: str | None = None) -> int:
+    """그 포지션 **진입 주문**의 아직 체결 안 된 수량. 모르면 0 — 0 이면 취소하지 않는다.
+
+    진입 주문 행은 positions.id 와 같은 orders.id 다(`approve_and_send` → `open_position`).
+    체결 누계는 실시간(`ledger.filled_qty`, 누계 최댓값)과 REST(broker_fills) 중 큰 값.
+    그날 연 포지션만 — 주문은 그날 끝나므로 지난날 진입은 살아 있을 수 없다. external
+    (사용자 수동 주문)·residual(편입 행, 주문 없음)은 건드리지 않는다.
+    """
+    from . import ledger
+
+    if not pos or pos.get("rule") in ("external", "residual") or not pos.get("ord_no"):
+        return 0
+    day = day or datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
+    if str(pos.get("opened") or "")[:10] != day:
+        return 0
+    with _conn() as conn:
+        row = conn.execute("SELECT exec_qty, status, kind FROM orders WHERE id=?",
+                           (pos.get("id"),)).fetchone()
+    if not row or row["status"] != "sent" or row["kind"] == "exit":
+        return 0
+    filled = ledger.filled_qty(str(pos["ord_no"]))
+    try:
+        with ledger._conn() as conn:
+            got = conn.execute(
+                "SELECT COALESCE(SUM(qty), 0) FROM broker_fills WHERE d=? AND ord_no=?"
+                " AND side='buy'", (day, str(pos["ord_no"]))).fetchone()
+        filled = max(filled, int(got[0] or 0))
+    except sqlite3.OperationalError:          # 첫 동기화 전 — 실시간 누계만으로
+        pass
+    return max(0, int(row["exec_qty"] or 0) - filled)
+
+
+async def _cancel_entry_remainder(client, pos: dict) -> dict:
+    """청산 직전에 그 포지션 진입 주문의 **미체결분을 취소**하고, 그때까지 들어온 진입 체결로
+    매도 수량을 다시 읽는다. 반환: 매도할 포지션(수량 갱신분 반영).
+
+    ## 왜 (사용자 결정 2026-11-05: 추천안대로)
+
+    진입 주문이 다 체결되기 전에 청산이 나가면 그 뒤 들어온 진입 체결이 고아가 된다.
+    실측(mock): 11/4 아이크래프트 — 484주 주문이 누계 173주일 때 52초 만에 목표가가 닿아
+    173주만 팔았고 311주가 청산 뒤 체결돼 다음 날 잔량 매도로 정리. 11/5 고려산업 —
+    1,688주 주문이 30분 넘게 1,648주까지만 체결된 채 손절, 40주가 청산 뒤 체결(모의 시장가는
+    실제 체결량만큼만 소화한다). 청산하는 포지션의 진입을 더 받을 이유는 없다.
+
+    취소는 잔량 전부(kt10003, 1콜 — 진입이 덜 체결된 청산에서만). 이미 다 체결·취소된
+    주문이면 브로커가 거부한다 — 무해, 로그만. 취소와 마지막 체결이 엇갈려 남는 몇 주는
+    잔량 편입 → 장중 매도가 뒤처리한다. 끄려면 config execution.cancel_entry_on_exit: false.
+    """
+    from . import ledger
+
+    if not settings.CONFIG.get("execution", {}).get("cancel_entry_on_exit", True):
+        return pos
+    rem = _entry_unfilled(pos)
+    if rem <= 0:
+        return pos
+    exec_symbol = pos.get("exec_symbol") or pos["symbol"]
+    try:
+        result = await client.cancel_order(str(pos["ord_no"]), exec_symbol)
+        log.warning("청산 전 진입 미체결 %d주 취소 %s ord=%s: %s", rem, exec_symbol,
+                    pos["ord_no"],
+                    result.get("return_msg") if isinstance(result, dict) else result)
+    except Exception:  # noqa: BLE001 - 취소 실패가 청산을 막지 않는다
+        log.warning("청산 전 진입 미체결 취소 실패 %s ord=%s", exec_symbol, pos["ord_no"],
+                    exc_info=True)
+    # 취소 직전까지 들어온 진입 체결 — 실시간 체결이 positions.qty 를 누계로 갱신한다
+    with ledger._conn() as conn:
+        row = conn.execute("SELECT qty FROM positions WHERE id=?", (pos["id"],)).fetchone()
+    fresh = int(row["qty"] or 0) if row else 0
+    if fresh > int(pos.get("qty") or 0):
+        pos = {**pos, "qty": fresh}
+    return pos
+
+
 async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
     """즉시 매도 청산(승인 없이). 손절 자동/장 마감 정리·수동 버튼에 사용.
     키움은 네이티브 스톱주문이 없어 서버가 감시 후 직접 발주한다.
@@ -299,6 +372,7 @@ async def execute_exit(pos: dict, reason: str, exit_px: float) -> dict:
     from ..kiwoom.client import client
     from . import ledger
 
+    pos = await _cancel_entry_remainder(client, pos)   # 진입이 덜 체결됐으면 나머지부터 끊는다
     exec_symbol = pos.get("exec_symbol") or pos["symbol"]
     order_id = uuid.uuid4().hex[:12]
     now = datetime.now(UTC)
@@ -565,6 +639,18 @@ async def approve_and_send(order_id: str, qty: int | None = None) -> dict:
         if qty <= 0:
             return {"ok": False, "error": "발주 수량은 1주 이상이어야 합니다"}
         order["qty"] = order["exec_qty"] = qty
+    if order.get("kind") == "exit" and order.get("link_pos"):
+        # 승인 경로 청산도 같다 — 진입이 덜 체결됐으면 나머지를 끊고, 제안 뒤 늘어난
+        # 진입 체결까지 판다(execute_exit 와 같은 규칙, _cancel_entry_remainder).
+        from . import ledger
+        with ledger._conn() as conn:
+            prow = conn.execute("SELECT * FROM positions WHERE id=? AND status='open'",
+                                (order["link_pos"],)).fetchone()
+        if prow:
+            pos = await _cancel_entry_remainder(client, dict(prow))
+            same_symbol = (order.get("exec_symbol") or order["symbol"]) == order["symbol"]
+            if same_symbol and int(pos.get("qty") or 0) > int(order["exec_qty"] or 0):
+                order["qty"] = order["exec_qty"] = int(pos["qty"])   # 인버스 대체는 수량 단위가 달라 제외
     with _conn() as conn:
         conn.execute(
             "UPDATE orders SET status='approved', qty=?, exec_qty=? WHERE id=?",
