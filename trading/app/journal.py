@@ -558,10 +558,28 @@ def build(day: str | None = None) -> dict:
         "verified_configured_cost_net_krw": round(sum(p["costs"]["configured_cost_net_krw"] for p in actual), 2),
         "unlinked_residuals": sum(p.get("rule")=="residual" and not p.get("parent_position_id") for p in closed),
     }
+    from .trade import accounting_audit
+    entry["accounting"]["evidence"] = accounting_audit.daily_evidence(
+        day, closed, broker, broker_fills.today_fills(day))
     entry["facts"] = facts(entry)
     a = entry["accounting"]
     entry["facts"].append(f"[회계 대조] 비용 검증 {len(actual)}/{len(closed)}건, 미확인 {a['unverified_cost_trades']}건. 계좌-원장 미배분 차액 {a['unallocated_difference_krw']}원. 차액 원인은 미확정이며 특정 기법에 배분하지 않음.")
     entry["facts"].append(f"[비용 검증분만] 비용 전 {a['verified_gross_krw']}원, 수수료 {a['verified_commission_krw']}원, 세금 {a['verified_tax_krw']}원. 설정 비용 가정 손익 {a['verified_configured_cost_net_krw']}원은 비교용이며 실전 성과가 아님.")
+    evidence = entry["accounting"]["evidence"]
+    if evidence.get("status") == "available":
+        entry["facts"].append(
+            f"[원본 대조] 증권사 일별 수수료 {evidence['broker_commission_krw']}원, "
+            f"저장 체결 수수료 {evidence['stored_fill_commission_krw']}원, "
+            f"차이 {evidence['commission_difference_krw']}원. "
+            "일별 수수료와 실현 거래 배분 수수료는 보유 이월 시 범위가 다를 수 있음.")
+        if evidence.get("comparison_scope") == "same_day_flat":
+            entry["facts"].append(
+                f"[당일 전량청산 대조] 비용 전 손익 산정 차이 "
+                f"{evidence['gross_basis_difference_krw']}원, 실현 수수료 차이 "
+                f"{evidence['realized_commission_difference_krw']}원, 세금 차이 "
+                f"{evidence['realized_tax_difference_krw']}원. "
+                "금액 차이는 확인됐으나 평균단가·절사·세부 명세 원인은 추가 대조 필요. "
+                "기법 손익에 임의 배분하지 않음.")
     return entry
 
 

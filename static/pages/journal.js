@@ -48,6 +48,16 @@ export function renderJournalDay(target, d) {
     ]));
   }
 
+  const evidence = a?.evidence;
+  if (evidence?.status === "available") {
+    target.appendChild(el("div", { class: "alert alert-info small mb-3" }, [
+      el("div", {}, `증권사 일별 수수료 ${won(evidence.broker_commission_krw)} · 저장 체결 수수료 ${won(evidence.stored_fill_commission_krw)} · 차이 ${won(evidence.commission_difference_krw)}`),
+      el("div", {}, evidence.comparison_scope === "same_day_flat"
+        ? `당일 전량 청산 확인: 비용 전 손익 산정 차이 ${won(evidence.gross_basis_difference_krw)}, 실현 수수료 차이 ${won(evidence.realized_commission_difference_krw)}, 세금 차이 ${won(evidence.realized_tax_difference_krw)}. 세부 명세 추가 대조가 필요합니다.`
+        : "보유 이월 또는 미확인 거래가 있어 비용 전 손익 차이를 단정하지 않습니다."),
+    ]));
+  }
+
   // LLM 요약
   const sum = d.summary || {};
   if (sum.text) {
