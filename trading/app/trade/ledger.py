@@ -115,7 +115,8 @@ def _conn() -> sqlite3.Connection:
                      # KCC건설 하나에 장부상 42,349주 '매도' vs 실제 2,453주가 됐다.
                      # qty(의도·진입 수량)는 그대로 두고 손익만 이 수량으로 낸다 —
                      # 같은 날 재발주 체결이 뒤이어 와도 다시 늘릴 수 있게.
-                     ("exit_qty", "INTEGER")):
+                     ("exit_qty", "INTEGER"),
+                     ("parent_position_id", "TEXT")):
         try:
             conn.execute(f"ALTER TABLE positions ADD COLUMN {col} {ddl}")
         except sqlite3.OperationalError:
@@ -331,7 +332,7 @@ def reconcile_executions(execs: list[dict],
                 conn.execute(
                     "UPDATE positions SET entry=?, qty=?, slippage_pct=?, "
                     "entry_fee_krw=?, fill_confirmed=1 WHERE id=?",
-                    (round(price, 2), a["qty"],
+                    (price, a["qty"],
                      round((price - model) / model * 100, 4) if model else 0.0,
                      a["fee"], row["id"]),
                 )
@@ -341,7 +342,7 @@ def reconcile_executions(execs: list[dict],
             ex = conn.execute(
                 "SELECT id FROM positions WHERE exit_ord_no=? AND status='closed'"
                 " AND substr(closed,1,10)=?", (ord_no, day)).fetchone()
-            pid = ex["id"] if ex else links.get(ord_no)
+            pid = links.get(ord_no) or (ex["id"] if ex else None)
             if pid:
                 exit_groups.setdefault(pid, []).append(ord_no)
         # 청산은 **포지션 단위로 합친다** — 원 청산 주문 + 잔량 재발주(orders.link_pos)
@@ -377,12 +378,66 @@ def reconcile_executions(execs: list[dict],
             conn.execute(
                 "UPDATE positions SET exit=?, exit_fee_krw=?, tax_krw=?, "
                 "exit_fill_confirmed=1, exit_qty=? WHERE id=?",
-                (round(price, 2), g["fee"], g["tax"], exit_qty, ex["id"]),
+                (price, g["fee"], g["tax"], exit_qty, ex["id"]),
             )
             exits += 1
     if entries or exits:
         apply_actual_costs()
     return {"entries": entries, "exits": exits}
+
+
+def link_residual_parent(conn, pid: str) -> bool:
+    """Link only a unique, quantity/price/environment-matched residual predecessor.
+
+    Ambiguous inventory stays unallocated; never force a daily difference into a trade.
+    """
+    r = conn.execute("SELECT * FROM positions WHERE id=?", (pid,)).fetchone()
+    if not r or r["rule"] != "residual" or r["parent_position_id"]:
+        return False
+    candidates = conn.execute(
+        "SELECT * FROM positions p WHERE p.status='closed' AND p.env=? "
+        "AND COALESCE(NULLIF(p.exec_symbol,''),p.symbol)=? AND p.side='long' "
+        "AND p.closed<=? AND p.exit_qty IS NOT NULL AND p.exit_fill_confirmed=1 "
+        "AND p.fill_confirmed=1 AND p.entry_fee_krw IS NOT NULL "
+        "AND p.qty-p.exit_qty=? AND abs(p.entry-?)<0.011 "
+        "AND NOT EXISTS (SELECT 1 FROM positions c WHERE c.parent_position_id=p.id "
+        "AND c.status!='void')",
+        (r["env"], executed_symbol(r), r["opened"], r["qty"], r["entry"])).fetchall()
+    if len(candidates) != 1:
+        return False
+    parent = candidates[0]
+    conn.execute("UPDATE positions SET parent_position_id=?, entry_fee_krw=? WHERE id=?",
+                 (parent["id"], parent["entry_fee_krw"] * r["qty"] / parent["qty"], pid))
+    return True
+
+
+def positions_closed_on(day: str) -> list[dict]:
+    with _conn() as conn:
+        return [_row(r) for r in conn.execute(
+            "SELECT * FROM positions WHERE status='closed' AND substr(closed,1,10)=? "
+            "ORDER BY opened", (day,))]
+
+
+def cost_breakdown(row: dict) -> dict:
+    """Actual fills already contain slippage. Missing fees are unknown, not zero."""
+    qty = int(row.get("qty") or 0)
+    sold = row.get("exit_qty") if row.get("exit_qty") is not None else qty
+    entry, exit_px = float(row.get("entry") or 0), float(row.get("exit") or 0)
+    confirmed = bool(row.get("fill_confirmed") and row.get("exit_fill_confirmed")
+                     and 0 < sold <= qty and entry > 0 and exit_px > 0
+                     and not _substituted(row, executed_symbol(row)))
+    gross = (exit_px-entry)*sold*(-1 if row.get("side") == "short" else 1) if confirmed else None
+    known = confirmed and all(row.get(k) is not None for k in
+                              ("entry_fee_krw", "exit_fee_krw", "tax_krw"))
+    fee = row["entry_fee_krw"]*sold/qty + row["exit_fee_krw"] if known else None
+    tax = row["tax_krw"] if known else None
+    # Configured-cost scenario is a comparison, never an actual broker result.
+    scenario = (gross - (entry+exit_px)*sold*settings.COSTS.get("commission_pct", .015)/100
+                - exit_px*sold*settings.COSTS.get("sell_tax_pct", .20)/100) if confirmed else None
+    return {"gross_pnl_krw": gross, "commission_krw": fee, "tax_krw": tax,
+            "actual_net_pnl_krw": gross-fee-tax if known else None,
+            "configured_cost_net_krw": scenario,
+            "cost_status": "actual" if known else "unverified", "sold_qty": sold}
 
 
 def apply_actual_costs() -> int:
@@ -393,15 +448,24 @@ def apply_actual_costs() -> int:
     """
     n = 0
     with _conn() as conn:
-        rows = conn.execute(
-            "SELECT * FROM positions WHERE status='closed'"
-            " AND fill_confirmed=1 AND exit_fill_confirmed=1").fetchall()
+        # Parent cost is allocated, never duplicated. Unknown residual basis stays unknown.
+        for child in conn.execute("SELECT * FROM positions WHERE parent_position_id IS NOT NULL ORDER BY opened").fetchall():
+            parent = conn.execute("SELECT * FROM positions WHERE id=?", (child["parent_position_id"],)).fetchone()
+            allocated = conn.execute("SELECT COALESCE(sum(qty),0) FROM positions WHERE parent_position_id=? AND status!='void'", (child["parent_position_id"],)).fetchone()[0]
+            valid = (parent and parent["entry_fee_krw"] is not None and parent["exit_qty"] is not None
+                     and allocated <= parent["qty"]-parent["exit_qty"] and parent["qty"] > 0)
+            fee = parent["entry_fee_krw"]*child["qty"]/parent["qty"] if valid else None
+            conn.execute("UPDATE positions SET entry_fee_krw=? WHERE id=?", (fee, child["id"]))
+        rows = conn.execute("SELECT * FROM positions WHERE status='closed' AND fill_confirmed=1 AND exit_fill_confirmed=1").fetchall()
         for r in rows:
             # 부분 청산이면 판 수량만큼만 실현이다 — 진입 비용도 그 비율만
             # (나머지 수량은 residual 로 다시 편입돼 따로 실현된다).
             qty = int(r["qty"] or 0)
             sold = r["exit_qty"] if r["exit_qty"] is not None else qty
-            ratio = (sold / qty) if qty else 1.0
+            if not 0 < sold <= qty or any(r[k] is None for k in
+                    ("entry_fee_krw", "exit_fee_krw", "tax_krw")):
+                continue
+            ratio = sold / qty
             fee = (r["entry_fee_krw"] or 0) * ratio + (r["exit_fee_krw"] or 0)
             krw = actual_pnl_krw(r["side"], r["entry"], r["exit"], sold,
                                  fee, r["tax_krw"] or 0)
@@ -824,6 +888,8 @@ def _row(r) -> dict:
     """원장 행 → 화면·일지가 쓰는 dict. 파생 필드는 여기 한 곳에서 붙인다."""
     d = dict(r)
     d["outcome"] = outcome(d)
+    if d.get("status") == "closed":
+        d["costs"] = cost_breakdown(d)
     return d
 
 

@@ -132,12 +132,13 @@ async def test_일지가_집계_전에_대사를_돌린다(env, monkeypatch, tmp
 
     monkeypatch.setattr(journal, "DB_PATH", tmp_path / "trading.db")
     monkeypatch.setattr(journal, "JOURNAL_DIR", tmp_path / "journal")
-    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "k")
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "")
     order = []
 
-    async def _execs():
+    async def _execs(day):
+        assert day == "2026-07-29"
         order.append("reconcile")
-        return {}
+        return True
 
     def _build(day=None):
         order.append("build")
@@ -145,7 +146,7 @@ async def test_일지가_집계_전에_대사를_돌린다(env, monkeypatch, tmp
                 "positions": [], "carried": [], "summary": {}}
 
     from app.kiwoom import client as client_mod
-    monkeypatch.setattr(client_mod.client, "executions", _execs)
+    monkeypatch.setattr(journal, "_reconcile_first", _execs)
     monkeypatch.setattr(journal, "build", _build)
 
     await journal.generate("2026-07-29", with_summary=False)
@@ -157,7 +158,7 @@ async def test_대사_실패해도_일지는_만들되_사실에_남긴다(env, 
 
     monkeypatch.setattr(journal, "DB_PATH", tmp_path / "trading.db")
     monkeypatch.setattr(journal, "JOURNAL_DIR", tmp_path / "journal")
-    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "k")
+    monkeypatch.setattr(settings, "KIWOOM_APP_KEY", "")
 
     async def _execs():
         raise RuntimeError("조회 실패")
@@ -167,7 +168,7 @@ async def test_대사_실패해도_일지는_만들되_사실에_남긴다(env, 
 
     entry = await journal.generate("2026-07-29", with_summary=False)
     assert entry["date"] == "2026-07-29"
-    assert any("대사에 실패" in f for f in entry["facts"]), \
+    assert any("체결 재대사를 완료하지 못" in f for f in entry["facts"]), \
         "모델 비용 기준임을 조용히 넘기면 안 된다"
 
 
