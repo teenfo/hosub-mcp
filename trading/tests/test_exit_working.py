@@ -86,7 +86,7 @@ def _sold_slowly(filled: int):
 def test_재발주가_아직_체결_중이면_그_종목은_진행_중인_청산이다():
     _sold_slowly(402)
     assert _row("res1")["exit_qty"] == 402
-    assert orders.working_exit_symbols() == {SYM}
+    assert orders.working_exit_symbols(now=_noon()) == {SYM}
 
 
 def test_진행_중인_청산의_남은_주식은_잔량으로_다시_편입하지_않는다():
@@ -94,7 +94,7 @@ def test_진행_중인_청산의_남은_주식은_잔량으로_다시_편입하�
     execs = _sold_slowly(402)
     day = _today()
     fills.store_today(execs, day)
-    grace = orders.recent_exit_symbols() | orders.working_exit_symbols(day)
+    grace = orders.working_exit_symbols(day, now=_noon())
     got = fills.sync_from_fills(day, holdings={SYM: 272},
                                 holding_info={SYM: {"avg_price": 5_629, "name": "KCC건설"}},
                                 exit_grace=grace, exit_links=orders.exit_order_links(day))
@@ -131,7 +131,7 @@ def test_체결이_아직_안_보여도_마지막_주문이_접수면_진행_중
     ledger.close_position("res1", 5_629.0, "residual", ord_no="B1")
     _exit_order("o1", "res1", "B1")
     assert _row("res1")["exit_fill_confirmed"] == 0
-    assert orders.working_exit_symbols() == {SYM}
+    assert orders.working_exit_symbols(now=_noon()) == {SYM}
 
 
 def test_어제_닫힌_청산은_진행_중으로_보지_않는다():
