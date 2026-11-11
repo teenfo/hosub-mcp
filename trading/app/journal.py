@@ -448,8 +448,7 @@ def build(day: str | None = None) -> dict:
     from .trade import breakeven
 
     day = day or datetime.now(KST).date().isoformat()
-    closed = [p for p in ledger.positions(status="closed", limit=500)
-              if str(p.get("closed") or "")[:10] == day]
+    closed = ledger.positions_closed_on(day)
     carried = [p for p in ledger.positions(status="open", limit=200)
                if str(p.get("opened") or "")[:10] <= day]
     sigs = signals_on(day)
@@ -531,7 +530,38 @@ def build(day: str | None = None) -> dict:
     except Exception:  # noqa: BLE001
         log.warning("켈리 계산 실패", exc_info=True)
         entry["kelly"] = {}
+    # Keep execution legs for audit; attribute linked residual legs to their origin.
+    attributed = []
+    with ledger._conn() as conn:
+        for position in closed:
+            root = position
+            seen = {root["id"]}
+            while root.get("parent_position_id") and root["parent_position_id"] not in seen:
+                parent = conn.execute("SELECT * FROM positions WHERE id=?", (root["parent_position_id"],)).fetchone()
+                if parent is None:
+                    break
+                root = dict(parent)
+                seen.add(root["id"])
+            attributed.append(dict(position, rule=root.get("rule"), origin_position_id=root["id"]))
+    entry["by_origin_rule"] = _by(attributed, "rule")
+    entry["origin_positions"] = attributed
+    actual = [p for p in closed if p.get("costs", {}).get("cost_status") == "actual"]
+    entry["verified_by_origin_rule"] = _by([p for p in attributed if p.get("costs", {}).get("cost_status") == "actual"], "rule")
+    entry["accounting"] = {
+        "broker_net_krw": t["pnl_krw"] if broker is not None else None,
+        "ledger_net_krw": t["engine_pnl_krw"],
+        "unallocated_difference_krw": round(t["pnl_krw"]-t["engine_pnl_krw"], 2) if broker is not None else None,
+        "verified_cost_trades": len(actual), "unverified_cost_trades": len(closed)-len(actual),
+        "verified_gross_krw": round(sum(p["costs"]["gross_pnl_krw"] for p in actual), 2),
+        "verified_commission_krw": round(sum(p["costs"]["commission_krw"] for p in actual), 2),
+        "verified_tax_krw": round(sum(p["costs"]["tax_krw"] for p in actual), 2),
+        "verified_configured_cost_net_krw": round(sum(p["costs"]["configured_cost_net_krw"] for p in actual), 2),
+        "unlinked_residuals": sum(p.get("rule")=="residual" and not p.get("parent_position_id") for p in closed),
+    }
     entry["facts"] = facts(entry)
+    a = entry["accounting"]
+    entry["facts"].append(f"[회계 대조] 비용 검증 {len(actual)}/{len(closed)}건, 미확인 {a['unverified_cost_trades']}건. 계좌-원장 미배분 차액 {a['unallocated_difference_krw']}원. 차액 원인은 미확정이며 특정 기법에 배분하지 않음.")
+    entry["facts"].append(f"[비용 검증분만] 비용 전 {a['verified_gross_krw']}원, 수수료 {a['verified_commission_krw']}원, 세금 {a['verified_tax_krw']}원. 설정 비용 가정 손익 {a['verified_configured_cost_net_krw']}원은 비교용이며 실전 성과가 아님.")
     return entry
 
 
@@ -580,19 +610,20 @@ def cumulative(rows: list[dict]) -> dict:
     n = sum(r["trades"] for r in traded)
     if not n:
         return {"days": len(rows), "trading_days": 0, "trades": 0,
-                "pnl_krw": 0.0, "win_rate": 0.0, "expectancy_pct": 0.0,
-                "best_day": None, "worst_day": None}
+                "pnl_krw": round(sum(r["pnl_krw"] for r in rows), 0), "win_rate": 0.0, "expectancy_pct": 0.0,
+                "best_day": max(rows, key=lambda r:r["pnl_krw"])["date"] if rows else None,
+                "worst_day": min(rows, key=lambda r:r["pnl_krw"])["date"] if rows else None}
     wins = sum(r["win_rate"] / 100 * r["trades"] for r in traded)
     return {
         "days": len(rows),
         "trading_days": len(traded),
         "trades": n,
-        "pnl_krw": round(sum(r["pnl_krw"] for r in traded), 0),
+        "pnl_krw": round(sum(r["pnl_krw"] for r in rows), 0),
         "win_rate": round(wins / n * 100, 1),
         "expectancy_pct": round(
             sum(r["expectancy_pct"] * r["trades"] for r in traded) / n, 3),
-        "best_day": max(traded, key=lambda r: r["pnl_krw"])["date"],
-        "worst_day": min(traded, key=lambda r: r["pnl_krw"])["date"],
+        "best_day": max(rows, key=lambda r: r["pnl_krw"])["date"],
+        "worst_day": min(rows, key=lambda r: r["pnl_krw"])["date"],
     }
 
 
@@ -642,7 +673,7 @@ async def summarize(entry: dict) -> dict:
             "at": datetime.now(KST).isoformat(timespec="seconds")}
 
 
-async def _reconcile_first() -> bool:
+async def _reconcile_first(day: str | None = None) -> bool:
     """집계 전에 증권사 체결내역으로 실측가·실비용을 확정한다.
 
     원장의 진입·청산가는 WS 스냅샷과 이론가(손절선·목표가)에서 오고, 비용은 모델
@@ -659,6 +690,14 @@ async def _reconcile_first() -> bool:
     from .kiwoom.realized import parse_executions
     from .trade import ledger
 
+    day = day or datetime.now(KST).date().isoformat()
+    if day != datetime.now(KST).date().isoformat():
+        from .trade import fills
+        stored = fills.today_fills(day)
+        if not stored:
+            return False
+        await asyncio.to_thread(ledger.reconcile_executions, stored, day=day)
+        return True
     if not settings.KIWOOM_APP_KEY:
         return False
     try:
@@ -676,7 +715,7 @@ async def generate(day: str | None = None, with_summary: bool = True) -> dict:
     장이 끝나기 전에는 요약을 만들지 않는다(집계만 저장). final 이 False 인 저장본은
     '진행 중 스냅샷'이라, 조회할 때 저장본 대신 그때그때 다시 계산한다.
     """
-    reconciled = await _reconcile_first()
+    reconciled = await _reconcile_first(day)
     # 계좌 확정 실현손익 확보 — 동기화 루프는 당일만 저장하므로, 지난 날짜
     # 재생성은 여기서 받아 와야 계좌 기준 주값이 성립한다.
     try:
@@ -690,8 +729,7 @@ async def generate(day: str | None = None, with_summary: bool = True) -> dict:
     # 조용히 모델값을 쓰면 그게 실측인 줄 알고 읽게 된다.
     if not reconciled:
         entry["facts"].append(
-            "[주의] 증권사 체결내역 대사에 실패해 손익이 모델 비용 기준이다 — "
-            "실제 값과 다를 수 있다(2026-07-29 실측: 대사 전후 1,796원 차이).")
+            "[주의] 요청일 체결 재대사를 완료하지 못했습니다. 계좌 합계 출처와 건별 비용 검증 상태를 확인하세요. 저장된 확정 비용은 유지됩니다.")
     ok, why = summary_ready(entry["date"])
     entry["final"] = ok
     if with_summary and ok:
