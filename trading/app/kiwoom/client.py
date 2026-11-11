@@ -2,9 +2,11 @@
 
 TR ID / 경로는 공개 자료 기준 초안이다. 공식 문서(openapi.kiwoom.com 로그인)와
 대조하고 모의투자에서 호출 확인 후 사용할 것 (README 참고).
-초당 요청 제한을 지키기 위해 간단한 토큰버킷을 둔다.
+초당 요청 제한을 지키기 위해 간단한 토큰버킷을 둔다. 계좌 TR 은 한도가 따로라
+(초당 1회, 2026-11-12~) 경로 단위로 한 줄로 세운다(SerialGate).
 """
 import asyncio
+import contextlib
 import logging
 from collections import deque
 import time
@@ -54,6 +56,111 @@ PATH_SHORT = "/api/dostk/shsa"        # 공매도 — 다른 경로에서는 150
 
 KST = ZoneInfo("Asia/Seoul")
 log = logging.getLogger("trading.kiwoom")
+
+# 계좌 TR 최소 간격(초) — config `kiwoom.account_min_interval_sec` 의 코드 기본값.
+# 둘은 같은 값이어야 한다(test_account_gate 가 확인). 1.0 이 아니라 1.1 인 이유는
+# SerialGate 주석 참고 — 서버 쪽 시계·집계 창과의 오차 여유다.
+ACCOUNT_MIN_INTERVAL_SEC = 1.1
+
+
+class KiwoomRateLimited(RuntimeError):
+    """한도 초과가 HTTP 200 **본문**으로 왔다 — 빈 결과가 아니라 조회 실패다."""
+
+
+def _rate_limited_body(data) -> bool:
+    """키움 한도 초과 응답인가 — '허용된 요청 개수를 초과하였습니다[1700:...]'.
+
+    HTTP 429 로만 온다는 보장이 없다. 본문 오류로 오면 파서(parse_executions 등)는
+    return_code 만 보고 **빈 목록**을 돌려주고, 체결내역이 비면 원장 정렬이 오늘 연
+    포지션을 '체결내역에 없음'(유령)으로 회수할 수 있다(fills.sync_from_fills ①).
+    그래서 계좌 경로에서는 이 응답을 예외로 바꿔 호출부가 '모름'으로 다루게 한다.
+    """
+    if not isinstance(data, dict) or data.get("return_code") in (0, "0", None):
+        return False
+    msg = str(data.get("return_msg") or "")
+    return "허용된 요청" in msg or "1700:" in msg
+
+
+class SerialGate:
+    """한 경로의 호출을 한 줄로 세우고, 앞 호출이 **끝난 뒤** 최소 간격을 둔다.
+
+    계좌 TR(PATH_ACCOUNT) 전용이다. 키움 공지(2026-11-09) 「국내주식 계좌TR 19개
+    유량제어 변경」: **2026-11-12(목) 18시부터 초당 5회 → 초당 1회**, 넘기면 조회가
+    제한된다. 전역 RateLimiter(4 rps)만으로는 계좌 TR 끼리 1초 안에 몰린다 —
+    `_fills_sync`(60초 주기)가 체결내역 → 잔고(30초 캐시) → 실현손익을 연달아 부르고,
+    대시보드 계좌 화면·엔진 자산 동기화(5분)·청산 잔량 상한 조회가 겹친다.
+
+    간격은 **보낸 시각이 아니라 응답을 받은 시각**에서 잰다 — 앞 요청이 망에서 늦게
+    도착하면 보낸 시각 기준 간격이 서버에서는 1초 안으로 줄 수 있다. 응답을 받았다면
+    앞 요청은 이미 서버에 닿았다.
+
+    대상 19개 목록(공지 이미지)은 판독하지 못했다. 그래서 TR 이 아니라 **경로**로
+    묶는다 — 우리가 부르는 계좌 TR 4종(kt00018·ka10074·ka10073·ka10076)이 모두 이
+    경로라, 목록이 TR 별 한도든 19개 합산이든 넘지 않는다. 주문(PATH_ORDER)은 묶지
+    않는다 — 청산 발주가 계좌 조회 뒤에 줄 서면 안 된다.
+
+    한도 초과(429)를 받으면 **이 경로만** 간격을 두 배로 둔다. 전역 감속은 하지 않는다
+    — 계좌 한도는 분봉·시세 호출과 무관한데, 전역을 절반으로 낮추면 매매 데스크까지
+    2분간 느려진다.
+    """
+
+    PENALTY_SEC = 120     # 한도 초과 뒤 간격을 두 배로 두는 시간 — RateLimiter 회복 주기와 같다
+
+    def __init__(self, min_interval: float | None = None) -> None:
+        self._fixed = min_interval        # None 이면 호출 시점에 config 를 읽는다
+        self._lock = asyncio.Lock()
+        self._done = 0.0                  # 마지막 호출이 끝난 시각(monotonic)
+        self.penalized_until = 0.0
+        self.penalties = 0
+        self.waited_sec = 0.0             # 누적 대기 — 계좌 조회가 눌린 정도(관측치)
+        self.calls = 0
+
+    def base_interval(self) -> float:
+        if self._fixed is not None:
+            return max(0.0, float(self._fixed))
+        cfg = settings.CONFIG.get("kiwoom") or {}
+        try:
+            return max(0.0, float(cfg.get("account_min_interval_sec",
+                                          ACCOUNT_MIN_INTERVAL_SEC)))
+        except (TypeError, ValueError):
+            return ACCOUNT_MIN_INTERVAL_SEC
+
+    @property
+    def interval(self) -> float:
+        base = self.base_interval()
+        if time.monotonic() < self.penalized_until:
+            return base * 2
+        return base
+
+    def penalize(self) -> None:
+        """한도 초과 수신 — 이 경로만 PENALTY_SEC 동안 간격을 두 배로."""
+        self.penalized_until = time.monotonic() + self.PENALTY_SEC
+        self.penalties += 1
+
+    @contextlib.asynccontextmanager
+    async def hold(self):
+        """앞 호출이 끝나고 interval 이 지난 뒤 들여보낸다. 끝난 시각은 실패해도 남긴다."""
+        if self.base_interval() <= 0:     # 0 이면 끔 — 종전 동작(전역 리미터만)
+            yield
+            return
+        async with self._lock:
+            pause = self.interval - (time.monotonic() - self._done)
+            if pause > 0:
+                self.waited_sec += pause
+                await asyncio.sleep(pause)
+            self.calls += 1
+            try:
+                yield
+            finally:
+                self._done = time.monotonic()
+
+    def snapshot(self) -> dict:
+        return {
+            "interval_sec": round(self.interval, 2),
+            "calls": self.calls,
+            "wait_sec": round(self.waited_sec, 1),
+            "penalties": self.penalties,
+        }
 
 
 class RateLimiter:
@@ -170,6 +277,11 @@ class ApiUsage:
         while self._errors and self._errors[0][0] < cutoff:
             self._errors.popleft()
 
+    def note_rate_limited(self) -> None:
+        """HTTP 200 본문으로 온 한도 초과 — 호출은 record 가 이미 셌으니 오류만 더한다."""
+        self._errors.append((time.time(), 429))
+        self.rate_limited += 1
+
     def snapshot(self, limiter: "RateLimiter | None" = None) -> dict:
         now = time.time()
         last_min = sum(1 for t in self._calls if t >= now - 60)
@@ -200,17 +312,27 @@ class KiwoomClient:
         self._http = httpx.AsyncClient(timeout=15)
         self._limiter = RateLimiter()
         self.usage = ApiUsage()
+        # 경로별 별도 한도 — 계좌 TR 초당 1회(2026-11-12 18시~, SerialGate 참고)
+        self._gates: dict[str, SerialGate] = {PATH_ACCOUNT: SerialGate()}
 
     def usage_snapshot(self) -> dict:
-        return self.usage.snapshot(self._limiter)
+        return self.usage.snapshot(self._limiter) | {
+            "account_gate": self._gates[PATH_ACCOUNT].snapshot()}
 
-    def _record(self, status: int) -> None:
-        """계측 + 429 자동 감속."""
+    def _record(self, status: int, path: str = "") -> None:
+        """계측 + 429 자동 감속. 따로 한도가 있는 경로의 429 는 그 경로만 늦춘다."""
         self.usage.record(status)
-        if status == 429:
-            self._limiter.penalize()
-            log.warning("키움 API 한도 초과(429) — 자동 감속: %.2f rps",
-                        self._limiter.effective_rps)
+        if status != 429:
+            return
+        gate = self._gates.get(path)
+        if gate is not None:
+            gate.penalize()
+            log.warning("키움 계좌 TR 한도 초과(429) %s — 계좌 조회 간격 %.1f초로(%d초간)",
+                        path, gate.interval, gate.PENALTY_SEC)
+            return
+        self._limiter.penalize()
+        log.warning("키움 API 한도 초과(429) — 자동 감속: %.2f rps",
+                    self._limiter.effective_rps)
 
     async def _request(self, path: str, tr_id: str, body: dict,
                        cont: str = "N", next_key: str = "",
@@ -219,7 +341,23 @@ class KiwoomClient:
 
         키움은 이어질 데이터가 있으면 응답 헤더에 cont-yn=Y 와 next-key 를 준다.
         cont-yn 이 Y 가 아니면 빈 문자열을 돌려 호출부가 루프를 끝내게 한다.
+        따로 한도가 있는 경로(계좌 TR)는 SerialGate 로 한 줄로 세운 뒤 보낸다.
         """
+        gate = self._gates.get(path)
+        if gate is None:
+            return await self._send(path, tr_id, body, cont, next_key, priority)
+        async with gate.hold():
+            data, nxt = await self._send(path, tr_id, body, cont, next_key, priority)
+        if _rate_limited_body(data):
+            self.usage.note_rate_limited()
+            gate.penalize()
+            log.warning("키움 계좌 TR 한도 초과(본문) %s %s: %s — 조회 실패로 처리",
+                        path, tr_id, data.get("return_msg"))
+            raise KiwoomRateLimited(f"{tr_id}: {data.get('return_msg')}")
+        return data, nxt
+
+    async def _send(self, path: str, tr_id: str, body: dict, cont: str,
+                    next_key: str, priority: bool) -> tuple[dict, str]:
         await self._limiter.wait(priority)
         token = await token_manager.get()
         headers = {
@@ -237,7 +375,7 @@ class KiwoomClient:
         except httpx.HTTPError:
             self._record(599)               # 네트워크 실패도 부하 지표에 포함
             raise
-        self._record(resp.status_code)
+        self._record(resp.status_code, path)
         resp.raise_for_status()
         nxt = ""
         if str(resp.headers.get("cont-yn", "N")).upper() == "Y":

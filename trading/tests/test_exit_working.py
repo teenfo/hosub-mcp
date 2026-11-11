@@ -33,7 +33,12 @@ def _today() -> str:
 
 def _noon() -> datetime:
     """그날(KST) 정오 — 주문 시각의 기준. '지금 − N분' 은 자정 직후에 전날로 넘어가
-    그날 주문 표에서 빠진다(실측 2026-11-06 00:4x 에 테스트가 깨졌다)."""
+    그날 주문 표에서 빠진다(실측 2026-11-06 00:4x 에 테스트가 깨졌다).
+
+    정오 기준 주문을 진행 중 판정(working_exit_symbols)에 넣을 때는 **now=_noon() 도
+    함께 넘긴다** — 60분 상한을 벽시계로 재면 12:50 이후 실행에서 '진행 중' 단언이
+    깨지고(실측 2026-11-11 17:49), set() 을 기대하는 단언은 상한 때문에 저절로 통과해
+    아무것도 재지 않는다."""
     return datetime.now(KST).replace(hour=12, minute=0, second=0, microsecond=0).astimezone(UTC)
 
 
@@ -86,7 +91,7 @@ def _sold_slowly(filled: int):
 def test_재발주가_아직_체결_중이면_그_종목은_진행_중인_청산이다():
     _sold_slowly(402)
     assert _row("res1")["exit_qty"] == 402
-    assert orders.working_exit_symbols() == {SYM}
+    assert orders.working_exit_symbols(now=_noon()) == {SYM}
 
 
 def test_진행_중인_청산의_남은_주식은_잔량으로_다시_편입하지_않는다():
@@ -94,7 +99,7 @@ def test_진행_중인_청산의_남은_주식은_잔량으로_다시_편입하�
     execs = _sold_slowly(402)
     day = _today()
     fills.store_today(execs, day)
-    grace = orders.recent_exit_symbols() | orders.working_exit_symbols(day)
+    grace = orders.recent_exit_symbols() | orders.working_exit_symbols(day, now=_noon())
     got = fills.sync_from_fills(day, holdings={SYM: 272},
                                 holding_info={SYM: {"avg_price": 5_629, "name": "KCC건설"}},
                                 exit_grace=grace, exit_links=orders.exit_order_links(day))
@@ -111,7 +116,7 @@ def test_매도가_끝나면_원_포지션이_전량을_가져간다():
     ledger.reconcile_executions(execs, exit_links=links, day=day)
     r = _row("res1")
     assert r["exit_qty"] is None and r["exit"] == 5_279.0 and r["exit_fill_confirmed"] == 1
-    assert orders.working_exit_symbols(day) == set()
+    assert orders.working_exit_symbols(day, now=_noon()) == set()
     got = fills.sync_from_fills(day, holdings={SYM: 0}, exit_grace=set(), exit_links=links)
     assert got["missed_exit"] == 0 and got["residual"] == 0
 
@@ -123,7 +128,7 @@ def test_마지막_청산_주문이_거부면_진행_중이_아니다():
     t0 = _noon() - timedelta(minutes=10)
     _exit_order("o1", "res1", "B1", created=t0)
     _exit_order("o2", "res1", "C1", status="rejected", created=t0 + timedelta(seconds=30))
-    assert orders.working_exit_symbols() == set()
+    assert orders.working_exit_symbols(now=_noon()) == set()
 
 
 def test_체결이_아직_안_보여도_마지막_주문이_접수면_진행_중이다():
@@ -139,7 +144,7 @@ def test_어제_닫힌_청산은_진행_중으로_보지_않는다():
     _sold_slowly(44)
     with ledger._conn() as conn:
         conn.execute("UPDATE positions SET closed='2026-11-02T15:20:00+09:00' WHERE id='res1'")
-    assert orders.working_exit_symbols() == set()
+    assert orders.working_exit_symbols(now=_noon()) == set()
 
 
 def test_매도_주문이_다_체결됐으면_포지션보다_덜_팔았어도_진행_중이_아니다():
@@ -155,10 +160,10 @@ def test_매도_주문이_다_체결됐으면_포지션보다_덜_팔았어도_�
     fills.store_today(execs, day)
     ledger.reconcile_executions(execs, exit_links=orders.exit_order_links(day), day=day)
     assert _row("res1")["exit_qty"] == 173
-    assert orders.working_exit_symbols(day) == set()
+    assert orders.working_exit_symbols(day, now=_noon()) == set()
     got = fills.sync_from_fills(day, holdings={SYM: 311},
                                 holding_info={SYM: {"avg_price": 6_266, "name": "아이크래프트"}},
-                                exit_grace=orders.working_exit_symbols(day),
+                                exit_grace=orders.working_exit_symbols(day, now=_noon()),
                                 exit_links=orders.exit_order_links(day))
     assert got["residual"] == 1
     adopted = [p for p in ledger.positions(status="open") if p["symbol"] == SYM]
