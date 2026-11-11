@@ -125,7 +125,7 @@ def parse_executions(raw: dict) -> list[dict]:
             "code": str(d.get("stk_cd", "")).lstrip("A")[:6],
             "name": d.get("stk_nm", ""),
             "side": _side(d.get("io_tp_nm")),
-            "price": _num(d.get("cntr_pric")),
+            "price": _num(d.get("cntr_pric"), float),
             "qty": qty,
             "commission": _num(d.get("tdy_trde_cmsn")),
             "tax": _num(d.get("tdy_trde_tax")),

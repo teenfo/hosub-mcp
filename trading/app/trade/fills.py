@@ -467,6 +467,7 @@ def adopt_residuals(holdings: dict[str, int], now: datetime,
                      info.get("name") or sym, RESIDUAL_RULE, "long", extra,
                      avg, avg, None, None, "open", None, 1, 0.0,
                      settings.KIWOOM_ENV))
+                ledger.link_residual_parent(conn, pid)
                 out["adopted"] += 1
                 log.warning("원장 없는 보유 편입(residual): %s %s %d주 @ %.0f — "
                             "자동 청산 없음, 마감 정리 대상", info.get("name") or sym,

@@ -29,13 +29,34 @@ export function renderJournalDay(target, d) {
           title: "장 마감 전이라 그때그때 다시 계산한 값입니다" }, "진행 중"),
   ]));
   target.appendChild(el("div", { class: "row g-2 mb-3" }, [
-    metric("청산", `${t.trades || 0}건`),
+    metric("청산 기록", `${t.trades || 0}건`),
     metric("승 / 패", `${t.wins || 0} / ${t.losses || 0}`),
-    metric("승률", t.trades ? `${t.win_rate}%` : "—"),
-    metric("실현손익", t.trades ? won(t.pnl_krw) : "—", plCls(t.pnl_krw)),
-    metric("건당 기대값", t.trades ? pct(t.expectancy_pct) : "—"),
+    metric("승률(원장)", t.trades ? `${t.win_rate}%` : "—"),
+    metric("실현손익", (t.trades || t.pnl_source === "broker") ? won(t.pnl_krw) : "—", plCls(t.pnl_krw)),
+    metric("건당 기대값(원장)", t.trades ? pct(t.expectancy_pct) : "—"),
     metric("신호 / 미발주", `${sig.total || 0} / ${sig.blocked || 0}`),
   ]));
+
+  const a = d.accounting;
+  if (a) {
+    target.appendChild(el("div", { class: "card card-body mb-3 small" }, [
+      el("strong", {}, "원장·거래비용 대조"),
+      el("div", {}, `계좌 순손익 ${a.broker_net_krw == null ? "미확보" : won(a.broker_net_krw)} · 원장 합계 ${won(a.ledger_net_krw)} · 미배분 차액 ${a.unallocated_difference_krw == null ? "미확인" : won(a.unallocated_difference_krw)}`),
+      el("div", {}, `비용 검증 ${a.verified_cost_trades}건 / 미확인 ${a.unverified_cost_trades}건 · 원거래 미연결 잔량 ${a.unlinked_residuals}건`),
+      el("div", {}, `검증분 비용 전 ${won(a.verified_gross_krw)} · 수수료 ${won(a.verified_commission_krw)} · 세금 ${won(a.verified_tax_krw)}`),
+      el("div", { class: "text-secondary" }, `설정 비용 가정 손익 ${won(a.verified_configured_cost_net_krw)} — 검증분만 비교한 가정치이며 실전 성과가 아닙니다. 계좌 순손익에서 비용을 다시 차감하지 않습니다.`),
+    ]));
+  }
+
+  const evidence = a?.evidence;
+  if (evidence?.status === "available") {
+    target.appendChild(el("div", { class: "alert alert-info small mb-3" }, [
+      el("div", {}, `증권사 일별 수수료 ${won(evidence.broker_commission_krw)} · 저장 체결 수수료 ${won(evidence.stored_fill_commission_krw)} · 차이 ${won(evidence.commission_difference_krw)}`),
+      el("div", {}, evidence.comparison_scope === "same_day_flat"
+        ? `당일 전량 청산 확인: 비용 전 손익 산정 차이 ${won(evidence.gross_basis_difference_krw)}, 실현 수수료 차이 ${won(evidence.realized_commission_difference_krw)}, 세금 차이 ${won(evidence.realized_tax_difference_krw)}. 세부 명세 추가 대조가 필요합니다.`
+        : "보유 이월 또는 미확인 거래가 있어 비용 전 손익 차이를 단정하지 않습니다."),
+    ]));
+  }
 
   // LLM 요약
   const sum = d.summary || {};
@@ -70,7 +91,7 @@ export function renderJournalDay(target, d) {
   }
 
   // 청산 내역
-  const ps = d.positions || [];
+  const ps = d.origin_positions || d.positions || [];
   if (ps.length) {
     const tb = el("tbody");
     for (const p of ps) {
@@ -78,8 +99,8 @@ export function renderJournalDay(target, d) {
         el("td", { class: "small text-secondary text-nowrap" },
           String(p.opened || "").slice(11, 16) + "→" + String(p.closed || "").slice(11, 16)),
         el("td", { class: "text-nowrap", html: stockHTML(p.symbol, p.name) }),
-        el("td", {}, p.rule),
-        el("td", { class: "text-end" }, fmt(p.qty)),
+        el("td", { title: p.parent_position_id ? `원거래: ${p.parent_position_id}` : "" }, p.rule),
+        el("td", { class: "text-end" }, fmt(p.exit_qty ?? p.qty)),
         el("td", { class: "text-end small",
           title: p.exit_fill_confirmed
             ? "실제 체결가" + (p.model_exit && p.model_exit !== p.exit
@@ -102,7 +123,7 @@ export function renderJournalDay(target, d) {
             REASON_KO[p.exit_reason] || p.exit_reason || ""),
         ]),
         el("td", { class: "text-end fw-semibold " + plCls(p.pnl_pct) },
-          `${pct(Number(p.pnl_pct || 0).toFixed(2))} (${won(p.pnl_krw)})`),
+          `${pct(Number(p.pnl_pct || 0).toFixed(2))} (${won(p.pnl_krw)})${p.costs?.cost_status === "unverified" ? " · 비용 미확인" : ""}`),
       ]));
     }
     const tbl = el("table", { class: "table table-sm small mb-0" });
@@ -220,9 +241,9 @@ export default {
         trendBody.appendChild(el("div", { class: "row g-2 mb-3" }, [
           metric("매매일", `${c.trading_days}일 / ${c.days}일`),
           metric("거래", `${c.trades}건`),
-          metric("승률", `${c.win_rate}%`),
+          metric("승률(원장)", `${c.win_rate}%`),
           metric("누적 손익", won(c.pnl_krw), plCls(c.pnl_krw)),
-          metric("건당 기대값", pct(c.expectancy_pct)),
+          metric("건당 기대값(원장)", pct(c.expectancy_pct)),
           metric("최고 / 최저일", `${(c.best_day || "").slice(5)} / ${(c.worst_day || "").slice(5)}`),
         ]));
       }
