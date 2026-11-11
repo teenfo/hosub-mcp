@@ -332,7 +332,7 @@ def reconcile_executions(execs: list[dict],
                 conn.execute(
                     "UPDATE positions SET entry=?, qty=?, slippage_pct=?, "
                     "entry_fee_krw=?, fill_confirmed=1 WHERE id=?",
-                    (round(price, 2), a["qty"],
+                    (price, a["qty"],
                      round((price - model) / model * 100, 4) if model else 0.0,
                      a["fee"], row["id"]),
                 )
@@ -378,7 +378,7 @@ def reconcile_executions(execs: list[dict],
             conn.execute(
                 "UPDATE positions SET exit=?, exit_fee_krw=?, tax_krw=?, "
                 "exit_fill_confirmed=1, exit_qty=? WHERE id=?",
-                (round(price, 2), g["fee"], g["tax"], exit_qty, ex["id"]),
+                (price, g["fee"], g["tax"], exit_qty, ex["id"]),
             )
             exits += 1
     if entries or exits:
